@@ -1,0 +1,445 @@
+"""Lexical candidate ranking."""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass
+from functools import lru_cache
+from heapq import nsmallest
+
+from rapidfuzz import fuzz
+
+from .bm25 import BM25Index
+from .candidate import Candidate
+from .const import (
+    BM25_WEIGHT,
+    CHAR_NGRAM_WEIGHT,
+    DEFAULT_MAX_CANDIDATES,
+    DEFAULT_MIN_CONFIDENCE,
+    DEFAULT_MIN_MARGIN,
+    DEFAULT_RAPIDFUZZ_PREFILTER_CANDIDATES,
+    INTENT_ACTION_WEIGHT,
+    POSITIONAL_SIMILARITY_PARTIAL_CREDIT,
+    POSITIONAL_SIMILARITY_THRESHOLD,
+    RAPIDFUZZ_WEIGHT,
+)
+from .normalization import char_ngrams, char_ngrams_normalized, normalize_text
+
+
+@dataclass(frozen=True, slots=True)
+class ScoreBreakdown:
+    """Normalized score components for a candidate."""
+
+    rapidfuzz_score: float
+    char_ngram_score: float
+    bm25_score: float
+    intent_score: float
+    final_score: float
+
+
+@dataclass(frozen=True, slots=True)
+class RankedCandidate:
+    """Candidate paired with ranking scores."""
+
+    candidate: Candidate
+    scores: ScoreBreakdown
+
+
+@dataclass(frozen=True, slots=True)
+class CharNGramIndex:
+    """Exact character n-gram scorer backed by posting lists."""
+
+    gram_counts: tuple[int, ...]
+    postings: dict[str, tuple[int, ...]]
+
+    @classmethod
+    def from_grams(cls, candidate_grams: Sequence[frozenset[str]]) -> CharNGramIndex:
+        """Build a character n-gram posting index from candidate gram sets."""
+        postings: dict[str, list[int]] = {}
+        for index, grams in enumerate(candidate_grams):
+            for gram in grams:
+                postings.setdefault(gram, []).append(index)
+        return cls(
+            gram_counts=tuple(len(grams) for grams in candidate_grams),
+            postings={gram: tuple(indexes) for gram, indexes in postings.items()},
+        )
+
+    def score(self, query_grams: frozenset[str]) -> tuple[float, ...]:
+        """Return exact normalized Jaccard scores for all indexed candidates."""
+        if not query_grams:
+            return tuple(0.0 for _ in self.gram_counts)
+        intersections = [0] * len(self.gram_counts)
+        for gram in query_grams:
+            for index in self.postings.get(gram, ()):
+                intersections[index] += 1
+        query_count = len(query_grams)
+        scores = [0.0] * len(self.gram_counts)
+        for index, intersection_size in enumerate(intersections):
+            if intersection_size == 0:
+                continue
+            union_size = query_count + self.gram_counts[index] - intersection_size
+            scores[index] = intersection_size / union_size if union_size else 0.0
+        return tuple(scores)
+
+
+def rapidfuzz_similarity(query: str, candidate: str) -> float:
+    """Return the strongest RapidFuzz similarity score normalized to 0.0 through 1.0."""
+    return rapidfuzz_similarity_normalized(normalize_text(query), normalize_text(candidate))
+
+
+def rapidfuzz_similarity_normalized(query: str, candidate: str) -> float:
+    """Return a RapidFuzz score that penalizes unmatched extra tokens."""
+    if not query or not candidate:
+        return 0.0
+    wratio = float(fuzz.WRatio(query, candidate))
+    token_sort = float(fuzz.token_sort_ratio(query, candidate))
+    token_set = float(fuzz.token_set_ratio(query, candidate))
+    token_set *= token_count_ratio(query, candidate)
+    return (wratio + token_sort + token_set) / 300.0
+
+
+def token_count_ratio(query: str, candidate: str) -> float:
+    """Return a length ratio that penalizes unmatched extra tokens."""
+    query_count = len(query.split())
+    candidate_count = len(candidate.split())
+    if query_count == 0 or candidate_count == 0:
+        return 0.0
+    return min(query_count, candidate_count) / max(query_count, candidate_count)
+
+
+def char_ngram_similarity(query: str, candidate: str, size: int = 3) -> float:
+    """Return character n-gram Jaccard similarity normalized to 0.0 through 1.0."""
+    return char_ngram_similarity_from_grams(
+        char_ngrams(query, size=size), char_ngrams(candidate, size=size)
+    )
+
+
+def char_ngram_similarity_from_grams(
+    query_grams: frozenset[str],
+    candidate_grams: frozenset[str],
+) -> float:
+    """Return character n-gram Jaccard similarity from precomputed grams."""
+    if not query_grams or not candidate_grams:
+        return 0.0
+    intersection_size = len(query_grams & candidate_grams)
+    union_size = len(query_grams) + len(candidate_grams) - intersection_size
+    return intersection_size / union_size if union_size else 0.0
+
+
+def lexical_score(
+    rapidfuzz_score: float,
+    char_ngram_score: float,
+    bm25_score: float,
+    intent_score: float = 1.0,
+) -> float:
+    """Combine normalized lexical and built-in intent action score components."""
+    return (
+        RAPIDFUZZ_WEIGHT * rapidfuzz_score
+        + CHAR_NGRAM_WEIGHT * char_ngram_score
+        + BM25_WEIGHT * bm25_score
+        + INTENT_ACTION_WEIGHT * intent_score
+    )
+
+
+def intent_action_score(query: str, candidate: Candidate) -> float:
+    """Return how well query words cover localized template literal words."""
+    literal_text = candidate.metadata.get("literal_text")
+    if not literal_text:
+        return 1.0
+    return _intent_action_score_from_literal_text(
+        literal_text,
+        frozenset(normalize_text(query).split()),
+        frozenset(candidate.normalized_text.split()),
+    )
+
+
+def _positional_similarity(a: str, b: str) -> float:
+    """Character-level positional similarity — cheap edit-distance proxy."""
+    max_len = max(len(a), len(b))
+    if max_len == 0:
+        return 0.0
+    return sum(1 for c1, c2 in zip(a, b, strict=False) if c1 == c2) / max_len
+
+
+def _query_token_coverage(
+    query_tokens: frozenset[str],
+    candidate_tokens: frozenset[str],
+) -> float:
+    """Return the fraction of query tokens covered by candidate tokens.
+
+    The squaring amplifies the penalty for unmatched query tokens so
+    that entity-only candidates do not outrank action-bearing
+    candidates when the query contains (possibly misspelled) action
+    words.
+    """
+    if not query_tokens:
+        return 1.0
+    matched = sum(1 for token in query_tokens if token in candidate_tokens)
+    coverage = matched / len(query_tokens)
+
+    return coverage**2
+
+
+def _exact_intent_score(
+    literal_text: str,
+    query_tokens: frozenset[str],
+) -> float:
+    """Return how well query tokens cover localized template literal words."""
+    variants = _literal_token_variants(literal_text)
+    if not variants:
+        return 1.0
+    max_score = 0.0
+    for literal_tokens in variants:
+        matched = sum(1 for token in literal_tokens if token in query_tokens)
+        score = matched / len(literal_tokens)
+        if score > max_score:
+            max_score = score
+    return max_score
+
+
+def _build_positional_lookup(
+    literal_tokens_set: frozenset[str],
+    query_tokens: frozenset[str],
+) -> dict[str, frozenset[str]]:
+    """Precompute which query tokens each literal token positionally matches.
+
+    Building this lookup once per query avoids O(|literal|*|query|) per
+    candidate; per-candidate scoring then reduces to cheap dict lookups
+    and set subtractions.
+    """
+    lookup: dict[str, frozenset[str]] = {}
+    for literal_token in literal_tokens_set:
+        if literal_token in query_tokens:
+            continue
+        matched: set[str] = set()
+        for qtok in query_tokens:
+            sim = _positional_similarity(literal_token, qtok)
+            if sim >= POSITIONAL_SIMILARITY_THRESHOLD:
+                matched.add(qtok)
+                if sim >= 0.99:
+                    break
+        if matched:
+            lookup[literal_token] = frozenset(matched)
+    return lookup
+
+
+def _positional_intent_score_from_lookup(
+    literal_text: str,
+    query_tokens: frozenset[str],
+    positional_lookup: dict[str, frozenset[str]],
+    candidate_entity: frozenset[str] | None = None,
+) -> float:
+    """Entity-aware positional intent score using a precomputed lookup table.
+
+    ``positional_lookup`` maps each literal token → query tokens that
+    positionally match it.  When ``candidate_entity`` is provided those
+    tokens (entity slots belonging to the candidate) are excluded from
+    the search space, preventing e.g. ``tắt`` (turn off) from
+    accidentally matching ``tắm`` (bath) in a ``bật quạt phòng tắm`` query.
+    """
+    variants = _literal_token_variants(literal_text)
+    if not variants:
+        return 1.0
+    if candidate_entity is not None and not query_tokens - candidate_entity:
+        return _exact_intent_score(literal_text, query_tokens)
+    best_score = 0.0
+    for literal_tokens in variants:
+        matched_weight = 0.0
+        for token in literal_tokens:
+            if token in query_tokens:
+                matched_weight += 1.0
+                continue
+            matching = positional_lookup.get(token)
+            if matching is not None and (
+                candidate_entity is None or not matching.issubset(candidate_entity)
+            ):
+                matched_weight += POSITIONAL_SIMILARITY_PARTIAL_CREDIT
+        score = matched_weight / len(literal_tokens)
+        if score > best_score:
+            best_score = score
+    return best_score
+
+
+def _intent_action_score_from_literal_text(
+    literal_text: str,
+    query_tokens: frozenset[str],
+    candidate_tokens: frozenset[str] | None = None,
+) -> float:
+    """Return how well query tokens cover localized template literal words.
+
+    When ``candidate_tokens`` are provided the search space is filtered to
+    exclude candidate entity tokens, preventing e.g. ``tắt`` (turn off)
+    from accidentally matching ``tắm`` (bath) inside a correctly-spelled
+    query like ``bật quạt phòng tắm``.
+    """
+    exact = _exact_intent_score(literal_text, query_tokens)
+    if exact >= 1.0:
+        return exact
+    if candidate_tokens is not None:
+        search_tokens = query_tokens - candidate_tokens
+        if not search_tokens:
+            return exact
+    else:
+        search_tokens = query_tokens
+    all_literal: set[str] = set()
+    for variant in _literal_token_variants(literal_text):
+        all_literal.update(variant)
+    if not all_literal:
+        return exact
+    lookup = _build_positional_lookup(frozenset(all_literal), search_tokens)
+    return _positional_intent_score_from_lookup(
+        literal_text, search_tokens, lookup, candidate_tokens
+    )
+
+
+@lru_cache(maxsize=8192)
+def _literal_token_variants(literal_text: str) -> tuple[tuple[str, ...], ...]:
+    """Return normalized literal token variants for intent action scoring."""
+    variants = []
+    for variant in literal_text.split("|"):
+        if not variant.strip():
+            continue
+        literal_tokens = tuple(dict.fromkeys(normalize_text(variant).split()))
+        if literal_tokens:
+            variants.append(literal_tokens)
+    return tuple(variants)
+
+
+def rank_candidates(
+    query: str,
+    candidates: Sequence[Candidate],
+    max_candidates: int = DEFAULT_MAX_CANDIDATES,
+    *,
+    bm25_index: BM25Index | None = None,
+    candidate_char_grams: Sequence[frozenset[str]] | None = None,
+    candidate_char_index: CharNGramIndex | None = None,
+    positional_literal_tokens: frozenset[str] | None = None,
+    rapidfuzz_prefilter_candidates: int = DEFAULT_RAPIDFUZZ_PREFILTER_CANDIDATES,
+) -> tuple[RankedCandidate, ...]:
+    """Rank candidates for a query using lexical scoring."""
+    if max_candidates < 1:
+        raise ValueError("max_candidates must be positive")
+    if rapidfuzz_prefilter_candidates < max_candidates:
+        raise ValueError("rapidfuzz_prefilter_candidates must be at least max_candidates")
+    if not candidates:
+        return ()
+    if candidate_char_grams is not None and len(candidate_char_grams) != len(candidates):
+        raise ValueError("candidate_char_grams length must match candidates")
+    if candidate_char_index is not None and len(candidate_char_index.gram_counts) != len(
+        candidates
+    ):
+        raise ValueError("candidate_char_index length must match candidates")
+    query_normalized = normalize_text(query)
+    query_grams = char_ngrams(query_normalized)
+    query_tokens = frozenset(query_normalized.split())
+    intent_score_cache: dict[str, float] = {}
+    if positional_literal_tokens is None:
+        all_tokens: set[str] = set()
+        for candidate in candidates:
+            literal_text = candidate.metadata.get("literal_text")
+            if literal_text:
+                for variant in _literal_token_variants(literal_text):
+                    all_tokens.update(variant)
+        positional_literal_tokens = frozenset(all_tokens)
+    positional_lookup = (
+        _build_positional_lookup(positional_literal_tokens, query_tokens)
+        if positional_literal_tokens
+        else {}
+    )
+    if bm25_index is None:
+        bm25_index = BM25Index.from_normalized_texts(
+            tuple(candidate.normalized_text for candidate in candidates)
+        )
+    bm25_scores = bm25_index.score(query_normalized)
+    if candidate_char_index is not None:
+        char_scores = candidate_char_index.score(query_grams)
+    else:
+        char_scores = tuple(
+            char_ngram_similarity_from_grams(
+                query_grams,
+                char_ngrams_normalized(candidate.normalized_text)
+                if candidate_char_grams is None
+                else candidate_char_grams[index],
+            )
+            for index, candidate in enumerate(candidates)
+        )
+    prefiltered = (
+        (
+            -(CHAR_NGRAM_WEIGHT * char_score + BM25_WEIGHT * bm25_score),
+            index,
+            candidate,
+            bm25_score,
+            char_score,
+        )
+        for index, (candidate, bm25_score, char_score) in enumerate(
+            zip(candidates, bm25_scores, char_scores, strict=True)
+        )
+    )
+    prefilter_limit = min(len(candidates), rapidfuzz_prefilter_candidates)
+    strongest_prefiltered = nsmallest(prefilter_limit, prefiltered)
+    ranked: list[RankedCandidate] = []
+    for _, _, candidate, bm25_score, char_score in strongest_prefiltered:
+        rapidfuzz_score = rapidfuzz_similarity_normalized(
+            query_normalized, candidate.normalized_text
+        )
+        literal_text = candidate.metadata.get("literal_text")
+        if literal_text:
+            if literal_text not in intent_score_cache:
+                intent_score_cache[literal_text] = _exact_intent_score(literal_text, query_tokens)
+            exact = intent_score_cache[literal_text]
+            if exact >= 1.0:
+                candidate_tokens = frozenset(candidate.normalized_text.split())
+                intent_score = _query_token_coverage(query_tokens, candidate_tokens)
+            else:
+                candidate_entity = frozenset(candidate.normalized_text.split())
+                intent_score = _positional_intent_score_from_lookup(
+                    literal_text, query_tokens, positional_lookup, candidate_entity
+                )
+        else:
+            intent_score = 1.0
+        combined = lexical_score(rapidfuzz_score, char_score, bm25_score, intent_score)
+        scores = ScoreBreakdown(
+            rapidfuzz_score=rapidfuzz_score,
+            char_ngram_score=char_score,
+            bm25_score=bm25_score,
+            intent_score=intent_score,
+            final_score=combined,
+        )
+        ranked.append(RankedCandidate(candidate=candidate, scores=scores))
+    ranked.sort(key=lambda item: item.scores.final_score, reverse=True)
+    return tuple(ranked[:max_candidates])
+
+
+def accepted_candidate(
+    ranked: Sequence[RankedCandidate],
+    min_confidence: float = DEFAULT_MIN_CONFIDENCE,
+    min_margin: float = DEFAULT_MIN_MARGIN,
+) -> RankedCandidate | None:
+    """Return the accepted top candidate or None when confidence gates reject it."""
+    if not ranked:
+        return None
+    top_candidate = ranked[0]
+    if top_candidate.scores.final_score < min_confidence:
+        return None
+    competing_candidate = next(
+        (
+            item
+            for item in ranked[1:]
+            if item.candidate.intent_name != top_candidate.candidate.intent_name
+        ),
+        None,
+    )
+    if competing_candidate is None:
+        return top_candidate
+    if _is_exact_lexical_match(top_candidate) and not _is_exact_lexical_match(competing_candidate):
+        return top_candidate
+    margin = top_candidate.scores.final_score - competing_candidate.scores.final_score
+    if margin < min_margin:
+        return None
+    return top_candidate
+
+
+def _is_exact_lexical_match(ranked_candidate: RankedCandidate) -> bool:
+    """Return whether a ranked candidate exactly matches query text lexically."""
+    scores = ranked_candidate.scores
+    return scores.rapidfuzz_score == 1.0 and scores.char_ngram_score == 1.0

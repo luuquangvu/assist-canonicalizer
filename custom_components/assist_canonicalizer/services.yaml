@@ -1,0 +1,33 @@
+test_match:
+  fields:
+    text:
+      required: true
+      selector:
+        text:
+    language:
+      selector:
+        language:
+
+rebuild_index:
+  fields:
+    language:
+      selector:
+        language:
+
+clear_index:
+  fields:
+    language:
+      selector:
+        language:
+
+diagnostics:
+
+dump_candidates:
+  fields:
+    language:
+      selector:
+        language:
+    rebuild:
+      default: false
+      selector:
+        boolean:

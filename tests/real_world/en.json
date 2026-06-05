@@ -1,0 +1,1136 @@
+{
+  "test_cases": [
+    {
+      "query": "turn on living room light",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on living room light",
+      "category": "exact_match",
+      "expected_slots": {
+        "name": "living room light"
+      }
+    },
+    {
+      "query": "turn off bathroom fan",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off bathroom fan",
+      "category": "exact_match",
+      "expected_slots": {
+        "name": "bathroom fan"
+      }
+    },
+    {
+      "query": "turn off bedroom window",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off bedroom window",
+      "category": "exact_match",
+      "expected_slots": {
+        "name": "bedroom window"
+      }
+    },
+    {
+      "query": "turn on water heater",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on water heater",
+      "category": "exact_match",
+      "expected_slots": {
+        "name": "water heater"
+      }
+    },
+    {
+      "query": "turn off water heater",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off water heater",
+      "category": "exact_match",
+      "expected_slots": {
+        "name": "water heater"
+      }
+    },
+    {
+      "query": "bedroom window off",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "bedroom window off",
+      "category": "exact_match",
+      "expected_slots": {
+        "name": "bedroom window"
+      }
+    },
+    {
+      "query": "turn off living room light",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off living room light",
+      "category": "exact_match",
+      "expected_slots": {
+        "name": "living room light"
+      }
+    },
+    {
+      "query": "turn on bathroom fan",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on bathroom fan",
+      "category": "exact_match",
+      "expected_slots": {
+        "name": "bathroom fan"
+      }
+    },
+    {
+      "query": "trun on living room light",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on living room light",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "name": "living room light"
+      }
+    },
+    {
+      "query": "turn off bathrom fan",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off bathroom fan",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "name": "bathroom fan"
+      }
+    },
+    {
+      "query": "trun off bedroom window",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off bedroom window",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "name": "bedroom window"
+      }
+    },
+    {
+      "query": "turn of water heater",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off water heater",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "name": "water heater"
+      }
+    },
+    {
+      "query": "trun on water heater",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on water heater",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "name": "water heater"
+      }
+    },
+    {
+      "query": "clse bedroom window",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off bedroom window",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "name": "bedroom window"
+      }
+    },
+    {
+      "query": "turn off livng room light",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off living room light",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "name": "living room light"
+      }
+    },
+    {
+      "query": "trun on bathroom fan",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on bathroom fan",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "name": "bathroom fan"
+      }
+    },
+    {
+      "query": "trun on light",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on light",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "name": "light"
+      }
+    },
+    {
+      "query": "turn off fn",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off fan",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "name": "fan"
+      }
+    },
+    {
+      "query": "please turn on living room light",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on living room light",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "living room light"
+      }
+    },
+    {
+      "query": "could you turn off the bathroom fan",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off bathroom fan",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "bathroom fan"
+      }
+    },
+    {
+      "query": "open the bedroom window please",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "open bedroom window",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "bedroom window"
+      }
+    },
+    {
+      "query": "turn on the water heater right now",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on water heater",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "water heater"
+      }
+    },
+    {
+      "query": "please turn off water heater",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off water heater",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "water heater"
+      }
+    },
+    {
+      "query": "could you close bedroom window",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "close bedroom window",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "bedroom window"
+      }
+    },
+    {
+      "query": "turn off the living room light please",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off living room light",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "living room light"
+      }
+    },
+    {
+      "query": "please turn on the bathroom fan",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on bathroom fan",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "bathroom fan"
+      }
+    },
+    {
+      "query": "could you turn on the light",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on light",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "light"
+      }
+    },
+    {
+      "query": "please turn off the fan",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off fan",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "fan"
+      }
+    },
+    {
+      "query": "turn living room light",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on living room light",
+      "category": "missing_words",
+      "expected_slots": {
+        "name": "living room light"
+      }
+    },
+    {
+      "query": "turn off bathroom",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off bathroom fan",
+      "category": "missing_words",
+      "expected_slots": {
+        "name": "bathroom fan"
+      }
+    },
+    {
+      "query": "turn off bedroom",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off bedroom window",
+      "category": "missing_words",
+      "expected_slots": {
+        "name": "bedroom window"
+      }
+    },
+    {
+      "query": "turn off heater",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off water heater",
+      "category": "missing_words",
+      "expected_slots": {
+        "name": "water heater"
+      }
+    },
+    {
+      "query": "water heater make on",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on water heater",
+      "category": "missing_words",
+      "expected_slots": {
+        "name": "water heater"
+      }
+    },
+    {
+      "query": "bedroom window turn off",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off bedroom window",
+      "category": "missing_words",
+      "expected_slots": {
+        "name": "bedroom window"
+      }
+    },
+    {
+      "query": "turn off living light",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off living room light",
+      "category": "missing_words",
+      "expected_slots": {
+        "name": "living room light"
+      }
+    },
+    {
+      "query": "turn bathroom fan",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on bathroom fan",
+      "category": "missing_words",
+      "expected_slots": {
+        "name": "bathroom fan"
+      }
+    },
+    {
+      "query": "turn on living",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on living room light",
+      "category": "missing_words",
+      "expected_slots": {
+        "name": "living room light"
+      }
+    },
+    {
+      "query": "turn off bath",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off bathroom fan",
+      "category": "missing_words",
+      "expected_slots": {
+        "name": "bathroom fan"
+      }
+    },
+    {
+      "query": "plz trun on the livin room light",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on living room light",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "name": "living room light"
+      }
+    },
+    {
+      "query": "plz trun off the bedrom window",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off bedroom window",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "name": "bedroom window"
+      }
+    },
+    {
+      "query": "could u trun off bedroom windw",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off bedroom window",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "name": "bedroom window"
+      }
+    },
+    {
+      "query": "trun off the watr heatr plz",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off water heater",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "name": "water heater"
+      }
+    },
+    {
+      "query": "plz trun off livin room light",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off living room light",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "name": "living room light"
+      }
+    },
+    {
+      "query": "could u trun on bathroom fan",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on bathroom fan",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "name": "bathroom fan"
+      }
+    },
+    {
+      "query": "plz turn off the bedrom windw",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off bedroom window",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "name": "bedroom window"
+      }
+    },
+    {
+      "query": "could u trun on water heater",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on water heater",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "name": "water heater"
+      }
+    },
+    {
+      "query": "plz turn off the bathrm fn",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off bathroom fan",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "name": "bathroom fan"
+      }
+    },
+    {
+      "query": "plz turn on light",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on light",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "name": "light"
+      }
+    },
+    {
+      "query": "cancel all timers",
+      "language": "en",
+      "expected_intent": "HassCancelAllTimers",
+      "expected_canonical": "cancel all timers",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "cancel timer",
+      "language": "en",
+      "expected_intent": "HassCancelTimer",
+      "expected_canonical": "cancel timer",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "what's temp",
+      "language": "en",
+      "expected_intent": "HassClimateGetTemperature",
+      "expected_canonical": "what's temp",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "what's today's date",
+      "language": "en",
+      "expected_intent": "HassGetCurrentDate",
+      "expected_canonical": "what's today's date",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "what's the time",
+      "language": "en",
+      "expected_intent": "HassGetCurrentTime",
+      "expected_canonical": "what's the time",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "do you know living room light",
+      "language": "en",
+      "expected_intent": "HassGetState",
+      "expected_canonical": "do you know living room light",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "name": "living room light"
+      }
+    },
+    {
+      "query": "what's the weather",
+      "language": "en",
+      "expected_intent": "HassGetWeather",
+      "expected_canonical": "what's the weather",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "stop mowing",
+      "language": "en",
+      "expected_intent": "HassLawnMowerDock",
+      "expected_canonical": "stop mowing",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "start mowing",
+      "language": "en",
+      "expected_intent": "HassLawnMowerStartMowing",
+      "expected_canonical": "start mowing",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "living room light brightness 100",
+      "language": "en",
+      "expected_intent": "HassLightSet",
+      "expected_canonical": "living room light brightness 100",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "name": "living room light",
+        "brightness": "100"
+      }
+    },
+    {
+      "query": "next track",
+      "language": "en",
+      "expected_intent": "HassMediaNext",
+      "expected_canonical": "next track",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "pause",
+      "language": "en",
+      "expected_intent": "HassMediaPause",
+      "expected_canonical": "pause",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "mute",
+      "language": "en",
+      "expected_intent": "HassMediaPlayerMute",
+      "expected_canonical": "mute",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "unmute",
+      "language": "en",
+      "expected_intent": "HassMediaPlayerUnmute",
+      "expected_canonical": "unmute",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "previous track",
+      "language": "en",
+      "expected_intent": "HassMediaPrevious",
+      "expected_canonical": "previous track",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "resume",
+      "language": "en",
+      "expected_intent": "HassMediaUnpause",
+      "expected_canonical": "resume",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "nevermind",
+      "language": "en",
+      "expected_intent": "HassNevermind",
+      "expected_canonical": "nevermind",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "pause timer",
+      "language": "en",
+      "expected_intent": "HassPauseTimer",
+      "expected_canonical": "pause timer",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "hello",
+      "language": "en",
+      "expected_intent": "HassRespond",
+      "expected_canonical": "hello",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "volume up",
+      "language": "en",
+      "expected_intent": "HassSetVolumeRelative",
+      "expected_canonical": "volume up",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "volume_step": "up"
+      }
+    },
+    {
+      "query": "timer status",
+      "language": "en",
+      "expected_intent": "HassTimerStatus",
+      "expected_canonical": "timer status",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "resume timer",
+      "language": "en",
+      "expected_intent": "HassUnpauseTimer",
+      "expected_canonical": "resume timer",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "vacuum living room",
+      "language": "en",
+      "expected_intent": "HassVacuumCleanArea",
+      "expected_canonical": "vacuum living room",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "area": "living room"
+      }
+    },
+    {
+      "query": "broadcast message",
+      "language": "en",
+      "expected_intent": "HassBroadcast",
+      "expected_canonical": "broadcast message",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "message": "message"
+      }
+    },
+    {
+      "query": "please announce message now",
+      "language": "en",
+      "expected_intent": "HassBroadcast",
+      "expected_canonical": "announce message",
+      "category": "extra_words",
+      "expected_slots": {
+        "message": "message"
+      }
+    },
+    {
+      "query": "set temp to 0",
+      "language": "en",
+      "expected_intent": "HassClimateSetTemperature",
+      "expected_canonical": "set temp to 0",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "temperature": "0"
+      }
+    },
+    {
+      "query": "set temp to 0 degrees please",
+      "language": "en",
+      "expected_intent": "HassClimateSetTemperature",
+      "expected_canonical": "set temp to 0 degrees",
+      "category": "extra_words",
+      "expected_slots": {
+        "temperature": "0"
+      }
+    },
+    {
+      "query": "remove 1 second from timer",
+      "language": "en",
+      "expected_intent": "HassDecreaseTimer",
+      "expected_canonical": "remove 1 second from timer",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "timer_seconds": "1"
+      }
+    },
+    {
+      "query": "please remove 1 second from the timer",
+      "language": "en",
+      "expected_intent": "HassDecreaseTimer",
+      "expected_canonical": "remove 1 second from the timer",
+      "category": "extra_words",
+      "expected_slots": {
+        "timer_seconds": "1"
+      }
+    },
+    {
+      "query": "fan 100",
+      "language": "en",
+      "expected_intent": "HassFanSetSpeed",
+      "expected_canonical": "fan 100",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "name": "fan",
+        "fan_speed": "100"
+      }
+    },
+    {
+      "query": "set fan to 100% please",
+      "language": "en",
+      "expected_intent": "HassFanSetSpeed",
+      "expected_canonical": "fan 100%",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "fan",
+        "fan_speed": "100"
+      }
+    },
+    {
+      "query": "add 1 second to timer",
+      "language": "en",
+      "expected_intent": "HassIncreaseTimer",
+      "expected_canonical": "add 1 second to timer",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "timer_seconds": "1"
+      }
+    },
+    {
+      "query": "add 1 second to my timer please",
+      "language": "en",
+      "expected_intent": "HassIncreaseTimer",
+      "expected_canonical": "add 1 second to my timer",
+      "category": "extra_words",
+      "expected_slots": {
+        "timer_seconds": "1"
+      }
+    },
+    {
+      "query": "add todo_list_item to shopping list",
+      "language": "en",
+      "expected_intent": "HassListAddItem",
+      "expected_canonical": "add todo_list_item to shopping list",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "name": "shopping list",
+        "todo_list_item": "todo_list_item"
+      }
+    },
+    {
+      "query": "please add todo_list_item to my shopping list list",
+      "language": "en",
+      "expected_intent": "HassListAddItem",
+      "expected_canonical": "add todo_list_item to my shopping list",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "shopping list",
+        "todo_list_item": "todo_list_item"
+      }
+    },
+    {
+      "query": "check off todo_list_item from shopping list",
+      "language": "en",
+      "expected_intent": "HassListCompleteItem",
+      "expected_canonical": "check off;todo_list_item from shopping list",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "name": "shopping list",
+        "todo_list_item": "todo_list_item"
+      }
+    },
+    {
+      "query": "delete todo_list_item from shopping list",
+      "language": "en",
+      "expected_intent": "HassListRemoveItem",
+      "expected_canonical": "delete todo_list_item from shopping list",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "name": "shopping list",
+        "todo_list_item": "todo_list_item"
+      }
+    },
+    {
+      "query": "play artist search_query",
+      "language": "en",
+      "expected_intent": "HassMediaSearchAndPlay",
+      "expected_canonical": "play artist search_query",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "search_query": "search_query",
+        "media_class": "artist"
+      }
+    },
+    {
+      "query": "set bedroom window to 0",
+      "language": "en",
+      "expected_intent": "HassSetPosition",
+      "expected_canonical": "set bedroom window to 0",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "name": "bedroom window",
+        "position": "0"
+      }
+    },
+    {
+      "query": "set bedroom window to 0% please",
+      "language": "en",
+      "expected_intent": "HassSetPosition",
+      "expected_canonical": "set bedroom window to 0%",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "bedroom window",
+        "position": "0"
+      }
+    },
+    {
+      "query": "set tv volume to 0",
+      "language": "en",
+      "expected_intent": "HassSetVolume",
+      "expected_canonical": "set tv volume to 0",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "name": "tv",
+        "volume": "0"
+      }
+    },
+    {
+      "query": "set tv volume to 0 percent please",
+      "language": "en",
+      "expected_intent": "HassSetVolume",
+      "expected_canonical": "set tv volume to 0 percent",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "tv",
+        "volume": "0"
+      }
+    },
+    {
+      "query": "add shopping_list_item to shopping list",
+      "language": "en",
+      "expected_intent": "HassShoppingListAddItem",
+      "expected_canonical": "add shopping_list_item to shopping list",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "shopping_list_item": "shopping_list_item"
+      }
+    },
+    {
+      "query": "check off shopping_list_item from shopping list",
+      "language": "en",
+      "expected_intent": "HassShoppingListCompleteItem",
+      "expected_canonical": "check off;shopping_list_item from shopping list",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "shopping_list_item": "shopping_list_item"
+      }
+    },
+    {
+      "query": "timer for 1 second",
+      "language": "en",
+      "expected_intent": "HassStartTimer",
+      "expected_canonical": "timer for 1 second",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "timer_seconds": "1"
+      }
+    },
+    {
+      "query": "return vacuum to base",
+      "language": "en",
+      "expected_intent": "HassVacuumReturnToBase",
+      "expected_canonical": "return vacuum to base",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "name": "vacuum"
+      }
+    },
+    {
+      "query": "return the vacuum to base please",
+      "language": "en",
+      "expected_intent": "HassVacuumReturnToBase",
+      "expected_canonical": "return the vacuum to base",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "vacuum"
+      }
+    },
+    {
+      "query": "start vacuum",
+      "language": "en",
+      "expected_intent": "HassVacuumStart",
+      "expected_canonical": "start vacuum",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "name": "vacuum"
+      }
+    },
+    {
+      "query": "start the vacuum please",
+      "language": "en",
+      "expected_intent": "HassVacuumStart",
+      "expected_canonical": "start the vacuum",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "vacuum"
+      }
+    },
+    {
+      "query": "illuminate the living room light",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on living room light",
+      "category": "synonym_paraphrase",
+      "expected_slots": {
+        "name": "living room light"
+      }
+    },
+    {
+      "query": "shut down the bathroom fan",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off bathroom fan",
+      "category": "synonym_paraphrase",
+      "expected_slots": {
+        "name": "bathroom fan"
+      }
+    },
+    {
+      "query": "let some fresh air in the bedroom by opening window",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "open bedroom window",
+      "category": "synonym_paraphrase",
+      "expected_slots": {
+        "name": "bedroom window"
+      }
+    },
+    {
+      "query": "bring the water heater online",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on water heater",
+      "category": "synonym_paraphrase",
+      "expected_slots": {
+        "name": "water heater"
+      }
+    },
+    {
+      "query": "send the robovac to charge",
+      "language": "en",
+      "expected_intent": "HassVacuumReturnToBase",
+      "expected_canonical": "return vacuum to base",
+      "category": "synonym_paraphrase",
+      "expected_slots": {
+        "name": "vacuum"
+      }
+    },
+    {
+      "query": "start the clean cycle on the vacuum",
+      "language": "en",
+      "expected_intent": "HassVacuumStart",
+      "expected_canonical": "start vacuum",
+      "category": "synonym_paraphrase",
+      "expected_slots": {
+        "name": "vacuum"
+      }
+    },
+    {
+      "query": "power up living room light",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on living room light",
+      "category": "semantic_challenge",
+      "expected_slots": {
+        "name": "living room light"
+      }
+    },
+    {
+      "query": "power up the living room light",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on living room light",
+      "category": "semantic_challenge",
+      "expected_slots": {
+        "name": "living room light"
+      }
+    },
+    {
+      "query": "fire up living room light",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on living room light",
+      "category": "semantic_challenge",
+      "expected_slots": {
+        "name": "living room light"
+      }
+    },
+    {
+      "query": "bring up the living room light",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on living room light",
+      "category": "semantic_challenge",
+      "expected_slots": {
+        "name": "living room light"
+      }
+    },
+    {
+      "query": "kill the bathroom fan",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off bathroom fan",
+      "category": "semantic_challenge",
+      "expected_slots": {
+        "name": "bathroom fan"
+      }
+    },
+    {
+      "query": "shut down water heater",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off water heater",
+      "category": "semantic_challenge",
+      "expected_slots": {
+        "name": "water heater"
+      }
+    },
+    {
+      "query": "turn on light",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on light",
+      "category": "exact_match",
+      "expected_slots": {
+        "name": "light"
+      }
+    },
+    {
+      "query": "turn off light",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off light",
+      "category": "exact_match",
+      "expected_slots": {
+        "name": "light"
+      }
+    }
+  ],
+  "registry_slots": {
+    "name": [
+      "living room light",
+      "bathroom fan",
+      "water heater",
+      "bedroom window",
+      "light",
+      "fan",
+      "kitchen light",
+      "bedroom light",
+      "living room fan",
+      "bedroom fan",
+      "living room curtain",
+      "bedroom curtain",
+      "office light",
+      "hallway light"
+    ],
+    "name:light": [
+      "living room light",
+      "light",
+      "kitchen light",
+      "bedroom light",
+      "hallway light"
+    ],
+    "name:fan": ["bathroom fan", "fan", "living room fan", "bedroom fan"],
+    "name:switch": ["water heater", "front door switch"],
+    "name:water_heater": ["water heater"],
+    "name:cover": [
+      "bedroom window",
+      "living room window",
+      "living room curtain",
+      "bedroom curtain"
+    ],
+    "area": [
+      "living room",
+      "bathroom",
+      "bedroom",
+      "kitchen",
+      "hallway",
+      "balcony",
+      "office"
+    ],
+    "name:todo": ["shopping list", "todo list"],
+    "name:vacuum": ["vacuum", "robovac"],
+    "name:media_player": ["tv", "speaker"],
+    "name:climate": ["living room ac", "bedroom ac"],
+    "name:sensor": ["front door sensor", "living room motion sensor"]
+  }
+}

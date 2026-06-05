@@ -1,0 +1,85 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Assist Canonicalizer",
+        "description": "Configure the Assist Canonicalizer integration to preprocess and canonicalize Assist requests.",
+        "data": {
+          "fallback_agent_id": "Fallback Conversation Agent",
+          "min_confidence": "Minimum Match Confidence",
+          "min_margin": "Minimum Confidence Margin"
+        }
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Only a single instance of Assist Canonicalizer is allowed."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Assist Canonicalizer Options",
+        "description": "Configure the behavior and settings for Assist Canonicalizer.",
+        "data": {
+          "fallback_agent_id": "Fallback Conversation Agent",
+          "min_confidence": "Minimum Match Confidence",
+          "min_margin": "Minimum Confidence Margin"
+        }
+      }
+    }
+  },
+  "services": {
+    "test_match": {
+      "name": "Test match",
+      "description": "Return ranked candidates for a text input with lexical scoring and custom thresholds.",
+      "fields": {
+        "text": {
+          "name": "Text",
+          "description": "The input text to canonicalize and match."
+        },
+        "language": {
+          "name": "Language",
+          "description": "The language of the input text. If omitted, falls back to the Home Assistant config language."
+        }
+      }
+    },
+    "rebuild_index": {
+      "name": "Rebuild index",
+      "description": "Rebuild one language index from automatic candidate sources.",
+      "fields": {
+        "language": {
+          "name": "Language",
+          "description": "The language of the index to rebuild. If omitted, falls back to the Home Assistant config language."
+        }
+      }
+    },
+    "clear_index": {
+      "name": "Clear index",
+      "description": "Clear one language index or all indexes.",
+      "fields": {
+        "language": {
+          "name": "Language",
+          "description": "The language of the index to clear. If omitted, all language indexes are cleared."
+        }
+      }
+    },
+    "diagnostics": {
+      "name": "Diagnostics",
+      "description": "Return runtime diagnostics for Assist Canonicalizer."
+    },
+    "dump_candidates": {
+      "name": "Dump candidates",
+      "description": "Return candidate pool details for a language.",
+      "fields": {
+        "language": {
+          "name": "Language",
+          "description": "The language of the candidate pool to dump. If omitted, falls back to the Home Assistant config language."
+        },
+        "rebuild": {
+          "name": "Rebuild",
+          "description": "Force rebuild index before dumping."
+        }
+      }
+    }
+  }
+}

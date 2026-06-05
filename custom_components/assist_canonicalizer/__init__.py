@@ -1,0 +1,170 @@
+"""Home Assistant entry points for Assist Canonicalizer."""
+
+from __future__ import annotations
+
+from typing import Any, cast
+
+from homeassistant.const import Platform
+
+from .const import (
+    DATA_RUNTIME,
+    DOMAIN,
+)
+from .registry import async_registry_slot_values
+from .runtime import CanonicalizerRuntime
+from .services import async_setup_services, async_unload_services
+
+agent_manager: Any = cast(Any, None)
+try:
+    from homeassistant.components.conversation import agent_manager as _agent_manager
+
+    agent_manager = _agent_manager
+except (ImportError, RuntimeError):
+    agent_manager = cast(Any, None)
+
+exposed_entities: Any = cast(Any, None)
+try:
+    from homeassistant.components.homeassistant import exposed_entities as _exposed_entities
+
+    exposed_entities = _exposed_entities
+except (ImportError, RuntimeError):
+    exposed_entities = cast(Any, None)
+
+area_registry: Any = cast(Any, None)
+try:
+    from homeassistant.helpers import area_registry as _area_registry
+
+    area_registry = _area_registry
+except (ImportError, RuntimeError):
+    area_registry = cast(Any, None)
+
+entity_registry: Any = cast(Any, None)
+try:
+    from homeassistant.helpers import entity_registry as _entity_registry
+
+    entity_registry = _entity_registry
+except (ImportError, RuntimeError):
+    entity_registry = cast(Any, None)
+
+ha_event: Any = cast(Any, None)
+try:
+    from homeassistant.helpers import event as _event
+
+    ha_event = _event
+except (ImportError, RuntimeError):
+    ha_event = cast(Any, None)
+
+floor_registry: Any = cast(Any, None)
+try:
+    from homeassistant.helpers import floor_registry as _floor_registry
+
+    floor_registry = _floor_registry
+except (ImportError, RuntimeError):
+    floor_registry = cast(Any, None)
+
+type AssistCanonicalizerConfigEntry = Any
+type HomeAssistantInstance = Any
+
+PLATFORMS = [Platform.CONVERSATION]
+
+
+def _runtime_from_entry(
+    hass: HomeAssistantInstance, entry: AssistCanonicalizerConfigEntry
+) -> CanonicalizerRuntime:
+    """Return runtime state for an entry."""
+    return hass.data[DOMAIN][entry.entry_id][DATA_RUNTIME]
+
+
+async def async_setup_entry(
+    hass: HomeAssistantInstance, entry: AssistCanonicalizerConfigEntry
+) -> bool:
+    """Set up Assist Canonicalizer from a config entry."""
+    runtime = CanonicalizerRuntime()
+    runtime.configure_config_path(hass.config.path)
+
+    def intent_updates_callback(intents_update: Any) -> None:
+        """Update intent sources and trigger background rebuilds for active languages."""
+        runtime.update_intent_sources(intents_update)
+        for language in list(runtime.indexes.keys()):
+            hass.add_job(runtime.async_rebuild_index, hass, language)
+
+    runtime.add_cleanup_callback(
+        agent_manager.get_agent_manager(hass).subscribe_intents(intent_updates_callback)
+    )
+    _refresh_registry_slot_values(hass, runtime)
+    _subscribe_registry_updates(hass, runtime)
+    domain_data = hass.data.setdefault(DOMAIN, {})
+    domain_data[entry.entry_id] = {
+        "entry": entry,
+        DATA_RUNTIME: runtime,
+    }
+    entry.async_on_unload(entry.add_update_listener(_async_update_options))
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    async_setup_services(hass)
+    return True
+
+
+async def async_unload_entry(
+    hass: HomeAssistantInstance, entry: AssistCanonicalizerConfigEntry
+) -> bool:
+    """Unload Assist Canonicalizer from a config entry."""
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if not unload_ok:
+        return False
+    _runtime_from_entry(hass, entry).cleanup()
+    async_unload_services(hass)
+    domain_data: dict[str, Any] = hass.data.get(DOMAIN, {})
+    domain_data.pop(entry.entry_id, None)
+    if not domain_data:
+        hass.data.pop(DOMAIN, None)
+    return True
+
+
+async def _async_update_options(
+    hass: HomeAssistantInstance, entry: AssistCanonicalizerConfigEntry
+) -> None:
+    """Reload the config entry when options change."""
+    await hass.config_entries.async_reload(entry.entry_id)
+
+
+def _refresh_registry_slot_values(
+    hass: HomeAssistantInstance, runtime: CanonicalizerRuntime
+) -> None:
+    """Refresh registry-derived slot values used for template expansion."""
+    runtime.update_registry_slot_values(async_registry_slot_values(hass))
+
+
+def _subscribe_registry_updates(hass: HomeAssistantInstance, runtime: CanonicalizerRuntime) -> None:
+    """Subscribe to Home Assistant registry metadata changes."""
+
+    def debounced_rebuild(now: Any = None) -> None:
+        """Refresh registry slot values and rebuild active indexes."""
+        runtime.rebuild_timer_cancel = None
+        _refresh_registry_slot_values(hass, runtime)
+        for language in list(runtime.indexes.keys()):
+            hass.add_job(runtime.async_rebuild_index, hass, language)
+
+    def refresh_from_event(event: Any = None) -> None:
+        """Schedule a debounced refresh after a registry update."""
+        if runtime.rebuild_timer_cancel is not None:
+            runtime.rebuild_timer_cancel()
+            runtime.rebuild_timer_cancel = None
+        runtime.rebuild_timer_cancel = ha_event.async_call_later(
+            hass,
+            5,
+            debounced_rebuild,
+        )
+
+    runtime.add_cleanup_callback(
+        hass.bus.async_listen(entity_registry.EVENT_ENTITY_REGISTRY_UPDATED, refresh_from_event)
+    )
+    runtime.add_cleanup_callback(
+        hass.bus.async_listen(area_registry.EVENT_AREA_REGISTRY_UPDATED, refresh_from_event)
+    )
+    runtime.add_cleanup_callback(
+        hass.bus.async_listen(floor_registry.EVENT_FLOOR_REGISTRY_UPDATED, refresh_from_event)
+    )
+    runtime.add_cleanup_callback(
+        exposed_entities.async_listen_entity_updates(hass, "conversation", refresh_from_event)
+    )

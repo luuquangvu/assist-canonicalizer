@@ -1,0 +1,948 @@
+{
+  "test_cases": [
+    {
+      "query": "stofzuiger uit",
+      "language": "nl",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "stofzuiger uit",
+      "category": "exact_match",
+      "expected_slots": {
+        "name": "stofzuiger"
+      }
+    },
+    {
+      "query": "keuken lamp aan",
+      "language": "nl",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "keuken lamp aan",
+      "category": "exact_match",
+      "expected_slots": {
+        "area": "keuken"
+      }
+    },
+    {
+      "query": "woonkamer lamp aan",
+      "language": "nl",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "woonkamer lamp aan",
+      "category": "exact_match",
+      "expected_slots": {
+        "area": "woonkamer"
+      }
+    },
+    {
+      "query": "badkamerventilator uitzetten",
+      "language": "nl",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "badkamerventilator uitzetten",
+      "category": "exact_match",
+      "expected_slots": {
+        "name": "badkamerventilator"
+      }
+    },
+    {
+      "query": "zet badkamerventilator uit",
+      "language": "nl",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "zet badkamerventilator uit",
+      "category": "exact_match",
+      "expected_slots": {
+        "name": "badkamerventilator"
+      }
+    },
+    {
+      "query": "de woonkamerlamp uitzetten",
+      "language": "nl",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "de woonkamerlamp uitzetten",
+      "category": "exact_match",
+      "expected_slots": {
+        "name": "woonkamerlamp"
+      }
+    },
+    {
+      "query": "televisie uit",
+      "language": "nl",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "televisie uit",
+      "category": "exact_match",
+      "expected_slots": {
+        "name": "televisie"
+      }
+    },
+    {
+      "query": "de keukenlamp uitzetten",
+      "language": "nl",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "de keukenlamp uitzetten",
+      "category": "exact_match",
+      "expected_slots": {
+        "name": "keukenlamp"
+      }
+    },
+    {
+      "query": "hoe is het weer",
+      "language": "nl",
+      "expected_intent": "HassGetWeather",
+      "expected_canonical": "hoe is het weer",
+      "category": "exact_match"
+    },
+    {
+      "query": "hoe laat is het",
+      "language": "nl",
+      "expected_intent": "HassGetCurrentTime",
+      "expected_canonical": "hoe laat is het",
+      "category": "exact_match"
+    },
+    {
+      "query": "welke dag is het",
+      "language": "nl",
+      "expected_intent": "HassGetCurrentDate",
+      "expected_canonical": "welke dag is het",
+      "category": "exact_match"
+    },
+    {
+      "query": "laat maar",
+      "language": "nl",
+      "expected_intent": "HassNevermind",
+      "expected_canonical": "laat maar",
+      "category": "exact_match"
+    },
+    {
+      "query": "hallo home assistant",
+      "language": "nl",
+      "expected_intent": "HassRespond",
+      "expected_canonical": "hallo home assistant",
+      "category": "exact_match"
+    },
+    {
+      "query": "keukken lamp aan",
+      "language": "nl",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "keuken lamp aan",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "area": "keuken",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "Schakel kueken lamp in",
+      "language": "nl",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "Schakel keuken lamp in",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "area": "keuken",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "hoee laat is hhet",
+      "language": "nl",
+      "expected_intent": "HassGetCurrentTime",
+      "expected_canonical": "hoe laat is het",
+      "category": "spelling_mistake"
+    },
+    {
+      "query": "welke dag is et",
+      "language": "nl",
+      "expected_intent": "HassGetCurrentDate",
+      "expected_canonical": "welke dag is het",
+      "category": "spelling_mistake"
+    },
+    {
+      "query": "baddkamerventilator uitzetten",
+      "language": "nl",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "badkamerventilator uitzetten",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "name": "badkamerventilator"
+      }
+    },
+    {
+      "query": "kun je de woonkamerlamp uitzetten",
+      "language": "nl",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "de woonkamerlamp uitzetten",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "woonkamerlamp"
+      }
+    },
+    {
+      "query": "wil je alsjeblieft de keuken lamp aandoen",
+      "language": "nl",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "keuken lamp aan",
+      "category": "extra_words",
+      "expected_slots": {
+        "area": "keuken",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "hey assistent, hoe is het weer vandaag",
+      "language": "nl",
+      "expected_intent": "HassGetWeather",
+      "expected_canonical": "hoe is het weer",
+      "category": "extra_words"
+    },
+    {
+      "query": "zou je me kunnen vertellen hoe laat het is nu",
+      "language": "nl",
+      "expected_intent": "HassGetCurrentTime",
+      "expected_canonical": "hoe laat is het",
+      "category": "extra_words"
+    },
+    {
+      "query": "sorry maar kun je doe stofzuiger aan",
+      "language": "nl",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "doe stofzuiger aan",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "stofzuiger"
+      }
+    },
+    {
+      "query": "uitzetten woonkamerlamp",
+      "language": "nl",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "de woonkamerlamp uitzetten",
+      "category": "missing_words",
+      "expected_slots": {
+        "name": "woonkamerlamp"
+      }
+    },
+    {
+      "query": "keuken lamp",
+      "language": "nl",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "keuken lamp aan",
+      "category": "missing_words",
+      "expected_slots": {
+        "area": "keuken",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "badkamerventilator af",
+      "language": "nl",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "zet badkamerventilator uit",
+      "category": "missing_words",
+      "expected_slots": {
+        "name": "badkamerventilator"
+      }
+    },
+    {
+      "query": "stofzuiger nu draaien",
+      "language": "nl",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "doe stofzuiger aan",
+      "category": "missing_words",
+      "expected_slots": {
+        "name": "stofzuiger"
+      }
+    },
+    {
+      "query": "wat het weer",
+      "language": "nl",
+      "expected_intent": "HassGetWeather",
+      "expected_canonical": "hoe is het weer",
+      "category": "missing_words"
+    },
+    {
+      "query": "laat het",
+      "language": "nl",
+      "expected_intent": "HassGetCurrentTime",
+      "expected_canonical": "hoe laat is het",
+      "category": "missing_words"
+    },
+    {
+      "query": "kueken lammp aan",
+      "language": "nl",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "keuken lamp aan",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "area": "keuken",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "zou je misschien badkamer ventilator kunnen uitschakelen alsjeblieft",
+      "language": "nl",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "badkamerventilator uitzetten",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "name": "badkamerventilator"
+      }
+    },
+    {
+      "query": "hey goeiemorgen, kan jij me effe zeggen welke dag het is vandaag?",
+      "language": "nl",
+      "expected_intent": "HassGetCurrentDate",
+      "expected_canonical": "welke dag is het",
+      "category": "complex_distortion"
+    },
+    {
+      "query": "kunt u de stoofzuiger voor mij opstarten alstublieft",
+      "language": "nl",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "doe stofzuiger aan",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "name": "stofzuiger"
+      }
+    },
+    {
+      "query": "wat is het weder vandaag buitn",
+      "language": "nl",
+      "expected_intent": "HassGetWeather",
+      "expected_canonical": "hoe is het weer",
+      "category": "complex_distortion"
+    },
+    {
+      "query": "maak de keuken verlicht",
+      "language": "nl",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "keuken lamp aan",
+      "category": "synonym_paraphrase",
+      "expected_slots": {
+        "area": "keuken",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "zet de woonkamer in het licht",
+      "language": "nl",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "woonkamer lamp aan",
+      "category": "synonym_paraphrase",
+      "expected_slots": {
+        "area": "woonkamer",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "stop de ventilatie in de badkamer",
+      "language": "nl",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "badkamerventilator uitzetten",
+      "category": "synonym_paraphrase",
+      "expected_slots": {
+        "name": "badkamerventilator"
+      }
+    },
+    {
+      "query": "doe de tv uit",
+      "language": "nl",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "televisie uit",
+      "category": "synonym_paraphrase",
+      "expected_slots": {
+        "name": "televisie"
+      }
+    },
+    {
+      "query": "activeer de stofzuiger",
+      "language": "nl",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "doe stofzuiger aan",
+      "category": "synonym_paraphrase",
+      "expected_slots": {
+        "name": "stofzuiger"
+      }
+    },
+    {
+      "query": "maak het donker in de woonkamer",
+      "language": "nl",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "de woonkamerlamp uitzetten",
+      "category": "semantic_challenge",
+      "expected_slots": {
+        "name": "woonkamerlamp"
+      }
+    },
+    {
+      "query": "ik wil dat de stofzuiger terug naar zijn huis gaat",
+      "language": "nl",
+      "expected_intent": "HassVacuumReturnToBase",
+      "expected_canonical": "stuur stofzuiger terug",
+      "category": "semantic_challenge",
+      "expected_slots": {
+        "name": "stofzuiger"
+      }
+    },
+    {
+      "query": "het is te warm hier binnen",
+      "language": "nl",
+      "expected_intent": "HassClimateSetTemperature",
+      "expected_canonical": "zet de temperatuur naar 0",
+      "category": "semantic_challenge"
+    },
+    {
+      "query": "ik zie niks meer in de keuken",
+      "language": "nl",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "keuken lamp aan",
+      "category": "semantic_challenge",
+      "expected_slots": {
+        "area": "keuken",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "de robotmaaier heeft genoeg gemaaid",
+      "language": "nl",
+      "expected_intent": "HassLawnMowerDock",
+      "expected_canonical": "stop grasmaaien",
+      "category": "semantic_challenge"
+    },
+    {
+      "query": "stofzuiger starten",
+      "language": "nl",
+      "expected_intent": "HassVacuumStart",
+      "expected_canonical": "stofzuiger starten",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "name": "stofzuiger"
+      }
+    },
+    {
+      "query": "stuur stofzuiger terug",
+      "language": "nl",
+      "expected_intent": "HassVacuumReturnToBase",
+      "expected_canonical": "stuur stofzuiger terug",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "name": "stofzuiger"
+      }
+    },
+    {
+      "query": "stofzuig woonkamer",
+      "language": "nl",
+      "expected_intent": "HassVacuumCleanArea",
+      "expected_canonical": "stofzuig woonkamer",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "area": "woonkamer"
+      }
+    },
+    {
+      "query": "wat voor weer is het nu",
+      "language": "nl",
+      "expected_intent": "HassGetWeather",
+      "expected_canonical": "wat voor weer is het nu",
+      "category": "intent_coverage"
+    },
+    {
+      "query": "annuleer",
+      "language": "nl",
+      "expected_intent": "HassNevermind",
+      "expected_canonical": "annuleer",
+      "category": "intent_coverage"
+    },
+    {
+      "query": "zet de temperatuur naar 0",
+      "language": "nl",
+      "expected_intent": "HassClimateSetTemperature",
+      "expected_canonical": "zet de temperatuur naar 0",
+      "category": "intent_coverage"
+    },
+    {
+      "query": "zet temperatuur naar 0",
+      "language": "nl",
+      "expected_intent": "HassClimateSetTemperature",
+      "expected_canonical": "zet temperatuur naar 0",
+      "category": "intent_coverage"
+    },
+    {
+      "query": "slaapkamerraam naar 0",
+      "language": "nl",
+      "expected_intent": "HassSetPosition",
+      "expected_canonical": "slaapkamerraam naar 0",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "name": "slaapkamerraam"
+      }
+    },
+    {
+      "query": "slaapkamerlamp 100",
+      "language": "nl",
+      "expected_intent": "HassLightSet",
+      "expected_canonical": "slaapkamerlamp 100",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "name": "slaapkamerlamp"
+      }
+    },
+    {
+      "query": "badkamerventilator naar 100",
+      "language": "nl",
+      "expected_intent": "HassFanSetSpeed",
+      "expected_canonical": "badkamerventilator naar 100",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "name": "badkamerventilator"
+      }
+    },
+    {
+      "query": "doe volume op 100",
+      "language": "nl",
+      "expected_intent": "HassSetVolume",
+      "expected_canonical": "doe volume op 100",
+      "category": "intent_coverage"
+    },
+    {
+      "query": "stop grasmaaien",
+      "language": "nl",
+      "expected_intent": "HassLawnMowerDock",
+      "expected_canonical": "stop grasmaaien",
+      "category": "intent_coverage"
+    },
+    {
+      "query": "begin met grasmaaien",
+      "language": "nl",
+      "expected_intent": "HassLawnMowerStartMowing",
+      "expected_canonical": "begin met grasmaaien",
+      "category": "intent_coverage"
+    },
+    {
+      "query": "pauze",
+      "language": "nl",
+      "expected_intent": "HassMediaPause",
+      "expected_canonical": "pauze",
+      "category": "intent_coverage"
+    },
+    {
+      "query": "hervat",
+      "language": "nl",
+      "expected_intent": "HassMediaUnpause",
+      "expected_canonical": "hervat",
+      "category": "intent_coverage"
+    },
+    {
+      "query": "televisie volgende film",
+      "language": "nl",
+      "expected_intent": "HassMediaNext",
+      "expected_canonical": "televisie volgende film",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "name": "televisie"
+      }
+    },
+    {
+      "query": "vorige",
+      "language": "nl",
+      "expected_intent": "HassMediaPrevious",
+      "expected_canonical": "vorige",
+      "category": "intent_coverage"
+    },
+    {
+      "query": "volume omhoog",
+      "language": "nl",
+      "expected_intent": "HassSetVolumeRelative",
+      "expected_canonical": "volume omhoog",
+      "category": "intent_coverage"
+    },
+    {
+      "query": "demp",
+      "language": "nl",
+      "expected_intent": "HassMediaPlayerMute",
+      "expected_canonical": "demp",
+      "category": "intent_coverage"
+    },
+    {
+      "query": "dempen opheffen",
+      "language": "nl",
+      "expected_intent": "HassMediaPlayerUnmute",
+      "expected_canonical": "dempen opheffen",
+      "category": "intent_coverage"
+    },
+    {
+      "query": "1 minuut timer",
+      "language": "nl",
+      "expected_intent": "HassStartTimer",
+      "expected_canonical": "1 minuut timer",
+      "category": "intent_coverage"
+    },
+    {
+      "query": "timer status",
+      "language": "nl",
+      "expected_intent": "HassTimerStatus",
+      "expected_canonical": "timer status",
+      "category": "intent_coverage"
+    },
+    {
+      "query": "timer stoppen",
+      "language": "nl",
+      "expected_intent": "HassCancelTimer",
+      "expected_canonical": "timer stoppen",
+      "category": "intent_coverage"
+    },
+    {
+      "query": "timer pauzeren",
+      "language": "nl",
+      "expected_intent": "HassPauseTimer",
+      "expected_canonical": "timer pauzeren",
+      "category": "intent_coverage"
+    },
+    {
+      "query": "verkort timer met 1 minuut",
+      "language": "nl",
+      "expected_intent": "HassDecreaseTimer",
+      "expected_canonical": "verkort timer met 1 minuut",
+      "category": "intent_coverage"
+    },
+    {
+      "query": "verleng timer met 1 minuut",
+      "language": "nl",
+      "expected_intent": "HassIncreaseTimer",
+      "expected_canonical": "verleng timer met 1 minuut",
+      "category": "intent_coverage"
+    },
+    {
+      "query": "hoe heet is het",
+      "language": "nl",
+      "expected_intent": "HassClimateGetTemperature",
+      "expected_canonical": "hoe heet is het",
+      "category": "intent_coverage"
+    },
+    {
+      "query": "broadcast message",
+      "language": "nl",
+      "expected_intent": "HassBroadcast",
+      "expected_canonical": "broadcast message",
+      "category": "intent_coverage"
+    },
+    {
+      "query": "zet shopping_list_item op lijst",
+      "language": "nl",
+      "expected_intent": "HassShoppingListAddItem",
+      "expected_canonical": "zet shopping_list_item op lijst",
+      "category": "intent_coverage"
+    },
+    {
+      "query": "speel search_query",
+      "language": "nl",
+      "expected_intent": "HassMediaSearchAndPlay",
+      "expected_canonical": "speel search_query",
+      "category": "intent_coverage"
+    },
+    {
+      "query": "alle timer stoppen woonkamer",
+      "language": "nl",
+      "expected_intent": "HassCancelAllTimers",
+      "expected_canonical": "alle timer stoppen woonkamer",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "area": "woonkamer"
+      }
+    },
+    {
+      "query": "hoe veel mensen zijn thuis",
+      "language": "nl",
+      "expected_intent": "HassGetState",
+      "expected_canonical": "hoe veel mensen zijn thuis",
+      "category": "intent_coverage"
+    },
+    {
+      "query": "haal shopping_list_item van lijst af",
+      "language": "nl",
+      "expected_intent": "HassShoppingListCompleteItem",
+      "expected_canonical": "haal shopping_list_item van lijst af",
+      "category": "intent_coverage"
+    },
+    {
+      "query": "timer hervatten",
+      "language": "nl",
+      "expected_intent": "HassUnpauseTimer",
+      "expected_canonical": "timer hervatten",
+      "category": "intent_coverage"
+    },
+    {
+      "query": "zet todo_list_item op boodschappenlijst",
+      "language": "nl",
+      "expected_intent": "HassListAddItem",
+      "expected_canonical": "zet todo_list_item op boodschappenlijst",
+      "category": "intent_coverage"
+    },
+    {
+      "query": "voeg todo_list_item toe aan todolijst",
+      "language": "nl",
+      "expected_intent": "HassListAddItem",
+      "expected_canonical": "voeg todo_list_item toe aan todolijst",
+      "category": "intent_coverage"
+    },
+    {
+      "query": "vink todo_list_item van boodschappenlijst af",
+      "language": "nl",
+      "expected_intent": "HassListCompleteItem",
+      "expected_canonical": "vink todo_list_item van boodschappenlijst;af",
+      "category": "intent_coverage"
+    },
+    {
+      "query": "markeer todo_list_item op todolijst als klaar",
+      "language": "nl",
+      "expected_intent": "HassListCompleteItem",
+      "expected_canonical": "markeer todo_list_item op todolijst als klaar",
+      "category": "intent_coverage"
+    },
+    {
+      "query": "verwijder todo_list_item van boodschappenlijst",
+      "language": "nl",
+      "expected_intent": "HassListRemoveItem",
+      "expected_canonical": "verwijder todo_list_item van boodschappenlijst",
+      "category": "intent_coverage"
+    },
+    {
+      "query": "haal todo_list_item van todolijst af",
+      "language": "nl",
+      "expected_intent": "HassListRemoveItem",
+      "expected_canonical": "haal todo_list_item van todolijst;af",
+      "category": "intent_coverage"
+    },
+    {
+      "query": "hoe laat is et",
+      "language": "nl",
+      "expected_intent": "HassGetCurrentTime",
+      "expected_canonical": "hoe laat is het",
+      "category": "synonym_paraphrase"
+    },
+    {
+      "query": "welke dag in de week is het",
+      "language": "nl",
+      "expected_intent": "HassGetCurrentDate",
+      "expected_canonical": "welke dag is het",
+      "category": "synonym_paraphrase"
+    },
+    {
+      "query": "hoe is de weer",
+      "language": "nl",
+      "expected_intent": "HassGetWeather",
+      "expected_canonical": "hoe is het weer",
+      "category": "synonym_paraphrase"
+    },
+    {
+      "query": "hoe is het weer nu",
+      "language": "nl",
+      "expected_intent": "HassGetWeather",
+      "expected_canonical": "hoe is het weer",
+      "category": "synonym_paraphrase"
+    },
+    {
+      "query": "laat keuken lamp branden",
+      "language": "nl",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "keuken lamp aan",
+      "category": "synonym_paraphrase",
+      "expected_slots": {
+        "area": "keuken",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "doe keuken lamp aan alsjeblieft",
+      "language": "nl",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "keuken lamp aan",
+      "category": "extra_words",
+      "expected_slots": {
+        "area": "keuken",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "doe woonkamer lamp aan nu",
+      "language": "nl",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "woonkamer lamp aan",
+      "category": "extra_words",
+      "expected_slots": {
+        "area": "woonkamer",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "hey hoe is het weer",
+      "language": "nl",
+      "expected_intent": "HassGetWeather",
+      "expected_canonical": "hoe is het weer",
+      "category": "extra_words"
+    },
+    {
+      "query": "zeg me hoe laat is het",
+      "language": "nl",
+      "expected_intent": "HassGetCurrentTime",
+      "expected_canonical": "hoe laat is het",
+      "category": "extra_words"
+    },
+    {
+      "query": "kun je me vertellen welke dag het is",
+      "language": "nl",
+      "expected_intent": "HassGetCurrentDate",
+      "expected_canonical": "welke dag is het",
+      "category": "extra_words"
+    },
+    {
+      "query": "kun je de woonkamerlamp uitzetten",
+      "language": "nl",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "de woonkamerlamp uitzetten",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "woonkamerlamp"
+      }
+    },
+    {
+      "query": "wil je de woonkamerlamp uitzetten",
+      "language": "nl",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "de woonkamerlamp uitzetten",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "woonkamerlamp"
+      }
+    },
+    {
+      "query": "hoee laat is het",
+      "language": "nl",
+      "expected_intent": "HassGetCurrentTime",
+      "expected_canonical": "hoe laat is het",
+      "category": "complex_distortion"
+    },
+    {
+      "query": "hoe laet is et",
+      "language": "nl",
+      "expected_intent": "HassGetCurrentTime",
+      "expected_canonical": "hoe laat is het",
+      "category": "complex_distortion"
+    },
+    {
+      "query": "hoe ladt is het",
+      "language": "nl",
+      "expected_intent": "HassGetCurrentTime",
+      "expected_canonical": "hoe laat is het",
+      "category": "complex_distortion"
+    },
+    {
+      "query": "welke dag is et",
+      "language": "nl",
+      "expected_intent": "HassGetCurrentDate",
+      "expected_canonical": "welke dag is het",
+      "category": "complex_distortion"
+    },
+    {
+      "query": "welke dag is hhet",
+      "language": "nl",
+      "expected_intent": "HassGetCurrentDate",
+      "expected_canonical": "welke dag is het",
+      "category": "complex_distortion"
+    },
+    {
+      "query": "keukken lamp aan",
+      "language": "nl",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "keuken lamp aan",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "area": "keuken",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "kuken lamp aan",
+      "language": "nl",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "keuken lamp aan",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "area": "keuken",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "wonkamer lamp aan",
+      "language": "nl",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "woonkamer lamp aan",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "area": "woonkamer",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "woonkammer lamp aan",
+      "language": "nl",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "woonkamer lamp aan",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "area": "woonkamer",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "badkamer ventillator uitzetten",
+      "language": "nl",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "badkamerventilator uitzetten",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "name": "badkamerventilator"
+      }
+    },
+    {
+      "query": "badkamerventilalor uitzetten",
+      "language": "nl",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "badkamerventilator uitzetten",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "name": "badkamerventilator"
+      }
+    },
+    {
+      "query": "zou jij badkamer ventillator kunnen uitzetten",
+      "language": "nl",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "badkamerventilator uitzetten",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "name": "badkamerventilator"
+      }
+    }
+  ],
+  "registry_slots": {
+    "name": [
+      "slaapkamerlamp",
+      "woonkamerlamp",
+      "keukenlamp",
+      "badkamerventilator",
+      "stofzuiger",
+      "televisie",
+      "waterkoker",
+      "slaapkamerraam",
+      "thermostaat",
+      "robotmaaier"
+    ],
+    "name:light": ["slaapkamerlamp", "woonkamerlamp", "keukenlamp"],
+    "name:fan": ["badkamerventilator"],
+    "name:cover": ["slaapkamerraam"],
+    "name:vacuum": ["stofzuiger"],
+    "name:media_player": ["televisie"],
+    "name:switch": ["waterkoker"],
+    "name:climate": ["thermostaat"],
+    "name:lawn_mower": ["robotmaaier"],
+    "name:todo": ["boodschappenlijst", "todolijst"],
+    "area": ["woonkamer", "slaapkamer", "keuken", "badkamer", "gang"],
+    "temperature": ["0", "20"],
+    "position": ["0"]
+  }
+}

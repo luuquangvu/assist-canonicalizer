@@ -1,0 +1,51 @@
+name: Feature Request
+description: Suggest an idea for this project.
+labels: ["enhancement"]
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > [!NOTE]
+        > **Thank you for suggesting a new feature.**
+        > We value your input and ideas on how to improve the Assist Canonicalizer.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I have searched existing [issues](https://github.com/luuquangvu/assist-canonicalizer/issues?q=is%3Aissue) to ensure this hasn't been reported or requested before.
+          required: true
+        - label: I have updated to the [latest version](https://github.com/luuquangvu/assist-canonicalizer/releases/latest).
+          required: true
+  - type: textarea
+    id: problem_summary
+    attributes:
+      label: Problem Summary
+      description: Describe the problem you're trying to solve.
+      placeholder: "Ex. I'm always frustrated when..."
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: Describe the solution you'd like.
+      placeholder: "A clear and concise description of what you want to happen..."
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Describe any alternative solutions or features you've considered.
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: Add any other context about the feature request here.
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots / Mockups
+      description: Optional. Add screenshots or mockups to help explain your idea.

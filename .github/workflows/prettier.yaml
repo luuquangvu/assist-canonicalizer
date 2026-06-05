@@ -1,0 +1,45 @@
+name: Prettier
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "**.yaml"
+      - "**.yml"
+      - "**.json"
+      - "**.md"
+      - "**.toml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "**.yaml"
+      - "**.yml"
+      - "**.json"
+      - "**.md"
+      - "**.toml"
+
+permissions:
+  contents: read
+
+jobs:
+  prettier:
+    runs-on: ubuntu-latest
+    name: "Prettier Format Check"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Prettier
+        run: npx prettier --check .

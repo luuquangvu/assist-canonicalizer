@@ -1,0 +1,85 @@
+[project]
+name = "assist-canonicalizer"
+version = "0.1.0"
+description = "Improve Assist intent recognition using lexical canonicalization"
+readme = "README.md"
+requires-python = ">=3.14.2"
+dependencies = ["rapidfuzz>=3.10.0"]
+
+[dependency-groups]
+dev = [
+  "homeassistant>=2026.6.0",
+  "hassil",
+  "home-assistant-intents",
+  "interrogate",
+  "packaging",
+  "prek",
+  "pyright",
+  "pytest",
+  "pytest-asyncio",
+  "pytest-cov",
+  "pytest-homeassistant-custom-component",
+  "pytest-timeout",
+  "ruff",
+  "tomlkit",
+  "ty",
+]
+
+[tool.uv]
+override-dependencies = ["homeassistant>=2026.6.0"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = [
+  "B",   # flake8-bugbear
+  "C4",  # flake8-comprehensions
+  "D",   # pydocstyle
+  "E",   # pycodestyle errors
+  "F",   # pyflakes
+  "G",   # flake8-logging-format
+  "I",   # isort
+  "LOG", # flake8-logging
+  "N",   # pep8-naming
+  "PIE", # flake8-pie
+  "PT",  # flake8-pytest-style
+  "RET", # flake8-return
+  "RUF", # ruff-specific rules
+  "SIM", # flake8-simplify
+  "TID", # flake8-tidy-imports
+  "UP",  # pyupgrade
+  "W",   # pycodestyle warnings
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["."]
+testpaths = ["tests"]
+filterwarnings = [
+  "ignore::DeprecationWarning",
+  "ignore::pytest.PytestDeprecationWarning",
+]
+addopts = [
+  "--quiet",
+  "--cov=custom_components",
+  "--cov-fail-under=90",
+  "--cov-branch",
+  "--timeout=60",
+]
+
+[tool.pyright]
+typeCheckingMode = "standard"
+
+[tool.interrogate]
+fail-under = 100
+ignore-nested-functions = true
+exclude = ["scratch"]

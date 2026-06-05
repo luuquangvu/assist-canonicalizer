@@ -1,0 +1,937 @@
+{
+  "test_cases": [
+    {
+      "query": "schalte das wohnzimmerlicht ein",
+      "language": "de",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "schalte das wohnzimmerlicht ein",
+      "category": "exact_match",
+      "expected_slots": {
+        "name": "wohnzimmerlicht"
+      }
+    },
+    {
+      "query": "schalte badezimmerlüfter aus",
+      "language": "de",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "schalte badezimmerlüfter aus",
+      "category": "exact_match",
+      "expected_slots": {
+        "name": "badezimmerlüfter"
+      }
+    },
+    {
+      "query": "schalte den wasserkocher ein",
+      "language": "de",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "schalte den wasserkocher ein",
+      "category": "exact_match",
+      "expected_slots": {
+        "name": "wasserkocher"
+      }
+    },
+    {
+      "query": "schalt das schlafzimmerfenster zu",
+      "language": "de",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "schalt das schlafzimmerfenster zu",
+      "category": "exact_match",
+      "expected_slots": {
+        "name": "schlafzimmerfenster"
+      }
+    },
+    {
+      "query": "schalte das licht aus",
+      "language": "de",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "schalte das licht aus",
+      "category": "exact_match",
+      "expected_slots": {
+        "name": "licht"
+      }
+    },
+    {
+      "query": "schalte den lüfter aus",
+      "language": "de",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "schalte den lüfter aus",
+      "category": "exact_match",
+      "expected_slots": {
+        "name": "lüfter"
+      }
+    },
+    {
+      "query": "schalt staubsauger aus",
+      "language": "de",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "schalt staubsauger aus",
+      "category": "exact_match",
+      "expected_slots": {
+        "name": "staubsauger"
+      }
+    },
+    {
+      "query": "stoppe fernseher",
+      "language": "de",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "stoppe fernseher",
+      "category": "exact_match",
+      "expected_slots": {
+        "name": "fernseher"
+      }
+    },
+    {
+      "query": "schalte den wasserkocher aus",
+      "language": "de",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "schalte den wasserkocher aus",
+      "category": "exact_match",
+      "expected_slots": {
+        "name": "wasserkocher"
+      }
+    },
+    {
+      "query": "schalte den badezimmerlüfter ein",
+      "language": "de",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "schalte den badezimmerlüfter ein",
+      "category": "exact_match",
+      "expected_slots": {
+        "name": "badezimmerlüfter"
+      }
+    },
+    {
+      "query": "schalte das wohnzimmerlicht aus",
+      "language": "de",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "schalte das wohnzimmerlicht aus",
+      "category": "exact_match",
+      "expected_slots": {
+        "name": "wohnzimmerlicht"
+      }
+    },
+    {
+      "query": "schate das wohnzimmerlicht ein",
+      "language": "de",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "schalte das wohnzimmerlicht ein",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "name": "wohnzimmerlicht"
+      }
+    },
+    {
+      "query": "schalte badzimmerlüfter aus",
+      "language": "de",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "schalte badezimmerlüfter aus",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "name": "badezimmerlüfter"
+      }
+    },
+    {
+      "query": "schlat den wasserkocher ein",
+      "language": "de",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "schalt den wasserkocher ein",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "name": "wasserkocher"
+      }
+    },
+    {
+      "query": "schalte das lict aus",
+      "language": "de",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "schalte das licht aus",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "name": "licht"
+      }
+    },
+    {
+      "query": "starte stabsauger",
+      "language": "de",
+      "expected_intent": "HassVacuumStart",
+      "expected_canonical": "starte staubsauger",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "name": "staubsauger"
+      }
+    },
+    {
+      "query": "bitte schalte das wohnzimmerlicht ein",
+      "language": "de",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "schalte das wohnzimmerlicht ein",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "wohnzimmerlicht"
+      }
+    },
+    {
+      "query": "schalte den wasserkocher ein bitte",
+      "language": "de",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "schalte den wasserkocher ein",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "wasserkocher"
+      }
+    },
+    {
+      "query": "schalte das licht aus danke",
+      "language": "de",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "schalte das licht aus",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "licht"
+      }
+    },
+    {
+      "query": "kannst du das licht ausschalten",
+      "language": "de",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "schalte das licht aus",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "licht"
+      }
+    },
+    {
+      "query": "bitte starte den staubsauger",
+      "language": "de",
+      "expected_intent": "HassVacuumStart",
+      "expected_canonical": "starte den staubsauger",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "staubsauger"
+      }
+    },
+    {
+      "query": "wohnzimmerlicht mach ein",
+      "language": "de",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "schalt wohnzimmerlicht ein",
+      "category": "synonym_paraphrase",
+      "expected_slots": {
+        "name": "wohnzimmerlicht"
+      }
+    },
+    {
+      "query": "badezimmerlüfter mach aus",
+      "language": "de",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "schalt badezimmerlüfter aus",
+      "category": "synonym_paraphrase",
+      "expected_slots": {
+        "name": "badezimmerlüfter"
+      }
+    },
+    {
+      "query": "wasserkocher mach ein",
+      "language": "de",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "schalt wasserkocher ein",
+      "category": "synonym_paraphrase",
+      "expected_slots": {
+        "name": "wasserkocher"
+      }
+    },
+    {
+      "query": "licht mach aus",
+      "language": "de",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "schalt licht aus",
+      "category": "synonym_paraphrase",
+      "expected_slots": {
+        "name": "licht"
+      }
+    },
+    {
+      "query": "bitte schate wohnzimerlict ein",
+      "language": "de",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "schalte das wohnzimmerlicht ein",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "name": "wohnzimmerlicht"
+      }
+    },
+    {
+      "query": "badzimmerlftr aus danke",
+      "language": "de",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "schalte badezimmerlüfter aus",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "name": "badezimmerlüfter"
+      }
+    },
+    {
+      "query": "wie spät ist es",
+      "language": "de",
+      "expected_intent": "HassGetCurrentTime",
+      "expected_canonical": "wie spät ist es",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "welcher tag ist heute",
+      "language": "de",
+      "expected_intent": "HassGetCurrentDate",
+      "expected_canonical": "welcher tag ist heute",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "wie ist das Wetter",
+      "language": "de",
+      "expected_intent": "HassGetWeather",
+      "expected_canonical": "wie ist das Wetter",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "abbrechen",
+      "language": "de",
+      "expected_intent": "HassNevermind",
+      "expected_canonical": "abbrechen",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "füge shopping_list_item zur einkaufsliste hinzu",
+      "language": "de",
+      "expected_intent": "HassShoppingListAddItem",
+      "expected_canonical": "füge shopping_list_item zur EinkaufsListe hinzu",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "shopping_list_item": "shopping_list_item"
+      }
+    },
+    {
+      "query": "stelle die temperatur im wohnzimmer auf 0 grad",
+      "language": "de",
+      "expected_intent": "HassClimateSetTemperature",
+      "expected_canonical": "temperatur wohnzimmer auf 0 Grad stellen",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "area": "wohnzimmer",
+        "temperature": "0"
+      }
+    },
+    {
+      "query": "verkünde message",
+      "language": "de",
+      "expected_intent": "HassBroadcast",
+      "expected_canonical": "verkünde message",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "message": "message"
+      }
+    },
+    {
+      "query": "alle Timer aus",
+      "language": "de",
+      "expected_intent": "HassCancelAllTimers",
+      "expected_canonical": "alle Timer aus",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "lösch Timer",
+      "language": "de",
+      "expected_intent": "HassCancelTimer",
+      "expected_canonical": "lösch Timer",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "Temperatur",
+      "language": "de",
+      "expected_intent": "HassClimateGetTemperature",
+      "expected_canonical": "Temperatur",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "verringere Timer um 1 Minute",
+      "language": "de",
+      "expected_intent": "HassDecreaseTimer",
+      "expected_canonical": "verringere Timer um 1 Minute",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "timer_seconds": "1",
+        "timer_minutes": "1",
+        "timer_hours": "1"
+      }
+    },
+    {
+      "query": "Ventilator 0",
+      "language": "de",
+      "expected_intent": "HassFanSetSpeed",
+      "expected_canonical": "Ventilator 0",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "brightness": "0",
+        "temperature": "0",
+        "position": "0",
+        "volume_level": "0",
+        "fan_speed": "0",
+        "volume_step_up": "0",
+        "volume_step_down": "0"
+      }
+    },
+    {
+      "query": "wer ist zone",
+      "language": "de",
+      "expected_intent": "HassGetState",
+      "expected_canonical": "wer ist zone",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "zone": "zone"
+      }
+    },
+    {
+      "query": "verlängere Timer um 1 Minute",
+      "language": "de",
+      "expected_intent": "HassIncreaseTimer",
+      "expected_canonical": "verlängere Timer um 1 Minute",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "timer_seconds": "1",
+        "timer_minutes": "1",
+        "timer_hours": "1"
+      }
+    },
+    {
+      "query": "stopp den Mähvorgang",
+      "language": "de",
+      "expected_intent": "HassLawnMowerDock",
+      "expected_canonical": "stopp den Mähvorgang",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "mäh Rasen",
+      "language": "de",
+      "expected_intent": "HassLawnMowerStartMowing",
+      "expected_canonical": "mäh Rasen",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "licht 0",
+      "language": "de",
+      "expected_intent": "HassLightSet",
+      "expected_canonical": "licht 0",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "name:light": "licht",
+        "name": "licht",
+        "brightness": "0",
+        "temperature": "0",
+        "position": "0",
+        "volume_level": "0",
+        "fan_speed": "0",
+        "volume_step_up": "0",
+        "volume_step_down": "0"
+      }
+    },
+    {
+      "query": "todo_list_item in einkaufsliste",
+      "language": "de",
+      "expected_intent": "HassListAddItem",
+      "expected_canonical": "todo_list_item in einkaufsliste",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "name:todo": "einkaufsliste",
+        "name": "einkaufsliste",
+        "todo_list_item": "todo_list_item"
+      }
+    },
+    {
+      "query": "todo_list_item aus einkaufsliste nehmen",
+      "language": "de",
+      "expected_intent": "HassListCompleteItem",
+      "expected_canonical": "todo_list_item aus einkaufsliste nehmen",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "name:todo": "einkaufsliste",
+        "name": "einkaufsliste",
+        "todo_list_item": "todo_list_item"
+      }
+    },
+    {
+      "query": "lösch todo_list_item auf einkaufsliste",
+      "language": "de",
+      "expected_intent": "HassListRemoveItem",
+      "expected_canonical": "lösch todo_list_item auf einkaufsliste",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "name:todo": "einkaufsliste",
+        "name": "einkaufsliste",
+        "todo_list_item": "todo_list_item"
+      }
+    },
+    {
+      "query": "nächste fernseher",
+      "language": "de",
+      "expected_intent": "HassMediaNext",
+      "expected_canonical": "nächste fernseher",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "name:media_player": "fernseher",
+        "name": "fernseher"
+      }
+    },
+    {
+      "query": "halt",
+      "language": "de",
+      "expected_intent": "HassMediaPause",
+      "expected_canonical": "halt",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "mute",
+      "language": "de",
+      "expected_intent": "HassMediaPlayerMute",
+      "expected_canonical": "mute",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "ton an",
+      "language": "de",
+      "expected_intent": "HassMediaPlayerUnmute",
+      "expected_canonical": "ton an",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "vorherige fernseher",
+      "language": "de",
+      "expected_intent": "HassMediaPrevious",
+      "expected_canonical": "vorherige fernseher",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "name:media_player": "fernseher",
+        "name": "fernseher"
+      }
+    },
+    {
+      "query": "spiel den search_querypodcast",
+      "language": "de",
+      "expected_intent": "HassMediaSearchAndPlay",
+      "expected_canonical": "spiel den search_querypodcast",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "search_query": "search_query",
+        "media_class_my_split": "podcast"
+      }
+    },
+    {
+      "query": "weiter",
+      "language": "de",
+      "expected_intent": "HassMediaUnpause",
+      "expected_canonical": "weiter",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "Timer anhalten",
+      "language": "de",
+      "expected_intent": "HassPauseTimer",
+      "expected_canonical": "Timer anhalten",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "Hi",
+      "language": "de",
+      "expected_intent": "HassRespond",
+      "expected_canonical": "Hi",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "schlafzimmerfenster 0",
+      "language": "de",
+      "expected_intent": "HassSetPosition",
+      "expected_canonical": "schlafzimmerfenster 0",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "name:cover": "schlafzimmerfenster",
+        "area": "schlafzimmer",
+        "name": "schlafzimmerfenster",
+        "brightness": "0",
+        "temperature": "0",
+        "position": "0",
+        "volume_level": "0",
+        "fan_speed": "0",
+        "volume_step_up": "0",
+        "volume_step_down": "0"
+      }
+    },
+    {
+      "query": "fernseher 0",
+      "language": "de",
+      "expected_intent": "HassSetVolume",
+      "expected_canonical": "fernseher 0",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "name:media_player": "fernseher",
+        "name": "fernseher",
+        "brightness": "0",
+        "temperature": "0",
+        "position": "0",
+        "volume_level": "0",
+        "fan_speed": "0",
+        "volume_step_up": "0",
+        "volume_step_down": "0"
+      }
+    },
+    {
+      "query": "leiser",
+      "language": "de",
+      "expected_intent": "HassSetVolumeRelative",
+      "expected_canonical": "leiser",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "lösch shopping_list_item auf Liste",
+      "language": "de",
+      "expected_intent": "HassShoppingListCompleteItem",
+      "expected_canonical": "lösch shopping_list_item auf Liste",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "shopping_list_item": "shopping_list_item"
+      }
+    },
+    {
+      "query": "1 Minute Timer",
+      "language": "de",
+      "expected_intent": "HassStartTimer",
+      "expected_canonical": "1 Minute Timer",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "timer_seconds": "1",
+        "timer_minutes": "1",
+        "timer_hours": "1"
+      }
+    },
+    {
+      "query": "wie lang",
+      "language": "de",
+      "expected_intent": "HassTimerStatus",
+      "expected_canonical": "wie lang",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "setz Timer fort",
+      "language": "de",
+      "expected_intent": "HassUnpauseTimer",
+      "expected_canonical": "setz Timer fort",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "hier putzen",
+      "language": "de",
+      "expected_intent": "HassVacuumCleanArea",
+      "expected_canonical": "hier putzen",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "staubsauger zurück",
+      "language": "de",
+      "expected_intent": "HassVacuumReturnToBase",
+      "expected_canonical": "staubsauger zurück",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "name:vacuum": "staubsauger",
+        "name": "staubsauger"
+      }
+    },
+    {
+      "query": "badezimmerlüfter beenden",
+      "language": "de",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "badezimmerlüfter zu",
+      "category": "semantic_challenge",
+      "expected_slots": {
+        "name": "badezimmerlüfter"
+      }
+    },
+    {
+      "query": "mach badezimmerlüfter ruhig",
+      "language": "de",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "badezimmerlüfter zu",
+      "category": "semantic_challenge",
+      "expected_slots": {
+        "name": "badezimmerlüfter"
+      }
+    },
+    {
+      "query": "reinigung mit staubsauger starten",
+      "language": "de",
+      "expected_intent": "HassVacuumStart",
+      "expected_canonical": "staubsauger Reinigung starten",
+      "category": "synonym_paraphrase",
+      "expected_slots": {
+        "name": "staubsauger"
+      }
+    },
+    {
+      "query": "staubsauger sauber machen lassen",
+      "language": "de",
+      "expected_intent": "HassVacuumStart",
+      "expected_canonical": "staubsauger staub saugen lassen",
+      "category": "synonym_paraphrase",
+      "expected_slots": {
+        "name": "staubsauger"
+      }
+    },
+    {
+      "query": "badezimmerlüfter herunterfahren",
+      "language": "de",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "badezimmerlüfter zu",
+      "category": "semantic_challenge",
+      "expected_slots": {
+        "name": "badezimmerlüfter"
+      }
+    },
+    {
+      "query": "badezimmerlüfter stoppen",
+      "language": "de",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "badezimmerlüfter zu",
+      "category": "semantic_challenge",
+      "expected_slots": {
+        "name": "badezimmerlüfter"
+      }
+    },
+    {
+      "query": "staubsauger soll reinigen",
+      "language": "de",
+      "expected_intent": "HassVacuumStart",
+      "expected_canonical": "staubsauger Reinigung starten",
+      "category": "synonym_paraphrase",
+      "expected_slots": {
+        "name": "staubsauger"
+      }
+    },
+    {
+      "query": "staubsauger arbeiten lassen",
+      "language": "de",
+      "expected_intent": "HassVacuumStart",
+      "expected_canonical": "staubsauger saugen lassen",
+      "category": "synonym_paraphrase",
+      "expected_slots": {
+        "name": "staubsauger"
+      }
+    },
+    {
+      "query": "schick den staubsauger heim",
+      "language": "de",
+      "expected_intent": "HassVacuumReturnToBase",
+      "expected_canonical": "staubsauger zurück",
+      "category": "synonym_paraphrase",
+      "expected_slots": {
+        "name": "staubsauger"
+      }
+    },
+    {
+      "query": "staubsauger zum laden schicken",
+      "language": "de",
+      "expected_intent": "HassVacuumReturnToBase",
+      "expected_canonical": "staubsauger zurück",
+      "category": "synonym_paraphrase",
+      "expected_slots": {
+        "name": "staubsauger"
+      }
+    },
+    {
+      "query": "bitte schlat den wasserkocher ein danke",
+      "language": "de",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "schalt den wasserkocher ein",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "name": "wasserkocher"
+      }
+    },
+    {
+      "query": "mach mal badzimmerlüfter aus bitte",
+      "language": "de",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "schalt badezimmerlüfter aus",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "name": "badezimmerlüfter"
+      }
+    },
+    {
+      "query": "stabsauger soll reinign bitte",
+      "language": "de",
+      "expected_intent": "HassVacuumStart",
+      "expected_canonical": "staubsauger Reinigung starten",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "name": "staubsauger"
+      }
+    },
+    {
+      "query": "staubsauger mach ein",
+      "language": "de",
+      "expected_intent": "HassVacuumStart",
+      "expected_canonical": "schalt staubsauger ein",
+      "category": "synonym_paraphrase",
+      "expected_slots": {
+        "name": "staubsauger"
+      }
+    },
+    {
+      "query": "lüfter mach aus",
+      "language": "de",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "schalt lüfter aus",
+      "category": "synonym_paraphrase",
+      "expected_slots": {
+        "name": "lüfter"
+      }
+    },
+    {
+      "query": "fahre den staubsauger zur ladestation",
+      "language": "de",
+      "expected_intent": "HassVacuumReturnToBase",
+      "expected_canonical": "staubsauger zurück",
+      "category": "semantic_challenge",
+      "expected_slots": {
+        "name": "staubsauger"
+      }
+    },
+    {
+      "query": "schalte wohnzimmerlicht",
+      "language": "de",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "schalt wohnzimmerlicht ein",
+      "category": "missing_words",
+      "expected_slots": {
+        "name": "wohnzimmerlicht"
+      }
+    },
+    {
+      "query": "schalte wasserkocher",
+      "language": "de",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "schalt wasserkocher ein",
+      "category": "missing_words",
+      "expected_slots": {
+        "name": "wasserkocher"
+      }
+    },
+    {
+      "query": "schalte das wohnzimmerlicht",
+      "language": "de",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "schalt wohnzimmerlicht ein",
+      "category": "missing_words",
+      "expected_slots": {
+        "name": "wohnzimmerlicht"
+      }
+    },
+    {
+      "query": "schalte den wasserkocher",
+      "language": "de",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "schalt wasserkocher ein",
+      "category": "missing_words",
+      "expected_slots": {
+        "name": "wasserkocher"
+      }
+    },
+    {
+      "query": "schalte staubsauger",
+      "language": "de",
+      "expected_intent": "HassVacuumStart",
+      "expected_canonical": "schalt staubsauger ein",
+      "category": "missing_words",
+      "expected_slots": {
+        "name": "staubsauger"
+      }
+    },
+    {
+      "query": "mach das wohnzimmerlicht",
+      "language": "de",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "schalt wohnzimmerlicht ein",
+      "category": "missing_words",
+      "expected_slots": {
+        "name": "wohnzimmerlicht"
+      }
+    }
+  ],
+  "registry_slots": {
+    "name": [
+      "wohnzimmerlicht",
+      "badezimmerlüfter",
+      "wasserkocher",
+      "schlafzimmerfenster",
+      "licht",
+      "lüfter",
+      "staubsauger",
+      "fernseher",
+      "schlafzimmerlicht",
+      "küchenlicht",
+      "wohnzimmerlüfter",
+      "schlafzimmerlüfter",
+      "wohnzimmervorhang",
+      "schlafzimmervorhang"
+    ],
+    "name:light": [
+      "wohnzimmerlicht",
+      "licht",
+      "schlafzimmerlicht",
+      "küchenlicht",
+      "flurlicht"
+    ],
+    "name:fan": [
+      "badezimmerlüfter",
+      "lüfter",
+      "wohnzimmerlüfter",
+      "schlafzimmerlüfter"
+    ],
+    "name:switch": ["wasserkocher", "eingangstürschalter"],
+    "name:water_heater": ["wasserkocher"],
+    "name:cover": [
+      "schlafzimmerfenster",
+      "wohnzimmerfenster",
+      "wohnzimmervorhang",
+      "schlafzimmervorhang"
+    ],
+    "name:vacuum": ["staubsauger"],
+    "name:media_player": ["fernseher"],
+    "area": [
+      "wohnzimmer",
+      "badezimmer",
+      "schlafzimmer",
+      "küche",
+      "flur",
+      "balkon",
+      "büro"
+    ],
+    "name:todo": ["einkaufsliste"],
+    "name:climate": ["wohnzimmerklima", "schlafzimmerklima"],
+    "name:sensor": ["eingangstürsensor", "wohnzimmerbewegungssensor"]
+  }
+}

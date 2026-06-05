@@ -1,0 +1,15 @@
+{
+  "domain": "assist_canonicalizer",
+  "name": "Assist Canonicalizer",
+  "after_dependencies": ["assist_pipeline"],
+  "codeowners": ["@luuquangvu"],
+  "config_flow": true,
+  "dependencies": ["conversation"],
+  "documentation": "https://github.com/luuquangvu/assist-canonicalizer",
+  "integration_type": "service",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/luuquangvu/assist-canonicalizer/issues",
+  "requirements": ["rapidfuzz>=3.10.0"],
+  "single_config_entry": true,
+  "version": "0.1.0"
+}

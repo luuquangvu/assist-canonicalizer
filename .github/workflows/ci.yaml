@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "**.py"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/ci.yaml"
+      - "tools/compatibility_matrix.json"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "**.py"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/ci.yaml"
+      - "tools/compatibility_matrix.json"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  static-checks:
+    runs-on: ubuntu-latest
+    name: "Static Checks (Synced with Local Environment)"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+
+      - name: Install dependencies
+        run: uv sync --all-groups
+
+      - name: Run Ruff
+        run: uv run --no-project ruff check
+
+      - name: Run Ruff Format
+        run: uv run --no-project ruff format --check
+
+      - name: Run Ty Check
+        run: uv run --no-project ty check
+
+      - name: Run Pyright
+        run: uv run --no-project pyright
+
+      - name: Run Interrogate
+        run: uv run --no-project interrogate
+
+      - name: Run Tests
+        run: uv run --no-project pytest
+
+  setup-matrix:
+    runs-on: ubuntu-latest
+    name: "Setup Compatibility Matrix"
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Set matrix
+        id: set-matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          LATEST_HA=$(curl -s -f --max-time 20 --retry 3 https://pypi.org/pypi/homeassistant/json | jq -r .info.version 2>/dev/null || echo "null")
+
+          if [ "$LATEST_HA" = "null" ]; then
+            echo "::error::Failed to fetch latest Home Assistant version"
+            exit 1
+          fi
+
+          if [[ ! "$LATEST_HA" =~ ^[a-zA-Z0-9]+(\.[a-zA-Z0-9]+)*$ ]]; then
+            echo "::error::Invalid Home Assistant version format: $LATEST_HA"
+            exit 1
+          fi
+
+          MATRIX_JSON=$(jq -c --arg latest "$LATEST_HA" 'map(if .ha_version == "latest" then . + {ha_version: ("latest (" + $latest + ")"), ha_real_version: $latest} else . + {ha_real_version: .ha_version} end) | {include: .}' tools/compatibility_matrix.json)
+          echo "matrix=$MATRIX_JSON" >> $GITHUB_OUTPUT
+
+  compatibility:
+    needs: setup-matrix
+    runs-on: ubuntu-latest
+    name: ${{ matrix.ha_version && format('Compatibility ({0}, {1})', matrix.ha_version, matrix.python_version) || 'Compatibility' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup-matrix.outputs.matrix) }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          uv --no-config venv --no-project --python ${{ matrix.python_version }}
+          HA_SPEC="homeassistant==${{ matrix.ha_real_version }}"
+          echo "homeassistant == ${{ matrix.ha_real_version }}" > overrides.txt
+          uv --no-config pip install --overrides overrides.txt --python .venv/bin/python "$HA_SPEC" pytest pytest-homeassistant-custom-component rapidfuzz
+
+      - name: Run Tests
+        run: uv run --no-project --python .venv/bin/python pytest --no-cov
