@@ -115,7 +115,7 @@ jobs:
           uv --no-config venv --no-project --python ${{ matrix.python_version }}
           HA_SPEC="homeassistant==${{ matrix.ha_real_version }}"
           echo "homeassistant == ${{ matrix.ha_real_version }}" > overrides.txt
-          uv --no-config pip install --overrides overrides.txt --python .venv/bin/python "$HA_SPEC" pytest pytest-homeassistant-custom-component rapidfuzz
+          uv --no-config pip install --overrides overrides.txt --python .venv/bin/python "$HA_SPEC" hassil home-assistant-intents pytest pytest-homeassistant-custom-component rapidfuzz
 
       - name: Run Tests
         run: uv run --no-project --python .venv/bin/python pytest --no-cov
