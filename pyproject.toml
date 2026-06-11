@@ -12,6 +12,7 @@ dev = [
   "hassil",
   "home-assistant-intents",
   "interrogate",
+  "orjson",
   "packaging",
   "prek",
   "pyright",

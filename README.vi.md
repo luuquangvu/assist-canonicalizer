@@ -6,6 +6,7 @@
 
 [![CI](https://img.shields.io/github/actions/workflow/status/luuquangvu/assist-canonicalizer/ci.yaml?style=flat&logo=github&label=CI)](https://github.com/luuquangvu/assist-canonicalizer/actions/workflows/ci.yaml)
 [![Validation](https://img.shields.io/github/actions/workflow/status/luuquangvu/assist-canonicalizer/validation.yaml?style=flat&logo=github&label=Validation)](https://github.com/luuquangvu/assist-canonicalizer/actions/workflows/validation.yaml)
+[![CodeQL](https://img.shields.io/github/actions/workflow/status/luuquangvu/assist-canonicalizer/github-code-scanning/codeql?style=flat&logo=github&label=CodeQL)](https://github.com/luuquangvu/assist-canonicalizer/actions/workflows/github-code-scanning/codeql)
 [![Prettier](https://img.shields.io/github/actions/workflow/status/luuquangvu/assist-canonicalizer/prettier.yaml?style=flat&logo=prettier&label=Prettier)](https://github.com/luuquangvu/assist-canonicalizer/actions/workflows/prettier.yaml)
 
 **[ [🇺🇸 English](README.md) | 🇻🇳 Tiếng Việt ]**
@@ -140,27 +141,35 @@ Công cụ xếp hạng được đo kiểm (benchmark) so với bộ nhận di�
 
 ### Kết quả tổng quan
 
+<!-- BENCHMARK_OVERALL_START -->
+
 | Chế độ    | Đúng Intent/Slot | Nhận diện sai (Mismatch) | Dự phòng (Fallback) |
 | --------- | ---------------: | -----------------------: | ------------------: |
 | `hassil`  |            29.8% |                     9.6% |               60.6% |
-| `lexical` |        **80.0%** |                     8.3% |           **11.7%** |
+| `lexical` |        **80.9%** |                 **8.3%** |           **10.9%** |
 
-> Độ chính xác nhận diện Intent/Slot tăng từ **29.8% lên 80.0%**. Tổng tỷ lệ lỗi (nhận diện sai + chuyển sang dự phòng) giảm mạnh từ **70.2% xuống còn 20.0%**.
+> Độ chính xác nhận diện Intent/Slot tăng từ **29.8% lên 80.9%**. Tổng tỷ lệ lỗi (nhận diện sai + chuyển sang dự phòng) giảm mạnh từ **70.2% xuống còn 19.1%**.
+
+<!-- BENCHMARK_OVERALL_END -->
 
 ### Chi tiết theo từng ngôn ngữ
+
+<!-- BENCHMARK_LANGS_START -->
 
 | Ngôn ngữ | Chế độ    | Đúng Intent/Slot | Nhận diện sai (Mismatch) | Dự phòng (Fallback) |
 | -------- | --------- | ---------------: | -----------------------: | ------------------: |
 | EN       | `hassil`  |            28.8% |                    15.3% |               55.9% |
-| EN       | `lexical` |        **86.5%** |                     6.3% |                7.2% |
+| EN       | `lexical` |        **86.5%** |                 **6.3%** |            **7.2%** |
 | DE       | `hassil`  |            32.2% |                    12.6% |               55.2% |
-| DE       | `lexical` |        **88.5%** |                     3.4% |                8.0% |
+| DE       | `lexical` |        **88.5%** |                 **3.4%** |            **8.0%** |
 | FR       | `hassil`  |            34.1% |                     8.2% |               57.6% |
-| FR       | `lexical` |        **81.2%** |                     2.4% |               16.5% |
+| FR       | `lexical` |        **81.2%** |                 **2.4%** |           **16.5%** |
 | NL       | `hassil`  |            34.3% |                     4.8% |               61.0% |
-| NL       | `lexical` |        **70.5%** |                    15.2% |               14.3% |
+| NL       | `lexical` |        **73.3%** |                **15.2%** |           **11.4%** |
 | VI       | `hassil`  |            18.3% |                     6.1% |               75.6% |
-| VI       | `lexical` |        **73.2%** |                    13.4% |               13.4% |
+| VI       | `lexical` |        **74.4%** |                **13.4%** |           **12.2%** |
+
+<!-- BENCHMARK_LANGS_END -->
 
 > [!NOTE]
 > Số lượng ứng cử viên và thời gian xây dựng chỉ mục (latency) thay đổi tùy theo môi trường phần cứng và số lượng thực thể, khu vực, tầng trong nhà thông minh của bạn.
