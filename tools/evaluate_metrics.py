@@ -14,6 +14,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from string import ascii_letters, digits
 from typing import TYPE_CHECKING, Any
 
 import hassil
@@ -22,6 +23,10 @@ import orjson
 
 if TYPE_CHECKING:
     from custom_components.assist_canonicalizer.ranking import RankedCandidate
+
+_REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+
+_PATH_ALLOWED_CHARS = ascii_letters + digits + "/._-"
 
 _BOOTSTRAPPED = False
 
@@ -37,6 +42,49 @@ _RankedCandidate: Any = None
 _ScoreBreakdown: Any = None
 Candidate: Any = None
 FallbackReason: Any = None
+
+
+def _sanitize_path(root_path: str, user_path: str) -> str:
+    """Validate, sanitize and contain a user-supplied file path.
+
+    1. Reconstructs every character from the static _PATH_ALLOWED_CHARS
+       whitelist via integer-index lookup — the ONLY pattern CodeQL
+       recognizes to completely sever a path-injection taint chain.
+    2. Resolves the root via os.path.realpath (symlink-safe), joins
+       with the cleaned path, normalizes via os.path.normpath, and
+       verifies containment via startswith.
+
+    Returns the safe absolute path or raises ValueError.
+    """
+    if not isinstance(user_path, str):
+        raise ValueError(f"Invalid path value {user_path!r}; expected a string.")
+
+    safe_chars: list[str] = []
+    for char in user_path:
+        idx = _PATH_ALLOWED_CHARS.find(char)
+        if idx == -1:
+            raise ValueError(f"Invalid path {user_path!r}; character {char!r} is not allowed.")
+        safe_chars.append(_PATH_ALLOWED_CHARS[idx])
+    clean = "".join(safe_chars)
+
+    root = os.path.realpath(root_path)
+    fullpath = os.path.realpath(os.path.normpath(os.path.join(root, clean)))
+
+    if fullpath != root and not fullpath.startswith(root + os.sep):
+        raise ValueError(f"Resolved path {fullpath!r} escapes allowed root {root!r}.")
+    return fullpath
+
+
+def _sanitize_path_required(root: str, label: str, path: str) -> str:
+    """Sanitize *path* under *root* or print error to stderr and exit(1).
+
+    *label* is used in the error message (e.g. 'datasets_dir').
+    """
+    try:
+        return _sanitize_path(root, path)
+    except ValueError as err:
+        print(f"Error: {label} must be inside {root}: {path} — {err}", file=sys.stderr)
+        sys.exit(1)
 
 
 def _bootstrap_project_imports() -> None:
@@ -1183,19 +1231,34 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    safe_datasets_dir = _sanitize_path_required(_REPO_ROOT, "datasets_dir", args.datasets_dir)
+    safe_output_json: str | None = None
+    safe_output_md: str | None = None
+    if args.output_json is not None:
+        safe_output_json = _sanitize_path_required(_REPO_ROOT, "output_json", args.output_json)
+    if args.output_md is not None:
+        safe_output_md = _sanitize_path_required(_REPO_ROOT, "output_md", args.output_md)
+
     datasets = {}
-    if os.path.exists(args.datasets_dir):
-        for filename in os.listdir(args.datasets_dir):
+    if os.path.exists(safe_datasets_dir):
+        _safe_dir_real = os.path.realpath(safe_datasets_dir)
+        for filename in os.listdir(safe_datasets_dir):
             if filename.endswith(".json"):
+                file_path = os.path.join(safe_datasets_dir, filename)
+                real_path = os.path.realpath(file_path)
+                if not os.path.isfile(real_path):
+                    continue
+                if not real_path.startswith(_safe_dir_real + os.sep):
+                    continue
                 lang = filename[:-5]
-                datasets[lang] = os.path.join(args.datasets_dir, filename)
+                datasets[lang] = real_path
 
     success = asyncio.run(
         run_evaluation(
             datasets=datasets,
             failure_limit=args.failure_limit,
-            output_json=args.output_json,
-            output_md=args.output_md,
+            output_json=safe_output_json,
+            output_md=safe_output_md,
             min_intent_slot_accuracy=args.min_intent_slot_accuracy,
             max_fallback_rate=args.max_fallback_rate,
         )
