@@ -1,0 +1,85 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Assist Canonicalizer",
+        "description": "Configura Assist Canonicalizer per preelaborare e canonizzare le richieste Assist.",
+        "data": {
+          "fallback_agent_id": "Agente di conversazione di fallback",
+          "min_confidence": "Confidenza minima di corrispondenza",
+          "min_margin": "Margine minimo di confidenza"
+        }
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "È consentita una sola istanza di Assist Canonicalizer."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Opzioni di Assist Canonicalizer",
+        "description": "Configura il comportamento e le impostazioni di Assist Canonicalizer.",
+        "data": {
+          "fallback_agent_id": "Agente di conversazione di fallback",
+          "min_confidence": "Confidenza minima di corrispondenza",
+          "min_margin": "Margine minimo di confidenza"
+        }
+      }
+    }
+  },
+  "services": {
+    "test_match": {
+      "name": "Testa corrispondenza",
+      "description": "Restituisce i candidati classificati per un input di testo con punteggio lessicale e soglie personalizzate.",
+      "fields": {
+        "text": {
+          "name": "Testo",
+          "description": "Il testo di input da canonizzare e confrontare."
+        },
+        "language": {
+          "name": "Lingua",
+          "description": "La lingua del testo di input. Se omessa, viene utilizzata la lingua configurata in Home Assistant."
+        }
+      }
+    },
+    "rebuild_index": {
+      "name": "Ricostruisci indice",
+      "description": "Ricostruisce un indice linguistico da fonti di candidati automatiche.",
+      "fields": {
+        "language": {
+          "name": "Lingua",
+          "description": "La lingua dell'indice da ricostruire. Se omessa, viene utilizzata la lingua configurata in Home Assistant."
+        }
+      }
+    },
+    "clear_index": {
+      "name": "Cancella indice",
+      "description": "Cancella un indice linguistico o tutti gli indici.",
+      "fields": {
+        "language": {
+          "name": "Lingua",
+          "description": "La lingua dell'indice da cancellare. Se omessa, tutti gli indici linguistici vengono cancellati."
+        }
+      }
+    },
+    "diagnostics": {
+      "name": "Diagnostica",
+      "description": "Restituisce la diagnostica di runtime per Assist Canonicalizer."
+    },
+    "dump_candidates": {
+      "name": "Esporta candidati",
+      "description": "Restituisce i dettagli del pool di candidati per una lingua.",
+      "fields": {
+        "language": {
+          "name": "Lingua",
+          "description": "La lingua del pool di candidati da scaricare. Se omessa, viene utilizzata la lingua configurata in Home Assistant."
+        },
+        "rebuild": {
+          "name": "Ricostruisci",
+          "description": "Forza la ricostruzione dell'indice prima dello scaricamento."
+        }
+      }
+    }
+  }
+}

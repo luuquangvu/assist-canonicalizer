@@ -1,0 +1,85 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Assist Canonicalizer",
+        "description": "配置 Assist Canonicalizer 以对 Assist 请求进行预处理和规范化。",
+        "data": {
+          "fallback_agent_id": "备用对话代理",
+          "min_confidence": "最小匹配置信度",
+          "min_margin": "最小置信度裕量"
+        }
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "仅允许配置一个 Assist Canonicalizer 实例。"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Assist Canonicalizer 选项",
+        "description": "配置 Assist Canonicalizer 的设置和行为。",
+        "data": {
+          "fallback_agent_id": "备用对话代理",
+          "min_confidence": "最小匹配置信度",
+          "min_margin": "最小置信度裕量"
+        }
+      }
+    }
+  },
+  "services": {
+    "test_match": {
+      "name": "测试匹配",
+      "description": "使用词汇评分和自定义阈值，返回文本输入的候选匹配项并按顺序排名。",
+      "fields": {
+        "text": {
+          "name": "文本",
+          "description": "用于规范化和匹配的输入文本。"
+        },
+        "language": {
+          "name": "语言",
+          "description": "输入文本的语言。若省略，将回退使用 Home Assistant 系统配置语言。"
+        }
+      }
+    },
+    "rebuild_index": {
+      "name": "重建索引",
+      "description": "基于自动生成的候选源重建特定语言的索引。",
+      "fields": {
+        "language": {
+          "name": "语言",
+          "description": "要重建索引的语言。若省略，将回退使用 Home Assistant 系统配置语言。"
+        }
+      }
+    },
+    "clear_index": {
+      "name": "清除索引",
+      "description": "清除特定语言的索引或清除所有索引。",
+      "fields": {
+        "language": {
+          "name": "语言",
+          "description": "要清除索引的语言。若省略，将清除所有语言的索引。"
+        }
+      }
+    },
+    "diagnostics": {
+      "name": "诊断",
+      "description": "返回 Assist Canonicalizer 的运行时诊断信息。"
+    },
+    "dump_candidates": {
+      "name": "导出候选列表",
+      "description": "返回指定语言的候选池详细信息。",
+      "fields": {
+        "language": {
+          "name": "语言",
+          "description": "要导出候选池的语言。若省略，将回退使用 Home Assistant 系统配置语言。"
+        },
+        "rebuild": {
+          "name": "重建",
+          "description": "在导出前强制重建索引。"
+        }
+      }
+    }
+  }
+}

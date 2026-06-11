@@ -19,7 +19,7 @@
     "step": {
       "init": {
         "title": "Assist Canonicalizer Options",
-        "description": "Configure the behavior and settings for Assist Canonicalizer.",
+        "description": "Configure settings and behavior for Assist Canonicalizer.",
         "data": {
           "fallback_agent_id": "Fallback Conversation Agent",
           "min_confidence": "Minimum Match Confidence",
@@ -31,7 +31,7 @@
   "services": {
     "test_match": {
       "name": "Test match",
-      "description": "Return ranked candidates for a text input with lexical scoring and custom thresholds.",
+      "description": "Return ranked candidates for a text input using lexical scoring and custom thresholds.",
       "fields": {
         "text": {
           "name": "Text",
@@ -39,23 +39,23 @@
         },
         "language": {
           "name": "Language",
-          "description": "The language of the input text. If omitted, falls back to the Home Assistant config language."
+          "description": "The language of the input text. If omitted, falls back to the Home Assistant configuration language."
         }
       }
     },
     "rebuild_index": {
       "name": "Rebuild index",
-      "description": "Rebuild one language index from automatic candidate sources.",
+      "description": "Rebuild the search index for a language from automatic candidate sources.",
       "fields": {
         "language": {
           "name": "Language",
-          "description": "The language of the index to rebuild. If omitted, falls back to the Home Assistant config language."
+          "description": "The language of the index to rebuild. If omitted, falls back to the Home Assistant configuration language."
         }
       }
     },
     "clear_index": {
       "name": "Clear index",
-      "description": "Clear one language index or all indexes.",
+      "description": "Clear a language index or all indexes.",
       "fields": {
         "language": {
           "name": "Language",
@@ -69,15 +69,15 @@
     },
     "dump_candidates": {
       "name": "Dump candidates",
-      "description": "Return candidate pool details for a language.",
+      "description": "Return candidate pool details for a specific language.",
       "fields": {
         "language": {
           "name": "Language",
-          "description": "The language of the candidate pool to dump. If omitted, falls back to the Home Assistant config language."
+          "description": "The language of the candidate pool to dump. If omitted, falls back to the Home Assistant configuration language."
         },
         "rebuild": {
           "name": "Rebuild",
-          "description": "Force rebuild index before dumping."
+          "description": "Force an index rebuild before dumping."
         }
       }
     }
