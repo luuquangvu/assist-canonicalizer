@@ -1,0 +1,85 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Assist Canonicalizer",
+        "description": "Konfigurera Assist Canonicalizer för att förbehandla och kanonisera Assist-förfrågningar.",
+        "data": {
+          "fallback_agent_id": "Fallback-konversationsagent",
+          "min_confidence": "Minsta matchningssäkerhet",
+          "min_margin": "Minsta konfidensmarginal"
+        }
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Endast en enda instans av Assist Canonicalizer är tillåten."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Assist Canonicalizer-alternativ",
+        "description": "Konfigurera beteende och inställningar för Assist Canonicalizer.",
+        "data": {
+          "fallback_agent_id": "Fallback-konversationsagent",
+          "min_confidence": "Minsta matchningssäkerhet",
+          "min_margin": "Minsta konfidensmarginal"
+        }
+      }
+    }
+  },
+  "services": {
+    "test_match": {
+      "name": "Testa matchning",
+      "description": "Returnerar rankade kandidater för en textinmatning med lexikalisk poängsättning och anpassade tröskelvärden.",
+      "fields": {
+        "text": {
+          "name": "Text",
+          "description": "Inmatningstexten att kanonisera och matcha."
+        },
+        "language": {
+          "name": "Språk",
+          "description": "Språket för inmatningstexten. Om det utelämnas används det språk som är konfigurerat i Home Assistant."
+        }
+      }
+    },
+    "rebuild_index": {
+      "name": "Bygg om index",
+      "description": "Bygger om ett språkindex från automatiska kandidatkällor.",
+      "fields": {
+        "language": {
+          "name": "Språk",
+          "description": "Språket för indexet som ska byggas om. Om det utelämnas används det språk som är konfigurerat i Home Assistant."
+        }
+      }
+    },
+    "clear_index": {
+      "name": "Rensa index",
+      "description": "Rensar ett språkindex eller alla index.",
+      "fields": {
+        "language": {
+          "name": "Språk",
+          "description": "Språket för indexet som ska rensas. Om det utelämnas rensas alla språkindex."
+        }
+      }
+    },
+    "diagnostics": {
+      "name": "Diagnostik",
+      "description": "Returnerar runtime-diagnostik för Assist Canonicalizer."
+    },
+    "dump_candidates": {
+      "name": "Exportera kandidater",
+      "description": "Returnerar detaljer om kandidatpoolen för ett språk.",
+      "fields": {
+        "language": {
+          "name": "Språk",
+          "description": "Språket för kandidatpoolen som ska dumpas. Om det utelämnas används det språk som är konfigurerat i Home Assistant."
+        },
+        "rebuild": {
+          "name": "Bygg om",
+          "description": "Tvinga ombyggnad av index före dumpning."
+        }
+      }
+    }
+  }
+}

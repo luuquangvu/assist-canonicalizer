@@ -1,0 +1,85 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Assist Canonicalizer",
+        "description": "Skonfiguruj Assist Canonicalizer, aby wstępnie przetwarzać i kanonizować żądania Assist.",
+        "data": {
+          "fallback_agent_id": "Zapasowy agent konwersacyjny",
+          "min_confidence": "Minimalna pewność dopasowania",
+          "min_margin": "Minimalny margines pewności"
+        }
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Dozwolona jest tylko jedna instancja Assist Canonicalizer."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Opcje Assist Canonicalizer",
+        "description": "Skonfiguruj zachowanie i ustawienia Assist Canonicalizer.",
+        "data": {
+          "fallback_agent_id": "Zapasowy agent konwersacyjny",
+          "min_confidence": "Minimalna pewność dopasowania",
+          "min_margin": "Minimalny margines pewności"
+        }
+      }
+    }
+  },
+  "services": {
+    "test_match": {
+      "name": "Testuj dopasowanie",
+      "description": "Zwraca uszeregowanych kandydatów dla wprowadzonego tekstu z oceną leksykalną i niestandardowymi progami.",
+      "fields": {
+        "text": {
+          "name": "Tekst",
+          "description": "Tekst wejściowy do kanonizacji i dopasowania."
+        },
+        "language": {
+          "name": "Język",
+          "description": "Język tekstu wejściowego. W przypadku pominięcia używany jest język skonfigurowany w Home Assistant."
+        }
+      }
+    },
+    "rebuild_index": {
+      "name": "Odbuduj indeks",
+      "description": "Odbudowuje jeden indeks językowy z automatycznych źródeł kandydatów.",
+      "fields": {
+        "language": {
+          "name": "Język",
+          "description": "Język indeksu do odbudowania. W przypadku pominięcia używany jest język skonfigurowany w Home Assistant."
+        }
+      }
+    },
+    "clear_index": {
+      "name": "Wyczyść indeks",
+      "description": "Czyści jeden indeks językowy lub wszystkie indeksy.",
+      "fields": {
+        "language": {
+          "name": "Język",
+          "description": "Język indeksu do wyczyszczenia. W przypadku pominięcia czyszczone są wszystkie indeksy językowe."
+        }
+      }
+    },
+    "diagnostics": {
+      "name": "Diagnostyka",
+      "description": "Zwraca diagnostykę czasu wykonania dla Assist Canonicalizer."
+    },
+    "dump_candidates": {
+      "name": "Eksportuj kandydatów",
+      "description": "Zwraca szczegóły puli kandydatów dla języka.",
+      "fields": {
+        "language": {
+          "name": "Język",
+          "description": "Język puli kandydatów do zrzutu. W przypadku pominięcia używany jest język skonfigurowany w Home Assistant."
+        },
+        "rebuild": {
+          "name": "Odbuduj",
+          "description": "Wymusza odbudowę indeksu przed zrzutem."
+        }
+      }
+    }
+  }
+}

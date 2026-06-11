@@ -1,0 +1,85 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Assist Canonicalizer",
+        "description": "Configureer Assist Canonicalizer om Assist-verzoeken voor te verwerken en te canoniseren.",
+        "data": {
+          "fallback_agent_id": "Fallback-gespreksagent",
+          "min_confidence": "Minimale matchbetrouwbaarheid",
+          "min_margin": "Minimale betrouwbaarheidsmarge"
+        }
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Er is slechts één instantie van Assist Canonicalizer toegestaan."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Assist Canonicalizer-opties",
+        "description": "Configureer het gedrag en de instellingen voor Assist Canonicalizer.",
+        "data": {
+          "fallback_agent_id": "Fallback-gespreksagent",
+          "min_confidence": "Minimale matchbetrouwbaarheid",
+          "min_margin": "Minimale betrouwbaarheidsmarge"
+        }
+      }
+    }
+  },
+  "services": {
+    "test_match": {
+      "name": "Match testen",
+      "description": "Retourneert gerangschikte kandidaten voor een tekstinvoer met lexicale scoring en aangepaste drempels.",
+      "fields": {
+        "text": {
+          "name": "Tekst",
+          "description": "De invoertekst om te canoniseren en te matchen."
+        },
+        "language": {
+          "name": "Taal",
+          "description": "De taal van de invoertekst. Indien weggelaten, wordt de in Home Assistant geconfigureerde taal gebruikt."
+        }
+      }
+    },
+    "rebuild_index": {
+      "name": "Index opnieuw opbouwen",
+      "description": "Bouwt één taalindex opnieuw op vanuit automatische kandidaatbronnen.",
+      "fields": {
+        "language": {
+          "name": "Taal",
+          "description": "De taal van de opnieuw op te bouwen index. Indien weggelaten, wordt de in Home Assistant geconfigureerde taal gebruikt."
+        }
+      }
+    },
+    "clear_index": {
+      "name": "Index wissen",
+      "description": "Wist één taalindex of alle indexen.",
+      "fields": {
+        "language": {
+          "name": "Taal",
+          "description": "De taal van de te wissen index. Indien weggelaten, worden alle taalindexen gewist."
+        }
+      }
+    },
+    "diagnostics": {
+      "name": "Diagnostiek",
+      "description": "Retourneert runtime-diagnostiek voor Assist Canonicalizer."
+    },
+    "dump_candidates": {
+      "name": "Kandidaten exporteren",
+      "description": "Retourneert details van de kandidaatpool voor een taal.",
+      "fields": {
+        "language": {
+          "name": "Taal",
+          "description": "De taal van de te dumpen kandidaatpool. Indien weggelaten, wordt de in Home Assistant geconfigureerde taal gebruikt."
+        },
+        "rebuild": {
+          "name": "Opnieuw opbouwen",
+          "description": "Dwingt het opnieuw opbouwen van de index af vóór het dumpen."
+        }
+      }
+    }
+  }
+}

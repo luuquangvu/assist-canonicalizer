@@ -37,17 +37,18 @@
   - [Code Quality & Security](#code-quality--security)
   - [Contributing](#contributing)
   - [License](#license)
+  - [Support the Project](#support-the-project)
 
 ---
 
 ## Features
 
-- **Native Conversation Agent**: Registers as a fully-fledged Home Assistant conversation agent. Intercepts every assist command, preprocesses it through lexical canonicalization, and transparently delegates validated results to your existing conversation pipeline.
+- **Native Conversation Agent**: Registers as a fully-fledged Home Assistant conversation agent. Intercepts every Assist command, preprocesses it through lexical canonicalization, and transparently delegates validated results to your existing conversation pipeline.
 - **Multi-Signal Lexical Ranking Engine**: Scores every candidate against your input using four complementary signals: **RapidFuzz fuzzy matching**, **character n-gram Jaccard similarity**, **BM25 probabilistic retrieval**, and **intent domain action matching**. The weighted ensemble consistently outperforms single-signal approaches.
 - **Automatic Candidate Index Building**: Builds its canonical candidate index from every available source: built-in Home Assistant intents, your custom sentence YAML files, exposed entity names and aliases, area and floor registry entries, and dynamically expanded slot values. No manual configuration required.
 - **On-Disk Candidate Persistence**: Saves canonicalized candidate lists to Home Assistant's storage layer so that intent source parsing can be skipped on subsequent rebuilds. Indexes are rebuilt from saved candidates, eliminating the need to re-parse sentence templates and YAML files.
 - **Configurable Confidence Gates**: Fine-tune acceptance behavior with **Minimum Match Confidence** and **Minimum Confidence Margin** thresholds. Only candidates that clear both thresholds receive canonicalization.
-- **Safe Multi-Stage Fallback**: When ranking confidence is too low, the margin between the top candidate and the next differing-intent candidate is insufficient, the index is empty, or validation against the built-in HA agent fails, the system dispatches your original text to a separately configured fallback agent, ideally an LLM-based agent that can interpret natural language differently and recover from mismatches the built-in recognizer couldn't handle.
+- **Safe Multi-Stage Fallback**: When ranking confidence is too low, the margin between the top candidate and the next differing-intent candidate is insufficient, the index is empty, or validation against the built-in Home Assistant agent fails, the system dispatches your original text to a separately configured fallback agent, ideally an LLM-based agent that can interpret natural language differently and recover from mismatches the built-in recognizer couldn't handle.
 - **Rich Developer Tools**: Five dedicated actions (`test_match`, `rebuild_index`, `clear_index`, `diagnostics`, `dump_candidates`) give you full visibility into the ranking process, live index inspection, and manual control over index lifecycle, all from the standard Developer Tools Actions panel.
 - **Per-Language Isolation**: Maintains a dedicated candidate index for each language, with automatic language variant matching against Home Assistant's supported language list. Slot values are dynamically expanded per language.
 - **Scalable Candidate Capping**: Built-in safety limits prevent memory exhaustion by automatically capping candidates per language, per intent, per template, and per ranking pass.
@@ -83,11 +84,10 @@
 3. Select the **Fallback Conversation Agent**. When the canonicalizer cannot safely match a candidate, your original text is dispatched to this agent as a second chance. Choosing the built-in Home Assistant agent as the fallback is usually ineffective; the accepted canonicalized candidate was already validated against it and failed, so sending the raw text back to the same agent will likely fail again. For best results, select an LLM-based conversation agent that can interpret natural language differently and recover from the mismatch.
 4. Set the **Minimum Match Confidence**. A candidate must score at or above this threshold across all four ranking signals to be accepted. Stick with the default value initially and use the **Test Match** action to observe real scores before making adjustments.
 5. Set the **Minimum Confidence Margin**. The gap between the top-ranked candidate and the next candidate with a different intent name must be at least this value. This prevents situations where the input is ambiguous and two different intents score similarly. Use the default value at first; only tighten or relax it after analyzing actual score breakdowns with **Test Match**.
-6. Once added, the integration will build its candidate index automatically. You can verify the index status using the **Diagnostics** action.
-7. Go to **Settings** > **Voice assistants** and open your Assist pipeline. Under **Conversation agents**, select **Assist Canonicalizer** from the agent list. It is recommended to enable **Prefer handling commands locally** so the built-in local intent recognizer (Hassil) gets the first chance; if it can handle the command directly, it does so without involving the canonicalizer; if it cannot, Assist Canonicalizer takes over and tries to match the input against its canonical index.
+6. Go to **Settings** > **Voice assistants** and open your Assist pipeline. Under **Conversation agents**, select **Assist Canonicalizer** from the agent list. It is recommended to enable **Prefer handling commands locally** so the built-in local intent recognizer (Hassil) gets the first chance; if it can handle the command directly, it does so without involving the canonicalizer; if it cannot, Assist Canonicalizer takes over and tries to match the input against its canonical index.
 
 > [!IMPORTANT]
-> **Without this step, Assist Canonicalizer will not process any commands.** The integration only activates when it is part of the active Assist pipeline.
+> **Without completing the above steps, Assist Canonicalizer will not process any commands.** The integration only activates when it is part of the active Assist pipeline.
 >
 > Start with the default threshold values and adjust based on your experience. If the canonicalizer falls back too often, try lowering `min_confidence`. If it produces mismatched intents, raise `min_confidence` and `min_margin`.
 
@@ -283,7 +283,7 @@ You can inspect the fallback reason for the last query using the **Diagnostics**
 3. Ensure your YAML files follow the [Home Assistant sentence syntax](https://www.home-assistant.io/voice_control/custom_sentences/).
 4. Force a rebuild with **Rebuild Index** after making changes to your sentence files.
 
-**The integration appears slow on first query.**
+**The integration appears slow on the first query.**
 
 The first query for a language triggers index building. Subsequent queries use the cached in-memory index and are much faster. After a restart, candidate lists are reloaded from storage and indexes are rebuilt, which is faster than a full rebuild from intent sources but not instant.
 
@@ -320,7 +320,7 @@ To ensure long-term reliability and stability, this project utilizes a modern st
   - **[Ruff](https://github.com/astral-sh/ruff)**: High-performance linting and formatting for consistent Python code.
   - **[Ty](https://github.com/astral-sh/ty)** & **[Pyright](https://github.com/Microsoft/pyright)**: Dual-layer type checking to catch type errors before runtime and ensure API stability.
   - **[Pytest](https://github.com/pytest-dev/pytest)**: A comprehensive test suite ensuring every update is functional and regression-free.
-  - **[Interrogate](https://github.com/econchick/interrogate)**: enforcement docstring coverage across the entire codebase to keep the code self-documenting.
+  - **[Interrogate](https://github.com/econchick/interrogate)**: Docstring coverage enforcement across the entire codebase to keep the code self-documenting.
   - **[Prettier](https://github.com/prettier/prettier)**: Consistent formatting for documentation and configuration files.
 
 > [!NOTE]
@@ -333,7 +333,9 @@ To ensure long-term reliability and stability, this project utilizes a modern st
 Contributions are what make the open-source community such an amazing place to learn, inspire, and create. Any contributions you make are **greatly appreciated**.
 
 > [!IMPORTANT]
-> The development environment for this project is **Linux**. If you are using Windows, please use [WSL (Windows Subsystem for Linux)](https://learn.microsoft.com/en-us/windows/wsl/install), as the test suite and development tools are designed to run in a Linux environment. All Python commands must use `uv run <command>` and dependencies are managed via `uv sync`.
+> The development environment for this project is **Linux**. If you are using Windows, please use [WSL (Windows Subsystem for Linux)](https://learn.microsoft.com/en-us/windows/wsl/install), as the test suite and development tools are designed to run in a Linux environment.
+>
+> Project dependencies and execution are managed via `uv`.
 
 - **If you find a bug**, please help us improve by [opening an issue](https://github.com/luuquangvu/assist-canonicalizer/issues).
 - **If you'd like to contribute**, feel free to fork the repo and create a Pull Request (please ensure your code passes the [quality checks](#code-quality--security) mentioned above).

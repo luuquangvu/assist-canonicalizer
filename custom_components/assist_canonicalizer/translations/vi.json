@@ -1,0 +1,85 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Assist Canonicalizer",
+        "description": "Cấu hình tích hợp Assist Canonicalizer để tiền xử lý và chuẩn hóa các yêu cầu Assist.",
+        "data": {
+          "fallback_agent_id": "Tác nhân hội thoại dự phòng",
+          "min_confidence": "Độ tin cậy trùng khớp tối thiểu",
+          "min_margin": "Chênh lệch độ tin cậy tối thiểu"
+        }
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Chỉ cho phép cấu hình một thực thể Assist Canonicalizer duy nhất."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Tùy chọn Assist Canonicalizer",
+        "description": "Cấu hình hoạt động và cài đặt cho Assist Canonicalizer.",
+        "data": {
+          "fallback_agent_id": "Tác nhân hội thoại dự phòng",
+          "min_confidence": "Độ tin cậy trùng khớp tối thiểu",
+          "min_margin": "Chênh lệch độ tin cậy tối thiểu"
+        }
+      }
+    }
+  },
+  "services": {
+    "test_match": {
+      "name": "Thử nghiệm so khớp",
+      "description": "Trả về các kết quả trùng khớp tiềm năng được xếp hạng cho văn bản đầu vào bằng cách tính điểm từ vựng và các ngưỡng tùy chỉnh.",
+      "fields": {
+        "text": {
+          "name": "Văn bản",
+          "description": "Văn bản đầu vào cần chuẩn hóa và so khớp."
+        },
+        "language": {
+          "name": "Ngôn ngữ",
+          "description": "Ngôn ngữ của văn bản đầu vào. Nếu bỏ qua, sẽ sử dụng ngôn ngữ hệ thống của Home Assistant."
+        }
+      }
+    },
+    "rebuild_index": {
+      "name": "Xây dựng lại chỉ mục",
+      "description": "Xây dựng lại chỉ mục của một ngôn ngữ từ các nguồn ứng viên tự động.",
+      "fields": {
+        "language": {
+          "name": "Ngôn ngữ",
+          "description": "Ngôn ngữ của chỉ mục cần xây dựng lại. Nếu bỏ qua, sẽ sử dụng ngôn ngữ hệ thống của Home Assistant."
+        }
+      }
+    },
+    "clear_index": {
+      "name": "Xóa chỉ mục",
+      "description": "Xóa chỉ mục của một ngôn ngữ cụ thể hoặc tất cả các chỉ mục.",
+      "fields": {
+        "language": {
+          "name": "Ngôn ngữ",
+          "description": "Ngôn ngữ của chỉ mục cần xóa. Nếu bỏ qua, tất cả các chỉ mục ngôn ngữ sẽ bị xóa."
+        }
+      }
+    },
+    "diagnostics": {
+      "name": "Chẩn đoán",
+      "description": "Trả về thông tin chẩn đoán thời gian chạy của Assist Canonicalizer."
+    },
+    "dump_candidates": {
+      "name": "Trích xuất danh sách ứng viên",
+      "description": "Trả về thông tin chi tiết của nhóm ứng viên cho một ngôn ngữ.",
+      "fields": {
+        "language": {
+          "name": "Ngôn ngữ",
+          "description": "Ngôn ngữ của nhóm ứng viên cần trích xuất. Nếu bỏ qua, sẽ sử dụng ngôn ngữ hệ thống của Home Assistant."
+        },
+        "rebuild": {
+          "name": "Xây dựng lại",
+          "description": "Bắt buộc xây dựng lại chỉ mục trước khi trích xuất."
+        }
+      }
+    }
+  }
+}
