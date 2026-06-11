@@ -974,9 +974,17 @@ async def run_evaluation(
     print(f"Total Languages: {len(datasets)}")
     print(f"Failure Detail Limit: {failure_limit}")
     if output_json:
-        print(f"JSON Output: {output_json}")
+        try:
+            rel_json = Path(output_json).relative_to(_REPO_ROOT)
+        except ValueError:
+            rel_json = Path(output_json)
+        print(f"JSON Output: {rel_json}")
     if output_md:
-        print(f"Markdown Output: {output_md}")
+        try:
+            rel_md = Path(output_md).relative_to(_REPO_ROOT)
+        except ValueError:
+            rel_md = Path(output_md)
+        print(f"Markdown Output: {rel_md}")
     print(
         "======================================================================================================================"
     )
