@@ -16,6 +16,7 @@ from custom_components.assist_canonicalizer.const import (
     CONF_MIN_MARGIN,
     DATA_RUNTIME,
     DOMAIN,
+    SERVICE_CLEAR_INDEX,
     SERVICE_DUMP_CANDIDATES,
     SERVICE_REBUILD_INDEX,
     SERVICE_TEST_MATCH,
@@ -145,23 +146,29 @@ async def test_rebuild_index_service() -> None:
         assert result["candidate_count"] == 0
 
 
-def test_clear_index_service() -> None:
+@pytest.mark.asyncio
+async def test_clear_index_service() -> None:
     """Test clear_index service handler."""
     runtime = CanonicalizerRuntime()
     runtime.set_index(build_index("en", []))
     hass = MockHass(runtime)
 
-    # 1. Clear specific language
-    call = MockServiceCall({"language": "en"})
-    result = _handle_clear_index(hass, cast(ServiceCall, call))
-    assert result["candidate_count"] == 0
-    assert "en" not in runtime.indexes
+    with patch.object(
+        CanonicalizerRuntime,
+        "async_clear_index",
+        AsyncMock(side_effect=lambda h, language=None: runtime.clear_index(language)),
+    ) as mock_clear:
+        call = MockServiceCall({"language": "en-US"})
+        result = await _handle_clear_index(hass, cast(ServiceCall, call))
+        assert result["candidate_count"] == 0
+        assert "en" not in runtime.indexes
+        mock_clear.assert_awaited_once_with(hass, "en")
 
-    # 2. Clear all
-    runtime.set_index(build_index("en", []))
-    call_all = MockServiceCall({})
-    result_all = _handle_clear_index(hass, cast(ServiceCall, call_all))
-    assert result_all["candidate_count"] == 0
+        runtime.set_index(build_index("en", []))
+        call_all = MockServiceCall({})
+        result_all = await _handle_clear_index(hass, cast(ServiceCall, call_all))
+        assert result_all["candidate_count"] == 0
+        mock_clear.assert_awaited_with(hass, None)
 
 
 def test_diagnostics_service() -> None:
@@ -262,6 +269,10 @@ async def test_async_services_dispatch() -> None:
             "custom_components.assist_canonicalizer.services._handle_dump_candidates",
             AsyncMock(return_value={"status": "dumped"}),
         ) as mock_dump,
+        patch(
+            "custom_components.assist_canonicalizer.services._handle_clear_index",
+            AsyncMock(return_value={"status": "cleared"}),
+        ) as mock_clear,
     ):
         call = MockServiceCall({})
 
@@ -274,6 +285,10 @@ async def test_async_services_dispatch() -> None:
         res_rebuild = await registered_services[SERVICE_REBUILD_INDEX](call)
         assert res_rebuild == {"status": "rebuilt"}
         mock_rebuild.assert_called_once_with(hass, call)
+
+        res_clear = await registered_services[SERVICE_CLEAR_INDEX](call)
+        assert res_clear == {"status": "cleared"}
+        mock_clear.assert_called_once_with(hass, call)
 
         # Test handle_dump_candidates
         res_dump = await registered_services[SERVICE_DUMP_CANDIDATES](call)

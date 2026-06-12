@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
 
-from .normalization import normalize_text
+from .normalization import normalize_text, normalize_text_no_diacritics
 
 
 class CandidateSource(StrEnum):
@@ -35,6 +35,9 @@ class Candidate:
     language: str | None = None
     metadata: Mapping[str, str] = field(default_factory=dict)
     normalized_text: str = ""
+    normalized_text_no_diacritics: str = ""
+    normalized_tokens: tuple[str, ...] = field(default_factory=tuple)
+    normalized_tokens_set: frozenset[str] = field(default_factory=frozenset)
 
     def __post_init__(self) -> None:
         """Validate and normalize candidate data."""
@@ -44,6 +47,16 @@ class Candidate:
             raise ValueError("Candidate intent name must not be empty")
         if not self.normalized_text:
             object.__setattr__(self, "normalized_text", normalize_text(self.text))
+        if not self.normalized_text_no_diacritics:
+            object.__setattr__(
+                self,
+                "normalized_text_no_diacritics",
+                normalize_text_no_diacritics(self.text, self.language),
+            )
+        if not self.normalized_tokens:
+            object.__setattr__(self, "normalized_tokens", tuple(self.normalized_text.split()))
+        if not self.normalized_tokens_set:
+            object.__setattr__(self, "normalized_tokens_set", frozenset(self.normalized_tokens))
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
 
     @property
@@ -53,12 +66,18 @@ class Candidate:
 
 
 def deduplicate_candidates(candidates: list[Candidate]) -> tuple[Candidate, ...]:
-    """Deduplicate candidates by normalized text while preserving best source priority."""
-    selected: dict[str, Candidate] = {}
+    """Deduplicate by (normalized text, intent name) preserving best source priority.
+
+    Candidates with identical text but different intents are kept — the downstream
+    HassIL validation loop resolves the intent based on real home context
+    (requires_context / excludes_context).
+    """
+    selected: dict[tuple[str, str], Candidate] = {}
     for candidate in candidates:
-        existing = selected.get(candidate.normalized_text)
+        key = (candidate.normalized_text, candidate.intent_name)
+        existing = selected.get(key)
         if existing is None or candidate.source_priority < existing.source_priority:
-            selected[candidate.normalized_text] = candidate
+            selected[key] = candidate
     return tuple(
         sorted(selected.values(), key=lambda item: (item.source_priority, item.normalized_text))
     )

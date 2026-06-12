@@ -568,11 +568,10 @@
     {
       "query": "đặt shopping_list_item vào danh sách mua sắm",
       "language": "vi",
-      "expected_intent": "HassListAddItem",
+      "expected_intent": "HassShoppingListAddItem",
       "expected_canonical": "đặt shopping_list_item vào danh sách mua sắm",
       "category": "intent_coverage",
       "expected_slots": {
-        "name": "danh sách mua sắm",
         "shopping_list_item": "shopping_list_item"
       }
     },
@@ -636,6 +635,17 @@
       "category": "intent_coverage",
       "expected_slots": {
         "shopping_list_item": "shopping_list_item"
+      }
+    },
+    {
+      "query": "đặt shopping_list_item vào danh sách việc cần làm",
+      "language": "vi",
+      "expected_intent": "HassListAddItem",
+      "expected_canonical": "đặt shopping_list_item vào danh sách việc cần làm",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "shopping_list_item": "shopping_list_item",
+        "name": "danh sách việc cần làm"
       }
     },
     {

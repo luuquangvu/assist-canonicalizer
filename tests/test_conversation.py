@@ -119,13 +119,20 @@ async def test_conversation_entity_properties_and_reload() -> None:
     entry = MagicMock()
     runtime = CanonicalizerRuntime()
     entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    entity.hass = MagicMock()
 
     assert entity.supported_languages == "*"
 
     runtime.set_index(MagicMock())
     runtime.indexes["en"] = MagicMock()
     assert "en" in runtime.indexes
-    await entity.async_reload("en")
+    with patch.object(
+        CanonicalizerRuntime,
+        "async_clear_index",
+        AsyncMock(side_effect=lambda hass, language=None: runtime.clear_index(language)),
+    ) as mock_clear:
+        await entity.async_reload("en-US")
+        mock_clear.assert_awaited_once_with(entity.hass, "en")
     assert "en" not in runtime.indexes
 
 
@@ -199,8 +206,8 @@ async def test_async_process_with_runtime_flows() -> None:
     entity = AssistCanonicalizerConversationEntity(entry, runtime)
 
     async def mock_async_add_executor_job(target, *args, **kwargs):
-        """Mock async_add_executor_job; intercept _build_index to return an empty index."""
-        if getattr(target, "__name__", None) == "_build_index":
+        """Mock executor work and return an empty index for the snapshot build."""
+        if getattr(target, "__name__", None) == "_build_index_from_snapshot":
             return build_index("vi", [])
         return target(*args, **kwargs)
 

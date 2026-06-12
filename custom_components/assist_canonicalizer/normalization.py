@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 import unicodedata
 
+from .const import GENERIC_LATIN_REPLACEMENTS, LANGUAGE_SPECIFIC_OVERRIDES
+
 _PUNCTUATION_RE = re.compile(r"[^\w\s]", re.UNICODE)
 _WHITESPACE_RE = re.compile(r"\s+")
 
@@ -14,6 +16,34 @@ def normalize_text(text: str) -> str:
     normalized = unicodedata.normalize("NFKC", text).casefold()
     without_punctuation = _PUNCTUATION_RE.sub(" ", normalized)
     return _WHITESPACE_RE.sub(" ", without_punctuation).strip()
+
+
+def normalize_text_no_diacritics(text: str, language: str | None = None) -> str:
+    """Normalize text and strip diacritics/accents for multi-language compatibility.
+
+    The normalization pipeline executes in the following strict order:
+    1. Base Unicode NFKC normalization, lowercasing (casefold), punctuation
+       removal, and whitespace collapse (via `normalize_text`).
+    2. Language-specific overrides (from `LANGUAGE_SPECIFIC_OVERRIDES` in const.py).
+    3. Generic Latin replacements (from `GENERIC_LATIN_REPLACEMENTS` in const.py).
+    4. Accent/diacritic stripping (via Unicode NFD decomposition followed by
+       removing combining diacritics/accents).
+    """
+    normalized = normalize_text(text)
+    if not normalized:
+        return ""
+
+    if language:
+        lang_code = language.split("-")[0].lower()
+        if lang_code in LANGUAGE_SPECIFIC_OVERRIDES:
+            for source, target in LANGUAGE_SPECIFIC_OVERRIDES[lang_code].items():
+                normalized = normalized.replace(source, target)
+
+    for source, target in GENERIC_LATIN_REPLACEMENTS.items():
+        normalized = normalized.replace(source, target)
+
+    nfd_form = unicodedata.normalize("NFD", normalized)
+    return "".join(c for c in nfd_form if not unicodedata.combining(c))
 
 
 def tokenize_text(text: str) -> tuple[str, ...]:

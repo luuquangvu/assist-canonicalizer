@@ -23,7 +23,12 @@ from .const import (
     POSITIONAL_SIMILARITY_THRESHOLD,
     RAPIDFUZZ_WEIGHT,
 )
-from .normalization import char_ngrams, char_ngrams_normalized, normalize_text
+from .normalization import (
+    char_ngrams,
+    char_ngrams_normalized,
+    normalize_text,
+    normalize_text_no_diacritics,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,7 +154,7 @@ def intent_action_score(query: str, candidate: Candidate) -> float:
     return _intent_action_score_from_literal_text(
         literal_text,
         frozenset(normalize_text(query).split()),
-        frozenset(candidate.normalized_text.split()),
+        candidate.normalized_tokens_set,
     )
 
 
@@ -315,6 +320,9 @@ def rank_candidates(
     candidate_char_index: CharNGramIndex | None = None,
     positional_literal_tokens: frozenset[str] | None = None,
     rapidfuzz_prefilter_candidates: int = DEFAULT_RAPIDFUZZ_PREFILTER_CANDIDATES,
+    exact_normalized_lookup: dict[str, list[Candidate]] | None = None,
+    exact_no_diacritics_lookup: dict[str, list[Candidate]] | None = None,
+    language: str | None = None,
 ) -> tuple[RankedCandidate, ...]:
     """Rank candidates for a query using lexical scoring."""
     if max_candidates < 1:
@@ -329,7 +337,47 @@ def rank_candidates(
         candidates
     ):
         raise ValueError("candidate_char_index length must match candidates")
+
     query_normalized = normalize_text(query)
+
+    # 1. Exact normalized match check
+    if exact_normalized_lookup is not None:
+        exact_matches = exact_normalized_lookup.get(query_normalized)
+        if exact_matches:
+            return tuple(
+                RankedCandidate(
+                    candidate=c,
+                    scores=ScoreBreakdown(
+                        rapidfuzz_score=1.0,
+                        char_ngram_score=1.0,
+                        bm25_score=1.0,
+                        intent_score=1.0,
+                        final_score=1.0,
+                    ),
+                )
+                for c in exact_matches[:max_candidates]
+            )
+
+    # 2. Exact no-diacritics match check
+    if exact_no_diacritics_lookup is not None:
+        query_no_diac = normalize_text_no_diacritics(query, language)
+        no_diac_matches = exact_no_diacritics_lookup.get(query_no_diac)
+        if no_diac_matches:
+            unique_intents = {c.intent_name for c in no_diac_matches}
+            if len(unique_intents) == 1:
+                return tuple(
+                    RankedCandidate(
+                        candidate=c,
+                        scores=ScoreBreakdown(
+                            rapidfuzz_score=1.0,
+                            char_ngram_score=1.0,
+                            bm25_score=1.0,
+                            intent_score=1.0,
+                            final_score=1.0,
+                        ),
+                    )
+                    for c in no_diac_matches[:max_candidates]
+                )
     query_grams = char_ngrams(query_normalized)
     query_tokens = frozenset(query_normalized.split())
     intent_score_cache: dict[str, float] = {}
@@ -388,10 +436,10 @@ def rank_candidates(
                 intent_score_cache[literal_text] = _exact_intent_score(literal_text, query_tokens)
             exact = intent_score_cache[literal_text]
             if exact >= 1.0:
-                candidate_tokens = frozenset(candidate.normalized_text.split())
+                candidate_tokens = candidate.normalized_tokens_set
                 intent_score = _query_token_coverage(query_tokens, candidate_tokens)
             else:
-                candidate_entity = frozenset(candidate.normalized_text.split())
+                candidate_entity = candidate.normalized_tokens_set
                 intent_score = _positional_intent_score_from_lookup(
                     literal_text, query_tokens, positional_lookup, candidate_entity
                 )
@@ -431,7 +479,7 @@ def accepted_candidate(
     )
     if competing_candidate is None:
         return top_candidate
-    if _is_exact_lexical_match(top_candidate) and not _is_exact_lexical_match(competing_candidate):
+    if _is_exact_lexical_match(top_candidate):
         return top_candidate
     margin = top_candidate.scores.final_score - competing_candidate.scores.final_score
     if margin < min_margin:

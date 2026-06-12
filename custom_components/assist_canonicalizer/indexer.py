@@ -24,6 +24,12 @@ class CanonicalIndex:
     _positional_literal_tokens: frozenset[str] = field(
         init=False, repr=False, compare=False, default_factory=frozenset
     )
+    _exact_normalized_lookup: dict[str, list[Candidate]] = field(
+        init=False, repr=False, compare=False, default_factory=dict
+    )
+    _exact_no_diacritics_lookup: dict[str, list[Candidate]] = field(
+        init=False, repr=False, compare=False, default_factory=dict
+    )
 
     def __post_init__(self) -> None:
         """Prebuild reusable lexical ranking structures."""
@@ -39,12 +45,19 @@ class CanonicalIndex:
             CharNGramIndex.from_grams(tuple(char_ngrams_normalized(t) for t in normalized_texts)),
         )
         all_tokens: set[str] = set()
+        exact_normalized: dict[str, list[Candidate]] = {}
+        exact_no_diacritics: dict[str, list[Candidate]] = {}
         for candidate in self.candidates:
+            exact_normalized.setdefault(candidate.normalized_text, []).append(candidate)
+            no_diac = candidate.normalized_text_no_diacritics
+            exact_no_diacritics.setdefault(no_diac, []).append(candidate)
             literal_text = candidate.metadata.get("literal_text")
             if literal_text:
                 for variant in _literal_token_variants(literal_text):
                     all_tokens.update(variant)
         object.__setattr__(self, "_positional_literal_tokens", frozenset(all_tokens))
+        object.__setattr__(self, "_exact_normalized_lookup", exact_normalized)
+        object.__setattr__(self, "_exact_no_diacritics_lookup", exact_no_diacritics)
 
     @property
     def candidate_count(self) -> int:
@@ -62,6 +75,9 @@ class CanonicalIndex:
             bm25_index=self._bm25_index,
             candidate_char_index=self._candidate_char_index,
             positional_literal_tokens=self._positional_literal_tokens,
+            exact_normalized_lookup=self._exact_normalized_lookup,
+            exact_no_diacritics_lookup=self._exact_no_diacritics_lookup,
+            language=self.language,
         )
 
 

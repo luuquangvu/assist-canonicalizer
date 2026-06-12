@@ -3,17 +3,27 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping
+import hashlib
+from collections.abc import Callable, Mapping, Sequence, Set
 from dataclasses import dataclass, field
+from enum import Enum
+from functools import lru_cache
 from typing import Any, cast
+from uuid import uuid4
 
-from .builtin_intents import load_language_intent_sources
+import orjson
+
+from .builtin_intents import language_variant_for, load_language_intent_sources
 from .candidate import Candidate, CandidateSource
-from .const import DEFAULT_MAX_CANDIDATES, FallbackReason
+from .const import DEFAULT_MAX_CANDIDATES, DOMAIN, FallbackReason
 from .diagnostics import CanonicalizerDiagnostics
 from .grammar_loader import (
+    DynamicRegistryIntent,
+    RegistrySlotIndex,
     build_candidates_from_intent_sources,
     build_query_registry_candidates,
+    build_registry_slot_index,
+    compile_dynamic_registry_intents,
 )
 from .indexer import CanonicalIndex, build_index
 from .normalization import char_ngrams_normalized
@@ -25,9 +35,37 @@ try:
     from homeassistant.helpers import storage as _storage
 
     storage = _storage
+    _HAS_STORAGE = True
 except (ImportError, RuntimeError):
     storage = cast(Any, None)
     _HAS_STORAGE = False
+
+_STORE_HAS_SERIALIZE_IN_EVENT_LOOP = False
+if _HAS_STORAGE and storage is not None:
+    import inspect
+
+    try:
+        sig = inspect.signature(storage.Store.__init__)
+        _STORE_HAS_SERIALIZE_IN_EVENT_LOOP = "serialize_in_event_loop" in sig.parameters
+    except Exception:
+        pass
+
+
+_INDEX_STORE_VERSION = 1
+_INDEX_BUILD_VERSION = 1
+_INDEX_STORE_PREFIX = f"{DOMAIN}.index_"
+_INDEX_MANIFEST_KEY = f"{DOMAIN}.index_manifest"
+_INDEX_MANIFEST_VERSION = 1
+
+
+@dataclass(frozen=True, slots=True)
+class IndexBuildSnapshot:
+    """Immutable inputs and fingerprint for one candidate index build."""
+
+    language: str
+    intent_sources: dict[str, Mapping[str, Any]]
+    registry_slot_values: dict[str, tuple[str, ...]]
+    fingerprint: str
 
 
 @dataclass(slots=True)
@@ -40,10 +78,16 @@ class CanonicalizerRuntime:
     language_intent_sources: dict[str, dict[str, Mapping[str, Any]]] = field(default_factory=dict)
     config_path: Callable[..., str] | None = None
     registry_slot_values: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    registry_slot_index: RegistrySlotIndex = field(default_factory=dict)
+    dynamic_registry_intents: dict[str, tuple[DynamicRegistryIntent, ...]] = field(
+        default_factory=dict
+    )
     cleanup_callbacks: list[Callable[[], None]] = field(default_factory=list)
     rebuild_tasks: dict[str, tuple[int, asyncio.Task[CanonicalIndex]]] = field(default_factory=dict)
     index_generation: int = 0
+    source_generation: int = 0
     rebuild_timer_cancel: Callable[[], None] | None = None
+    _storage_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
     def get_index(self, language: str) -> CanonicalIndex | None:
         """Return the cached index for a language."""
@@ -60,7 +104,9 @@ class CanonicalizerRuntime:
     def rebuild_index(self, language: str) -> CanonicalIndex:
         """Rebuild and store one language index from automatic candidate sources."""
         language = normalize_language(language)
-        index = self._build_index(language)
+        snapshot = self._create_build_snapshot(language)
+        index = _build_index_from_snapshot(snapshot)
+        self.language_intent_sources[language] = snapshot.intent_sources
         self.set_index(index)
         return index
 
@@ -77,12 +123,35 @@ class CanonicalizerRuntime:
         generation = self.index_generation
 
         async def run_rebuild() -> CanonicalIndex:
-            """Run the blocking index build in Home Assistant's executor."""
-            index = await hass.async_add_executor_job(self._build_index, language)
-            if self.index_generation == generation:
+            """Build from a stable source generation and persist the matching fingerprint."""
+            while True:
+                source_generation = self.source_generation
+                build_inputs = self._capture_build_inputs()
+                snapshot = await hass.async_add_executor_job(
+                    _create_build_snapshot,
+                    language,
+                    *build_inputs,
+                )
+                index = await hass.async_add_executor_job(_build_index_from_snapshot, snapshot)
+                if self.index_generation != generation:
+                    return index
+                if self.source_generation != source_generation:
+                    continue
+
+                self.language_intent_sources[language] = snapshot.intent_sources
                 self.set_index(index)
-                await self.async_save_index_to_store(hass, index)
-            return index
+                saved = await self.async_save_index_to_store(
+                    hass,
+                    index,
+                    snapshot.fingerprint,
+                    expected_index_generation=generation,
+                    expected_source_generation=source_generation,
+                )
+                if self.index_generation != generation:
+                    return index
+                if self.source_generation != source_generation or not saved:
+                    continue
+                return index
 
         task = hass.async_create_task(run_rebuild())
         self.rebuild_tasks[language] = (generation, task)
@@ -93,68 +162,134 @@ class CanonicalizerRuntime:
                 self.rebuild_tasks.pop(language, None)
 
     async def async_load_index_from_store(self, hass: Any, language: str) -> CanonicalIndex | None:
-        """Load candidate list from store and rebuild index."""
+        """Load an index only when its persisted source fingerprint is current."""
         language = normalize_language(language)
-        store = storage.Store(hass, 1, f"assist_canonicalizer.index_{language}")
-        try:
-            data = await store.async_load()
-        except Exception:
+        generation = self.index_generation
+        source_generation = self.source_generation
+        build_inputs = self._capture_build_inputs()
+        snapshot = await hass.async_add_executor_job(
+            _create_build_snapshot,
+            language,
+            *build_inputs,
+        )
+        if self.index_generation != generation or self.source_generation != source_generation:
             return None
 
-        if not data or not isinstance(data, dict):
-            return None
-
-        candidates_data = data.get("candidates")
-        if not isinstance(candidates_data, list):
-            return None
-
-        candidates = []
-        for c in candidates_data:
+        async with self._storage_lock:
+            manifest = await self._async_load_store_manifest(hass)
+            if manifest is None:
+                return None
+            cache_epoch, persisted_languages = manifest
+            if language not in persisted_languages:
+                return None
+            store = _index_store(hass, language)
             try:
-                candidates.append(
-                    Candidate(
-                        text=c["text"],
-                        intent_name=c["intent_name"],
-                        source=CandidateSource(c["source"]),
-                        language=c.get("language"),
-                        metadata=c.get("metadata", {}),
-                        normalized_text=c.get("normalized_text", ""),
-                    )
-                )
+                data = await store.async_load()
             except Exception:
-                continue
+                return None
 
-        index = build_index(language, candidates)
+            if not _valid_store_metadata(
+                data,
+                language=language,
+                fingerprint=snapshot.fingerprint,
+                cache_epoch=cache_epoch,
+            ):
+                await store.async_remove()
+                persisted_languages.discard(language)
+                await self._async_save_store_manifest(
+                    hass,
+                    cache_epoch,
+                    persisted_languages,
+                )
+                return None
+            candidates = _deserialize_candidates(data)
+            if candidates is None or len(candidates) != data["candidate_count"]:
+                await store.async_remove()
+                persisted_languages.discard(language)
+                await self._async_save_store_manifest(
+                    hass,
+                    cache_epoch,
+                    persisted_languages,
+                )
+                return None
+
+        index = await hass.async_add_executor_job(build_index, language, candidates)
+        if self.index_generation != generation or self.source_generation != source_generation:
+            return None
+        self.language_intent_sources[language] = snapshot.intent_sources
         self.set_index(index)
         return index
 
-    async def async_save_index_to_store(self, hass: Any, index: CanonicalIndex) -> None:
-        """Save index candidate list to store."""
-        store = storage.Store(hass, 1, f"assist_canonicalizer.index_{index.language}")
+    async def async_save_index_to_store(
+        self,
+        hass: Any,
+        index: CanonicalIndex,
+        fingerprint: str,
+        *,
+        expected_index_generation: int | None = None,
+        expected_source_generation: int | None = None,
+    ) -> bool:
+        """Save an index with the source fingerprint that produced it."""
+        language = normalize_language(index.language)
+        candidates_data = [_serialize_candidate(candidate) for candidate in index.candidates]
         data = {
-            "candidates": [
-                {
-                    "text": c.text,
-                    "intent_name": c.intent_name,
-                    "source": str(c.source),
-                    "language": c.language,
-                    "metadata": dict(c.metadata),
-                    "normalized_text": c.normalized_text,
-                }
-                for c in index.candidates
-            ]
+            "build_version": _INDEX_BUILD_VERSION,
+            "language": language,
+            "fingerprint": fingerprint,
+            "candidate_count": len(candidates_data),
+            "candidates": candidates_data,
         }
-        await store.async_save(data)
+
+        async with self._storage_lock:
+            if not self._storage_generation_matches(
+                expected_index_generation,
+                expected_source_generation,
+            ):
+                return False
+            manifest = await self._async_load_store_manifest(hass)
+            if manifest is None:
+                cache_epoch = uuid4().hex
+                persisted_languages: set[str] = set()
+            else:
+                cache_epoch, persisted_languages = manifest
+            if not self._storage_generation_matches(
+                expected_index_generation,
+                expected_source_generation,
+            ):
+                return False
+
+            data["cache_epoch"] = cache_epoch
+            await _index_store(hass, language).async_save(data)
+            persisted_languages.add(language)
+            await self._async_save_store_manifest(hass, cache_epoch, persisted_languages)
+        return True
+
+    async def async_clear_index(self, hass: Any, language: str | None = None) -> None:
+        """Clear memory and persisted indexes for one language or every language."""
+        normalized_language = normalize_language(language) if language is not None else None
+        async with self._storage_lock:
+            self.clear_index(normalized_language)
+            manifest = await self._async_load_store_manifest(hass)
+            if normalized_language is not None:
+                await _index_store(hass, normalized_language).async_remove()
+                if manifest is not None:
+                    cache_epoch, persisted_languages = manifest
+                    persisted_languages.discard(normalized_language)
+                    await self._async_save_store_manifest(
+                        hass,
+                        cache_epoch,
+                        persisted_languages,
+                    )
+                return
+
+            persisted_languages = manifest[1] if manifest is not None else set()
+            await self._async_save_store_manifest(hass, uuid4().hex, set())
+            for persisted_language in persisted_languages:
+                await _index_store(hass, persisted_language).async_remove()
 
     def _build_index(self, language: str) -> CanonicalIndex:
         """Build one language index without mutating runtime cache."""
-        language = normalize_language(language)
-        candidates = build_candidates_from_intent_sources(
-            language,
-            self._all_intent_sources(language),
-            self.registry_slot_values,
-        )
-        return build_index(language, candidates)
+        return _build_index_from_snapshot(self._create_build_snapshot(language))
 
     def rank_with_dynamic_candidates(
         self,
@@ -172,6 +307,8 @@ class CanonicalizerRuntime:
             self._intent_sources_for_query(language),
             self.registry_slot_values,
             query,
+            registry_slot_index=self.registry_slot_index,
+            compiled_intents=self._dynamic_registry_intents_for_query(language),
         )
         if not dynamic_candidates:
             return ranked
@@ -209,17 +346,24 @@ class CanonicalizerRuntime:
     def configure_config_path(self, config_path: Callable[..., str]) -> None:
         """Configure Home Assistant config path access for custom sentences."""
         self.config_path = config_path
-        self.language_intent_sources.clear()
+        self._invalidate_source_dependent_indexes(clear_sources=True)
 
     def update_registry_slot_values(self, slot_values: Mapping[str, tuple[str, ...]]) -> None:
         """Update cached registry metadata used for candidate expansion."""
-        self.registry_slot_values = dict(slot_values)
+        updated_values = {key: tuple(values) for key, values in slot_values.items()}
+        if updated_values == self.registry_slot_values:
+            return
+        self.registry_slot_values = updated_values
+        self.registry_slot_index = build_registry_slot_index(self.registry_slot_values)
+        self._invalidate_source_dependent_indexes(clear_sources=False)
 
     def update_intent_sources(self, intents_update: Mapping[Any, Mapping[str, Any]]) -> None:
         """Update cached Home Assistant conversation intent sources."""
-        self.language_intent_sources.clear()
-        for source, source_config in intents_update.items():
-            self.intent_sources[_source_key(source)] = source_config
+        updated_sources = {
+            _source_key(source): source_config for source, source_config in intents_update.items()
+        }
+        self.intent_sources = updated_sources
+        self._invalidate_source_dependent_indexes(clear_sources=True)
 
     def subscribed_source_counts(self) -> dict[str, int]:
         """Return subscribed intent counts by source without loading language files."""
@@ -246,6 +390,18 @@ class CanonicalizerRuntime:
             return cached
         return self._all_intent_sources(language)
 
+    def _dynamic_registry_intents_for_query(
+        self, language: str
+    ) -> tuple[DynamicRegistryIntent, ...]:
+        """Return compiled query-independent registry templates for a language."""
+        language = normalize_language(language)
+        cached = self.dynamic_registry_intents.get(language)
+        if cached is not None:
+            return cached
+        compiled = compile_dynamic_registry_intents(self._intent_sources_for_query(language))
+        self.dynamic_registry_intents[language] = compiled
+        return compiled
+
     def _all_intent_sources(self, language: str) -> dict[str, Mapping[str, Any]]:
         """Return built-in, custom, and subscribed intent sources."""
         language = normalize_language(language)
@@ -253,6 +409,92 @@ class CanonicalizerRuntime:
         sources.update(self.intent_sources)
         self.language_intent_sources[language] = sources
         return sources
+
+    def _capture_build_inputs(
+        self,
+    ) -> tuple[
+        Callable[..., str] | None,
+        dict[str, Mapping[str, Any]],
+        dict[str, tuple[str, ...]],
+    ]:
+        """Copy mutable runtime inputs before executor work begins."""
+        return (
+            self.config_path,
+            dict(self.intent_sources),
+            {key: tuple(values) for key, values in self.registry_slot_values.items()},
+        )
+
+    def _create_build_snapshot(self, language: str) -> IndexBuildSnapshot:
+        """Load and fingerprint the current inputs for one language."""
+        return _create_build_snapshot(
+            normalize_language(language),
+            *self._capture_build_inputs(),
+        )
+
+    def _invalidate_source_dependent_indexes(self, *, clear_sources: bool) -> None:
+        """Invalidate indexes whenever candidate-producing inputs change."""
+        self.source_generation += 1
+        self.indexes.clear()
+        if clear_sources:
+            self.language_intent_sources.clear()
+            self.dynamic_registry_intents.clear()
+        self.update_diagnostics(candidate_count=0)
+
+    def _storage_generation_matches(
+        self,
+        expected_index_generation: int | None,
+        expected_source_generation: int | None,
+    ) -> bool:
+        """Return whether a pending store write still belongs to current inputs."""
+        return (
+            expected_index_generation is None or self.index_generation == expected_index_generation
+        ) and (
+            expected_source_generation is None
+            or self.source_generation == expected_source_generation
+        )
+
+    async def _async_load_store_manifest(self, hass: Any) -> tuple[str, set[str]] | None:
+        """Load the cache epoch and known persisted language keys."""
+        try:
+            data = await _manifest_store(hass).async_load()
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+        cache_epoch = data.get("cache_epoch")
+        languages = data.get("languages")
+        if not isinstance(cache_epoch, str) or not cache_epoch:
+            return None
+        if not isinstance(languages, list) or not all(
+            isinstance(language, str) for language in languages
+        ):
+            return None
+        return cache_epoch, {normalize_language(language) for language in languages}
+
+    async def _async_save_store_manifest(
+        self,
+        hass: Any,
+        cache_epoch: str,
+        languages: set[str],
+    ) -> None:
+        """Persist the cache epoch and known language store keys."""
+        await _manifest_store(hass).async_save(
+            {
+                "cache_epoch": cache_epoch,
+                "languages": sorted(languages),
+            }
+        )
+
+    async def _async_remove_persisted_language(self, hass: Any, language: str) -> None:
+        """Remove one invalid language store and its manifest entry."""
+        async with self._storage_lock:
+            await _index_store(hass, language).async_remove()
+            manifest = await self._async_load_store_manifest(hass)
+            if manifest is None:
+                return
+            cache_epoch, persisted_languages = manifest
+            persisted_languages.discard(language)
+            await self._async_save_store_manifest(hass, cache_epoch, persisted_languages)
 
     def add_cleanup_callback(self, callback: Callable[[], None]) -> None:
         """Remember a cleanup callback for unload."""
@@ -311,6 +553,162 @@ class CanonicalizerRuntime:
         )
 
 
+def _create_build_snapshot(
+    language: str,
+    config_path: Callable[..., str] | None,
+    subscribed_sources: dict[str, Mapping[str, Any]],
+    registry_slot_values: dict[str, tuple[str, ...]],
+) -> IndexBuildSnapshot:
+    """Load candidate sources and fingerprint the exact build inputs."""
+    sources = load_language_intent_sources(language, config_path=config_path)
+    sources.update(subscribed_sources)
+    fingerprint_payload = {
+        "build_version": _INDEX_BUILD_VERSION,
+        "language": language,
+        "intent_sources": sources,
+        "registry_slot_values": registry_slot_values,
+    }
+    fingerprint = hashlib.sha256(
+        orjson.dumps(_canonical_fingerprint_value(fingerprint_payload))
+    ).hexdigest()
+    return IndexBuildSnapshot(
+        language=language,
+        intent_sources=sources,
+        registry_slot_values=registry_slot_values,
+        fingerprint=fingerprint,
+    )
+
+
+def _build_index_from_snapshot(snapshot: IndexBuildSnapshot) -> CanonicalIndex:
+    """Build an index from the inputs covered by a source fingerprint."""
+    candidates = build_candidates_from_intent_sources(
+        snapshot.language,
+        snapshot.intent_sources,
+        snapshot.registry_slot_values,
+    )
+    return build_index(snapshot.language, candidates)
+
+
+def _canonical_fingerprint_value(value: Any) -> Any:
+    """Return a deterministic, order-preserving representation for hashing."""
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, Enum):
+        return _canonical_fingerprint_value(value.value)
+    if isinstance(value, Mapping):
+        canonical_items = [
+            (
+                _canonical_fingerprint_value(key),
+                _canonical_fingerprint_value(item),
+            )
+            for key, item in value.items()
+        ]
+        canonical_items.sort(key=lambda pair: orjson.dumps(pair[0]))
+        return {"mapping": [[key, item] for key, item in canonical_items]}
+    if isinstance(value, Sequence):
+        return {"sequence": [_canonical_fingerprint_value(item) for item in value]}
+    if isinstance(value, Set):
+        canonical_items = [_canonical_fingerprint_value(item) for item in value]
+        canonical_items.sort(key=orjson.dumps)
+        return {"set": canonical_items}
+    return {
+        "object_type": f"{type(value).__module__}.{type(value).__qualname__}",
+        "representation": repr(value),
+    }
+
+
+def _index_store(hass: Any, language: str) -> Any:
+    """Return the versioned Home Assistant Store for one language index."""
+    kwargs = {}
+    if _STORE_HAS_SERIALIZE_IN_EVENT_LOOP:
+        kwargs["serialize_in_event_loop"] = False
+    return storage.Store(
+        hass,
+        _INDEX_STORE_VERSION,
+        f"{_INDEX_STORE_PREFIX}{language}",
+        **kwargs,
+    )
+
+
+def _manifest_store(hass: Any) -> Any:
+    """Return the Store tracking the current cache epoch and language keys."""
+    return storage.Store(hass, _INDEX_MANIFEST_VERSION, _INDEX_MANIFEST_KEY)
+
+
+def _valid_store_metadata(
+    data: Any,
+    *,
+    language: str,
+    fingerprint: str,
+    cache_epoch: str,
+) -> bool:
+    """Return whether persisted metadata matches the current build inputs."""
+    if not isinstance(data, dict):
+        return False
+    candidates = data.get("candidates")
+    candidate_count = data.get("candidate_count")
+    return (
+        data.get("build_version") == _INDEX_BUILD_VERSION
+        and data.get("language") == language
+        and data.get("fingerprint") == fingerprint
+        and data.get("cache_epoch") == cache_epoch
+        and type(candidate_count) is int
+        and candidate_count >= 0
+        and isinstance(candidates, list)
+        and candidate_count == len(candidates)
+    )
+
+
+def _serialize_candidate(candidate: Candidate) -> dict[str, Any]:
+    """Return the persisted representation of one candidate."""
+    return {
+        "text": candidate.text,
+        "intent_name": candidate.intent_name,
+        "source": str(candidate.source),
+        "language": candidate.language,
+        "metadata": dict(candidate.metadata),
+        "normalized_text": candidate.normalized_text,
+    }
+
+
+def _deserialize_candidates(data: dict[str, Any]) -> list[Candidate] | None:
+    """Deserialize all candidates, rejecting the whole cache on any invalid record."""
+    candidates: list[Candidate] = []
+    for candidate_data in data["candidates"]:
+        if not isinstance(candidate_data, dict):
+            return None
+        text = candidate_data.get("text")
+        intent_name = candidate_data.get("intent_name")
+        source = candidate_data.get("source")
+        language = candidate_data.get("language")
+        metadata = candidate_data.get("metadata")
+        normalized_text = candidate_data.get("normalized_text")
+        if (
+            not isinstance(text, str)
+            or not isinstance(intent_name, str)
+            or not isinstance(source, str)
+            or (language is not None and not isinstance(language, str))
+            or not isinstance(metadata, Mapping)
+            or not isinstance(normalized_text, str)
+            or not normalized_text
+        ):
+            return None
+        try:
+            candidates.append(
+                Candidate(
+                    text=text,
+                    intent_name=intent_name,
+                    source=CandidateSource(source),
+                    language=language,
+                    metadata=metadata,
+                    normalized_text=normalized_text,
+                )
+            )
+        except (TypeError, ValueError):
+            return None
+    return candidates
+
+
 def _merge_ranked_candidates(
     primary: tuple[RankedCandidate, ...],
     dynamic: tuple[RankedCandidate, ...],
@@ -341,12 +739,16 @@ def _ranked_candidate_sort_key(ranked_candidate: RankedCandidate) -> tuple[float
     )
 
 
+@lru_cache(maxsize=128)
 def normalize_language(language: str) -> str:
-    """Return a canonical language cache key."""
-    normalized = str(language).strip().lower()
-    if not normalized:
+    """Return the Home Assistant language variant as a canonical cache key."""
+    requested = str(language).strip()
+    if not requested:
         raise ValueError("Language must not be empty")
-    return normalized
+    language_variant = language_variant_for(requested)
+    if language_variant is not None:
+        return language_variant
+    return requested.replace("_", "-").lower()
 
 
 def _updated_optional_text(current: str | None, value: str | None, *, clear: bool) -> str | None:

@@ -145,10 +145,10 @@ Công cụ xếp hạng được đo kiểm (benchmark) so với bộ nhận di�
 
 | Chế độ    | Đúng Intent/Slot | Nhận diện sai (Mismatch) | Dự phòng (Fallback) |
 | --------- | ---------------: | -----------------------: | ------------------: |
-| `hassil`  |            29.8% |                     9.6% |               60.6% |
-| `lexical` |        **80.9%** |                 **8.3%** |           **10.9%** |
+| `hassil`  |            31.0% |                     8.3% |               60.7% |
+| `lexical` |        **81.7%** |                 **8.3%** |           **10.0%** |
 
-> Độ chính xác nhận diện Intent/Slot tăng từ **29.8% lên 80.9%**. Tổng tỷ lệ lỗi (nhận diện sai + chuyển sang dự phòng) giảm mạnh từ **70.2% xuống còn 19.1%**.
+> Độ chính xác nhận diện Intent/Slot tăng từ **31.0% lên 81.7%**. Tổng tỷ lệ lỗi (nhận diện sai + chuyển sang dự phòng) giảm mạnh từ **69.0% xuống còn 18.3%**.
 
 <!-- BENCHMARK_OVERALL_END -->
 
@@ -158,16 +158,16 @@ Công cụ xếp hạng được đo kiểm (benchmark) so với bộ nhận di�
 
 | Ngôn ngữ | Chế độ    | Đúng Intent/Slot | Nhận diện sai (Mismatch) | Dự phòng (Fallback) |
 | -------- | --------- | ---------------: | -----------------------: | ------------------: |
-| EN       | `hassil`  |            28.8% |                    15.3% |               55.9% |
+| EN       | `hassil`  |            30.6% |                    13.5% |               55.9% |
 | EN       | `lexical` |        **86.5%** |                 **6.3%** |            **7.2%** |
-| DE       | `hassil`  |            32.2% |                    12.6% |               55.2% |
+| DE       | `hassil`  |            33.3% |                    11.5% |               55.2% |
 | DE       | `lexical` |        **88.5%** |                 **3.4%** |            **8.0%** |
-| FR       | `hassil`  |            34.1% |                     8.2% |               57.6% |
-| FR       | `lexical` |        **81.2%** |                 **2.4%** |           **16.5%** |
+| FR       | `hassil`  |            35.3% |                     7.1% |               57.6% |
+| FR       | `lexical` |        **82.4%** |                 **2.4%** |           **15.3%** |
 | NL       | `hassil`  |            34.3% |                     4.8% |               61.0% |
 | NL       | `lexical` |        **73.3%** |                **15.2%** |           **11.4%** |
-| VI       | `hassil`  |            18.3% |                     6.1% |               75.6% |
-| VI       | `lexical` |        **74.4%** |                **13.4%** |           **12.2%** |
+| VI       | `hassil`  |            20.5% |                     3.6% |               75.9% |
+| VI       | `lexical` |        **78.3%** |                **13.3%** |            **8.4%** |
 
 <!-- BENCHMARK_LANGS_END -->
 

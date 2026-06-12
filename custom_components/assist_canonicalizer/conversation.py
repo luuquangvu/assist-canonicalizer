@@ -116,7 +116,10 @@ class AssistCanonicalizerConversationEntity(
 
     async def async_reload(self, language: str | None = None) -> None:
         """Reload cached indexes for a language."""
-        self._runtime.clear_index(normalize_language(language) if language else None)
+        await self._runtime.async_clear_index(
+            self.hass,
+            normalize_language(language) if language else None,
+        )
 
     async def _async_process_with_runtime(
         self, user_input: ConversationInput
