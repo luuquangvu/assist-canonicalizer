@@ -218,6 +218,7 @@ class HashableFakeHass:
 
     def __init__(self, **kwargs: Any) -> None:
         """Initialize dictionary with attributes."""
+        self.executor_jobs: list[tuple[Any, tuple[Any, ...]]] = []
         self.__dict__.update(kwargs)
 
     def __hash__(self) -> int:
@@ -232,6 +233,11 @@ class HashableFakeHass:
         """Mock add_job by calling target or creating a task."""
         if asyncio.iscoroutinefunction(target):
             return asyncio.create_task(target(*args))
+        return target(*args)
+
+    async def async_add_executor_job(self, target: Any, *args: Any) -> Any:
+        """Mock executor submission by recording and running the job."""
+        self.executor_jobs.append((target, args))
         return target(*args)
 
 
@@ -271,6 +277,11 @@ async def test_persistent_store_save_and_load(monkeypatch: Any) -> None:
         assert loaded_index is not None
         assert loaded_index.language == "vi"
         assert loaded_index.candidate_count == 1
+        assert len(hass.executor_jobs) == 1
+        executor_target, executor_args = hass.executor_jobs[0]
+        assert executor_target is build_index
+        assert executor_args[0] == "vi"
+        assert len(executor_args[1]) == 1
         loaded_cand = loaded_index.candidates[0]
         assert loaded_cand.text == "bật đèn"
         assert loaded_cand.intent_name == "HassTurnOn"

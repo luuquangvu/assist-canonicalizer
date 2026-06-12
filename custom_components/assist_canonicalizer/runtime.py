@@ -124,7 +124,7 @@ class CanonicalizerRuntime:
             except Exception:
                 continue
 
-        index = build_index(language, candidates)
+        index = await hass.async_add_executor_job(build_index, language, candidates)
         self.set_index(index)
         return index
 
