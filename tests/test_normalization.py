@@ -5,8 +5,24 @@ import pytest
 from custom_components.assist_canonicalizer.normalization import (
     char_ngrams,
     normalize_text,
+    normalize_text_no_diacritics,
     tokenize_text,
 )
+
+
+def test_normalize_text_no_diacritics() -> None:
+    """Test diacritics removal across different languages."""
+    # Vietnamese
+    assert normalize_text_no_diacritics("Bật ĐÈN phòng khách", "vi") == "bat den phong khach"
+    # German transliteration
+    assert normalize_text_no_diacritics("Küche", "de") == "kueche"
+    # French
+    assert normalize_text_no_diacritics("château", "fr") == "chateau"
+    assert normalize_text_no_diacritics("lumière", "fr") == "lumiere"
+    # English
+    assert normalize_text_no_diacritics("living room light", "en") == "living room light"
+    # Empty
+    assert normalize_text_no_diacritics("") == ""
 
 
 def test_normalize_text_applies_nfkc_casefold_punctuation_and_spaces() -> None:

@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
 
-from .normalization import normalize_text
+from .normalization import normalize_text, normalize_text_no_diacritics
 
 
 class CandidateSource(StrEnum):
@@ -35,6 +35,7 @@ class Candidate:
     language: str | None = None
     metadata: Mapping[str, str] = field(default_factory=dict)
     normalized_text: str = ""
+    normalized_text_no_diacritics: str = ""
 
     def __post_init__(self) -> None:
         """Validate and normalize candidate data."""
@@ -44,6 +45,12 @@ class Candidate:
             raise ValueError("Candidate intent name must not be empty")
         if not self.normalized_text:
             object.__setattr__(self, "normalized_text", normalize_text(self.text))
+        if not self.normalized_text_no_diacritics:
+            object.__setattr__(
+                self,
+                "normalized_text_no_diacritics",
+                normalize_text_no_diacritics(self.text, self.language),
+            )
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
 
     @property

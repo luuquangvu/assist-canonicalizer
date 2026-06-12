@@ -312,3 +312,52 @@ def test_rank_candidates_typo_action_demotes_entity_only_candidates() -> None:
     ranked = index.rank("tát đèn phòng khách nhé")
     assert ranked[0].candidate.intent_name == "HassTurnOff"
     assert ranked[0].candidate.text == "tắt đèn phòng khách"
+
+
+def test_rank_candidates_exact_normalized_short_circuit() -> None:
+    """Verify exact normalized matches short-circuit fuzzy ranking and return score 1.0."""
+    index = build_index(
+        "vi",
+        [
+            Candidate(text="bật đèn phòng khách", intent_name="HassTurnOn", language="vi"),
+            Candidate(text="tắt quạt phòng tắm", intent_name="HassTurnOff", language="vi"),
+        ],
+    )
+    # Match exact
+    ranked = index.rank("Bật, đèn phòng khách!")
+    assert len(ranked) == 1
+    assert ranked[0].candidate.text == "bật đèn phòng khách"
+    assert ranked[0].scores.final_score == 1.0
+
+
+def test_rank_candidates_exact_no_diacritics_short_circuit() -> None:
+    """Verify exact no-diacritics matches short-circuit ranking if no collisions exist."""
+    index = build_index(
+        "vi",
+        [
+            Candidate(text="bật đèn phòng khách", intent_name="HassTurnOn", language="vi"),
+            Candidate(text="tắt quạt phòng tắm", intent_name="HassTurnOff", language="vi"),
+        ],
+    )
+    # No diacritics
+    ranked = index.rank("bat den phong khach")
+    assert len(ranked) == 1
+    assert ranked[0].candidate.text == "bật đèn phòng khách"
+    assert ranked[0].scores.final_score == 1.0
+
+
+def test_rank_candidates_no_diacritics_collision_falls_back_to_fuzzy() -> None:
+    """Verify collision under no-diacritics normalization runs full fuzzy ranking."""
+    # "bật cửa" (HassTurnOn) vs "bạt cửa" (HassTurnOff)
+    # both normalize without diacritics to "bat cua"
+    index = build_index(
+        "vi",
+        [
+            Candidate(text="bật cửa", intent_name="HassTurnOn", language="vi"),
+            Candidate(text="bạt cửa", intent_name="HassTurnOff", language="vi"),
+        ],
+    )
+    ranked = index.rank("bat cua")
+    # Should not early return because of different intents.
+    # It will go through BM25 / char ngrams / rapidfuzz, and result in both candidates being ranked
+    assert len(ranked) == 2

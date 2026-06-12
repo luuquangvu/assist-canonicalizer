@@ -57,3 +57,24 @@ class FallbackReason(StrEnum):
     VALIDATION_FAILED = "validation_failed"
     RANKING_FAILED = "ranking_failed"
     UNEXPECTED_EXCEPTION = "unexpected_exception"
+
+
+GENERIC_LATIN_REPLACEMENTS = {
+    "đ": "d",
+    "ß": "ss",
+    "æ": "ae",
+    "œ": "oe",
+    "ø": "o",
+    "ł": "l",
+    "ı": "i",  # noqa: RUF001
+    "ð": "d",
+    "þ": "th",
+}
+
+LANGUAGE_SPECIFIC_OVERRIDES = {
+    "de": {
+        "ä": "ae",
+        "ö": "oe",
+        "ü": "ue",
+    }
+}
