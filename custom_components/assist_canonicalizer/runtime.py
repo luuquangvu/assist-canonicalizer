@@ -35,9 +35,20 @@ try:
     from homeassistant.helpers import storage as _storage
 
     storage = _storage
+    _HAS_STORAGE = True
 except (ImportError, RuntimeError):
     storage = cast(Any, None)
     _HAS_STORAGE = False
+
+_STORE_HAS_SERIALIZE_IN_EVENT_LOOP = False
+if _HAS_STORAGE and storage is not None:
+    import inspect
+
+    try:
+        sig = inspect.signature(storage.Store.__init__)
+        _STORE_HAS_SERIALIZE_IN_EVENT_LOOP = "serialize_in_event_loop" in sig.parameters
+    except Exception:
+        pass
 
 
 _INDEX_STORE_VERSION = 2
@@ -605,11 +616,14 @@ def _canonical_fingerprint_value(value: Any) -> Any:
 
 def _index_store(hass: Any, language: str) -> Any:
     """Return the versioned Home Assistant Store for one language index."""
+    kwargs = {}
+    if _STORE_HAS_SERIALIZE_IN_EVENT_LOOP:
+        kwargs["serialize_in_event_loop"] = False
     return storage.Store(
         hass,
         _INDEX_STORE_VERSION,
         f"{_INDEX_STORE_PREFIX}{language}",
-        serialize_in_event_loop=False,
+        **kwargs,
     )
 
 
