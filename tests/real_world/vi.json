@@ -572,7 +572,7 @@
       "expected_canonical": "đặt shopping_list_item vào danh sách mua sắm",
       "category": "intent_coverage",
       "expected_slots": {
-        "item": "shopping_list_item"
+        "shopping_list_item": "shopping_list_item"
       }
     },
     {

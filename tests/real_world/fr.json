@@ -531,13 +531,12 @@
       "expected_slots": {}
     },
     {
-      "query": "été aspirateur",
+      "query": "éteins aspirateur",
       "language": "fr",
-      "expected_intent": "HassVacuumReturnToBase",
-      "expected_canonical": "été aspirateur",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "éteins aspirateur",
       "category": "intent_coverage",
       "expected_slots": {
-        "name:vacuum": "aspirateur",
         "name": "aspirateur"
       }
     },

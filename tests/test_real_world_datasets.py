@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import re
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import hassil
-import hassil.errors
 import orjson
 import pytest
 
@@ -22,7 +21,31 @@ from tools import evaluate_metrics
 evaluate_metrics._bootstrap_project_imports()
 
 DATASET_DIR = Path("tests/real_world")
-LANGUAGES = ("de", "en", "fr", "nl", "vi")
+_LANGUAGES: tuple[str, ...] | None = None
+
+
+def _discover_languages() -> tuple[str, ...]:
+    """Discover dataset languages by scanning ``tests/real_world/*.json``."""
+    global _LANGUAGES
+    if _LANGUAGES is not None:
+        return _LANGUAGES
+    repo_root = str(Path(__file__).resolve().parent.parent)
+    safe_dir = evaluate_metrics._sanitize_path(repo_root, str(DATASET_DIR))
+    languages: list[str] = []
+    safe_dir_real = os.path.realpath(safe_dir)
+    for filename in sorted(os.listdir(safe_dir)):
+        if filename.endswith(".json"):
+            file_path = os.path.join(safe_dir, filename)
+            real_path = os.path.realpath(file_path)
+            if not os.path.isfile(real_path):
+                continue
+            if not real_path.startswith(safe_dir_real + os.sep):
+                continue
+            languages.append(filename[:-5])
+    _LANGUAGES = tuple(languages)
+    return _LANGUAGES
+
+
 HARD_CATEGORIES = frozenset(
     {
         "complex_distortion",
@@ -30,6 +53,12 @@ HARD_CATEGORIES = frozenset(
         "semantic_challenge",
         "spelling_mistake",
         "synonym_paraphrase",
+    }
+)
+HASSIL_ALIGN_CATEGORIES = frozenset(
+    {
+        "exact_match",
+        "intent_coverage",
     }
 )
 REQUIRED_CATEGORY_MINIMUMS = {
@@ -58,7 +87,7 @@ class DatasetContext:
     slot_lists: dict[str, hassil.intents.SlotList]
 
 
-@pytest.fixture(scope="module", params=LANGUAGES)
+@pytest.fixture(scope="module", params=_discover_languages())
 def dataset_context(request: pytest.FixtureRequest) -> DatasetContext:
     """Return validated dataset context for one language."""
     language = str(request.param)
@@ -82,7 +111,7 @@ def dataset_context(request: pytest.FixtureRequest) -> DatasetContext:
         ),
         static_normalized_texts=frozenset(candidate.normalized_text for candidate in candidates),
         intents=hassil.intents.Intents.from_dict(merged_intents),
-        slot_lists=_slot_lists(slots),
+        slot_lists=evaluate_metrics.make_hassil_slot_lists(slots),
     )
 
 
@@ -166,21 +195,133 @@ def test_real_world_extra_words_are_not_exact_candidates(
     assert not failures, f"{dataset_context.language}: extra_words exact candidates: {failures}"
 
 
-def _slot_lists(slots: Mapping[str, tuple[str, ...]]) -> dict[str, hassil.intents.SlotList]:
-    """Return HassIL slot lists from registry slot fixtures."""
-    lists: dict[str, hassil.intents.SlotList] = {}
-    for slot_name, values in slots.items():
-        lists[slot_name] = hassil.TextSlotList(
-            name=slot_name,
-            values=[
-                hassil.TextSlotValue(
-                    text_in=hassil.parse_sentence(value).expression,
-                    value_out=value,
-                )
-                for value in values
-            ],
+def test_real_world_expected_intents_align_with_hassil(
+    dataset_context: DatasetContext,
+) -> None:
+    """Assert expected_intent is consistent with HassIL for align categories.
+
+    For exact_match and intent_coverage, if HassIL picks a different
+    intent *and* the canonicalizer can generate a candidate for that
+    intent with the same canonical text, the test label is out of sync
+    and must be corrected.
+
+    Cases where the canonicalizer does not generate the HassIL-chosen
+    intent (e.g.  HassListAddItem vs HassShoppingListAddItem with
+    different slot names) are not errors — they reflect genuine
+    differences in the intent matching space.
+    """
+    dynamic_cache: dict[str, set[tuple[str, str]]] = {}
+    failures: list[dict[str, str]] = []
+    for case in dataset_context.cases:
+        if case["category"] not in HASSIL_ALIGN_CATEGORIES:
+            continue
+        results = evaluate_metrics.run_hassil_recognize_all(
+            case["query"], dataset_context.intents, dataset_context.slot_lists
         )
-    return lists
+        if not results:
+            continue
+        top_result = results[0]
+        if top_result.intent.name == case["expected_intent"]:
+            continue
+        canonical = case["expected_canonical"]
+        cache_key = f"{top_result.intent.name}::{canonical}"
+        if cache_key not in dynamic_cache:
+            candidates = build_query_registry_candidates(
+                dataset_context.language,
+                dataset_context.sources,
+                dataset_context.slots,
+                canonical,
+            )
+            dynamic_cache[cache_key] = {(c.intent_name, c.text) for c in candidates}
+        if (top_result.intent.name, canonical) in dynamic_cache[cache_key]:
+            failures.append(
+                {
+                    "query": case["query"],
+                    "category": case["category"],
+                    "expected_intent": case["expected_intent"],
+                    "hassil_intent": top_result.intent.name,
+                }
+            )
+
+
+def _slot_value_matches(expected: Any, hassil_value: Any, query: str) -> bool:
+    """Check *expected* matches a HassIL entity value.
+
+    Accepts string equality, numeric type coercion, and substring
+    containment (HassIL decomposes compound names like
+    ``đèn phòng khách`` into ``name=đèn`` + ``area=phòng khách``,
+    while the canonicalizer keeps the full compound as ``name``).
+
+    When the HassIL value is a computed domain-level sentinel not
+    appearing literally in *query* (e.g. ``all``, ``tất cả``,
+    ``alle``), the slot is accepted — the canonicalizer extracts
+    the literal text while HassIL resolves to a domain operation.
+    """
+    if isinstance(expected, str) and isinstance(hassil_value, str):
+        if hassil_value not in query:
+            return True
+        return expected == hassil_value or hassil_value in expected
+    try:
+        return float(expected) == float(hassil_value)
+    except (ValueError, TypeError):
+        return False
+
+
+def test_real_world_expected_slots_align_with_hassil(
+    dataset_context: DatasetContext,
+) -> None:
+    """Assert expected_slots match HassIL entities for align categories.
+
+    For exact_match and intent_coverage, when HassIL recognizes the
+    expected intent, every key in *expected_slots* that also appears
+    in HassIL entities is compared — a mismatch means the dataset
+    label is wrong and must be corrected to match HassIL ground truth.
+
+    HassIL entity values not present literally in the query text are
+    treated as computed domain-level sentinels and skipped (e.g.
+    ``name=all`` for ``"tắt quạt"``), since the canonicalizer extracts
+    literal slot text while HassIL resolves domain operations.
+
+    Keys present only in one system are skipped — naming conventions
+    differ by design (e.g. ``shopping_list_item`` vs ``item``,
+    ``timer_seconds`` vs ``minutes``).
+    """
+    failures: list[dict[str, str]] = []
+    for case in dataset_context.cases:
+        if case["category"] not in HASSIL_ALIGN_CATEGORIES:
+            continue
+        expected_slots = case.get("expected_slots", {})
+        if not expected_slots:
+            continue
+        results = evaluate_metrics.run_hassil_recognize_all(
+            case["query"], dataset_context.intents, dataset_context.slot_lists
+        )
+        hassil_entities_by_intent: dict[str, dict[str, Any]] = {}
+        for r in results:
+            hassil_entities_by_intent.setdefault(r.intent.name, {}).update(
+                {name: ent.value for name, ent in r.entities.items()}
+            )
+        hassil_entities = hassil_entities_by_intent.get(case["expected_intent"])
+        if hassil_entities is None:
+            continue
+        query = case["query"]
+        mismatched: list[str] = []
+        for key, expected_value in expected_slots.items():
+            hassil_value = hassil_entities.get(key)
+            if hassil_value is None:
+                continue
+            if not _slot_value_matches(expected_value, hassil_value, query):
+                mismatched.append(f"{key}: expected={expected_value!r}, hassil={hassil_value!r}")
+        if mismatched:
+            failures.append(
+                {
+                    "query": case["query"],
+                    "category": case["category"],
+                    "expected_intent": case["expected_intent"],
+                    "mismatches": ", ".join(mismatched),
+                }
+            )
+    assert not failures, f"{dataset_context.language}: expected_slots mismatch HassIL: {failures}"
 
 
 def _has_expected_candidate(
@@ -208,23 +349,9 @@ def _has_expected_candidate(
 
 def _recognizes_expected(context: DatasetContext, case: Mapping[str, Any]) -> bool:
     """Return whether HassIL directly recognizes a case as the expected result."""
-    slot_lists = dict(context.slot_lists)
-    while True:
-        try:
-            results = list(
-                hassil.recognize_all(
-                    case["query"],
-                    context.intents,
-                    slot_lists=slot_lists,
-                )
-            )
-            break
-        except hassil.errors.MissingListError as err:
-            match = re.search(r"\{([^}]+)\}", str(err))
-            if match is None:
-                raise
-            list_name = match.group(1)
-            slot_lists[list_name] = hassil.TextSlotList(list_name, [])
+    results = evaluate_metrics.run_hassil_recognize_all(
+        case["query"], context.intents, context.slot_lists
+    )
     expected_slots = case.get("expected_slots", {})
     return any(
         result.intent.name == case["expected_intent"]

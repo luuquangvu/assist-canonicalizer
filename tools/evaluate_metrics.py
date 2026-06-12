@@ -28,6 +28,8 @@ _REPO_ROOT = str(Path(__file__).resolve().parent.parent)
 
 _PATH_ALLOWED_CHARS = ascii_letters + digits + "/._-"
 
+_MISSING_LIST_RE = re.compile(r"\{([^}]+)\}")
+
 _BOOTSTRAPPED = False
 
 
@@ -40,6 +42,7 @@ load_language_intent_sources: Any = None
 normalize_text: Any = None
 _RankedCandidate: Any = None
 _ScoreBreakdown: Any = None
+_accepted_candidate: Any = None
 Candidate: Any = None
 FallbackReason: Any = None
 
@@ -92,6 +95,7 @@ def _bootstrap_project_imports() -> None:
     global _BOOTSTRAPPED
     global DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_MARGIN
     global CanonicalizerRuntime
+    global _accepted_candidate
     global build_candidates_from_intent_sources, build_index, load_language_intent_sources
     global normalize_text, _RankedCandidate, _ScoreBreakdown, Candidate, FallbackReason
 
@@ -122,6 +126,9 @@ def _bootstrap_project_imports() -> None:
     from custom_components.assist_canonicalizer.ranking import (
         ScoreBreakdown as ImportedScoreBreakdown,
     )
+    from custom_components.assist_canonicalizer.ranking import (
+        accepted_candidate as imported_accepted_candidate,
+    )
     from custom_components.assist_canonicalizer.runtime import (
         CanonicalizerRuntime as ImportedCanonicalizerRuntime,
     )
@@ -135,6 +142,7 @@ def _bootstrap_project_imports() -> None:
     normalize_text = imported_normalize_text
     _RankedCandidate = ImportedRankedCandidate
     _ScoreBreakdown = ImportedScoreBreakdown
+    _accepted_candidate = imported_accepted_candidate
     Candidate = ImportedCandidate
     FallbackReason = const_module.FallbackReason
     _BOOTSTRAPPED = True
@@ -195,6 +203,18 @@ def _slots_from_candidate(selected: RankedCandidate | None) -> dict[str, Any]:
     return decoded if isinstance(decoded, dict) else {}
 
 
+def _values_equal(a: Any, b: Any) -> bool:
+    """Compare two slot values with numeric type coercion."""
+    if isinstance(a, str) and isinstance(b, str):
+        return normalize_text(a) == normalize_text(b)
+    if isinstance(a, (int, float)) or isinstance(b, (int, float)):
+        try:
+            return float(a) == float(b)
+        except (ValueError, TypeError):
+            return False
+    return a == b
+
+
 def _slots_match(actual: Mapping[str, Any], expected: Mapping[str, Any]) -> bool:
     """Check if actual candidate slots contain all expected slot values."""
     if not expected:
@@ -203,12 +223,46 @@ def _slots_match(actual: Mapping[str, Any], expected: Mapping[str, Any]) -> bool
         actual_value = actual.get(key)
         if actual_value is None:
             return False
-        if isinstance(expected_value, str) and isinstance(actual_value, str):
-            if normalize_text(expected_value) != normalize_text(actual_value):
-                return False
-        elif actual_value != expected_value:
+        if not _values_equal(actual_value, expected_value):
             return False
     return True
+
+
+def make_hassil_slot_lists(
+    slots: Mapping[str, tuple[str, ...]],
+) -> dict[str, hassil.intents.SlotList]:
+    """Build HassIL slot lists from registry slot fixtures."""
+    lists: dict[str, hassil.intents.SlotList] = {}
+    for slot_name, values in slots.items():
+        lists[slot_name] = hassil.TextSlotList(
+            name=slot_name,
+            values=[
+                hassil.TextSlotValue(
+                    text_in=hassil.parse_sentence(value).expression,
+                    value_out=value,
+                )
+                for value in values
+            ],
+        )
+    return lists
+
+
+def run_hassil_recognize_all(
+    query: str,
+    intents: hassil.intents.Intents,
+    slot_lists: dict[str, hassil.intents.SlotList],
+) -> list[Any]:
+    """Run HassIL recognize_all with lazy slot-list injection on MissingListError."""
+    working_lists = dict(slot_lists)
+    while True:
+        try:
+            return list(hassil.recognize_all(query, intents, slot_lists=working_lists))
+        except hassil.errors.MissingListError as err:
+            match = _MISSING_LIST_RE.search(str(err))
+            if match is None:
+                raise
+            list_name = match.group(1)
+            working_lists[list_name] = hassil.TextSlotList(list_name, [])
 
 
 def _score_value(selected: RankedCandidate | None, field: str) -> float | None:
@@ -456,66 +510,40 @@ def _component_score(item: RankedCandidate, component: str) -> float | None:
 def _select_accepted_with_gate(
     ranked: tuple[RankedCandidate, ...],
 ) -> tuple[RankedCandidate | None, dict[str, Any]]:
-    """Return the accepted candidate plus explicit acceptance gate diagnostics."""
-    if not ranked:
-        return None, {
-            "accepted": False,
-            "reason": "empty_ranking",
-            "top_score": None,
-            "competing_score": None,
-            "margin": None,
-        }
-    top_candidate = ranked[0]
-    top_score = top_candidate.scores.final_score
-    competing_candidate = next(
-        (
-            item
-            for item in ranked[1:]
-            if item.candidate.intent_name != top_candidate.candidate.intent_name
-        ),
-        None,
+    """Return the accepted candidate with acceptance gate diagnostics.
+
+    Delegates to :func:`accepted_candidate` and wraps the result
+    with diagnostic metadata so there is no duplicated gate logic.
+    """
+    result = _accepted_candidate(ranked)
+    top_score = ranked[0].scores.final_score if ranked else None
+    competing_candidate = (
+        next(
+            (
+                item
+                for item in ranked[1:]
+                if item.candidate.intent_name != ranked[0].candidate.intent_name
+            ),
+            None,
+        )
+        if ranked
+        else None
     )
     competing_score = (
         competing_candidate.scores.final_score if competing_candidate is not None else None
     )
-    margin = top_score - competing_score if competing_score is not None else None
-    if top_score < DEFAULT_MIN_CONFIDENCE:
-        return None, {
-            "accepted": False,
-            "reason": FallbackReason.LOW_CONFIDENCE.value,
-            "top_score": top_score,
-            "competing_score": competing_score,
-            "margin": margin,
-        }
-    if (
-        competing_candidate is not None
-        and margin is not None
-        and margin < DEFAULT_MIN_MARGIN
-        and not (
-            _is_exact_lexical_match(top_candidate)
-            and not _is_exact_lexical_match(competing_candidate)
-        )
-    ):
-        return None, {
-            "accepted": False,
-            "reason": FallbackReason.LOW_MARGIN.value,
-            "top_score": top_score,
-            "competing_score": competing_score,
-            "margin": margin,
-        }
-    return top_candidate, {
-        "accepted": True,
-        "reason": "accepted",
+    margin = (
+        top_score - competing_score
+        if (top_score is not None and competing_score is not None)
+        else None
+    )
+    return result, {
+        "accepted": result is not None,
+        "reason": "accepted" if result is not None else "rejected",
         "top_score": top_score,
         "competing_score": competing_score,
         "margin": margin,
     }
-
-
-def _is_exact_lexical_match(ranked_candidate: RankedCandidate) -> bool:
-    """Return whether a ranked candidate exactly matches query text lexically."""
-    scores = ranked_candidate.scores
-    return scores.rapidfuzz_score == 1.0 and scores.char_ngram_score == 1.0
 
 
 def _select_ablation_candidate(
@@ -1035,17 +1063,7 @@ async def run_evaluation(
         for s in sources.values():
             hassil.merge_dict(merged_intents, s)
         hassil_intents = hassil.intents.Intents.from_dict(merged_intents)
-        hassil_slot_lists: dict[str, hassil.intents.SlotList] = {}
-        for slot_name, slot_values in slots.items():
-            text_values = []
-            for val in slot_values:
-                text_values.append(
-                    hassil.TextSlotValue(
-                        text_in=hassil.parse_sentence(val).expression,
-                        value_out=val,
-                    )
-                )
-            hassil_slot_lists[slot_name] = hassil.TextSlotList(name=slot_name, values=text_values)
+        hassil_slot_lists = make_hassil_slot_lists(slots)
 
         results = _new_results()
         ablations = _new_ablation_results()
@@ -1067,24 +1085,7 @@ async def run_evaluation(
 
                 start_time = time.perf_counter()
                 if mode_name == "hassil":
-                    res_list = []
-                    while True:
-                        try:
-                            res_list = list(
-                                hassil.recognize_all(
-                                    query,
-                                    hassil_intents,
-                                    slot_lists=hassil_slot_lists,
-                                )
-                            )
-                            break
-                        except hassil.errors.MissingListError as err:
-                            match = re.search(r"\{([^}]+)\}", str(err))
-                            if match:
-                                list_name = match.group(1)
-                                hassil_slot_lists[list_name] = hassil.TextSlotList(list_name, [])
-                            else:
-                                raise
+                    res_list = run_hassil_recognize_all(query, hassil_intents, hassil_slot_lists)
                     res = None
                     for r in res_list:
                         actual_slots = {name: entity.value for name, entity in r.entities.items()}

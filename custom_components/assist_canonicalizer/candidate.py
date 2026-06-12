@@ -66,12 +66,18 @@ class Candidate:
 
 
 def deduplicate_candidates(candidates: list[Candidate]) -> tuple[Candidate, ...]:
-    """Deduplicate candidates by normalized text while preserving best source priority."""
-    selected: dict[str, Candidate] = {}
+    """Deduplicate by (normalized text, intent name) preserving best source priority.
+
+    Candidates with identical text but different intents are kept — the downstream
+    HassIL validation loop resolves the intent based on real home context
+    (requires_context / excludes_context).
+    """
+    selected: dict[tuple[str, str], Candidate] = {}
     for candidate in candidates:
-        existing = selected.get(candidate.normalized_text)
+        key = (candidate.normalized_text, candidate.intent_name)
+        existing = selected.get(key)
         if existing is None or candidate.source_priority < existing.source_priority:
-            selected[candidate.normalized_text] = candidate
+            selected[key] = candidate
     return tuple(
         sorted(selected.values(), key=lambda item: (item.source_priority, item.normalized_text))
     )

@@ -479,7 +479,7 @@ def accepted_candidate(
     )
     if competing_candidate is None:
         return top_candidate
-    if _is_exact_lexical_match(top_candidate) and not _is_exact_lexical_match(competing_candidate):
+    if _is_exact_lexical_match(top_candidate):
         return top_candidate
     margin = top_candidate.scores.final_score - competing_candidate.scores.final_score
     if margin < min_margin:
