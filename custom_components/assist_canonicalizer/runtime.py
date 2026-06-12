@@ -13,8 +13,12 @@ from .candidate import Candidate, CandidateSource
 from .const import DEFAULT_MAX_CANDIDATES, FallbackReason
 from .diagnostics import CanonicalizerDiagnostics
 from .grammar_loader import (
+    DynamicRegistryIntent,
+    RegistrySlotIndex,
     build_candidates_from_intent_sources,
     build_query_registry_candidates,
+    build_registry_slot_index,
+    compile_dynamic_registry_intents,
 )
 from .indexer import CanonicalIndex, build_index
 from .normalization import char_ngrams_normalized
@@ -41,6 +45,10 @@ class CanonicalizerRuntime:
     language_intent_sources: dict[str, dict[str, Mapping[str, Any]]] = field(default_factory=dict)
     config_path: Callable[..., str] | None = None
     registry_slot_values: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    registry_slot_index: RegistrySlotIndex = field(default_factory=dict)
+    dynamic_registry_intents: dict[str, tuple[DynamicRegistryIntent, ...]] = field(
+        default_factory=dict
+    )
     cleanup_callbacks: list[Callable[[], None]] = field(default_factory=list)
     rebuild_tasks: dict[str, tuple[int, asyncio.Task[CanonicalIndex]]] = field(default_factory=dict)
     index_generation: int = 0
@@ -173,6 +181,8 @@ class CanonicalizerRuntime:
             self._intent_sources_for_query(language),
             self.registry_slot_values,
             query,
+            registry_slot_index=self.registry_slot_index,
+            compiled_intents=self._dynamic_registry_intents_for_query(language),
         )
         if not dynamic_candidates:
             return ranked
@@ -211,14 +221,17 @@ class CanonicalizerRuntime:
         """Configure Home Assistant config path access for custom sentences."""
         self.config_path = config_path
         self.language_intent_sources.clear()
+        self.dynamic_registry_intents.clear()
 
     def update_registry_slot_values(self, slot_values: Mapping[str, tuple[str, ...]]) -> None:
         """Update cached registry metadata used for candidate expansion."""
         self.registry_slot_values = dict(slot_values)
+        self.registry_slot_index = build_registry_slot_index(self.registry_slot_values)
 
     def update_intent_sources(self, intents_update: Mapping[Any, Mapping[str, Any]]) -> None:
         """Update cached Home Assistant conversation intent sources."""
         self.language_intent_sources.clear()
+        self.dynamic_registry_intents.clear()
         for source, source_config in intents_update.items():
             self.intent_sources[_source_key(source)] = source_config
 
@@ -246,6 +259,18 @@ class CanonicalizerRuntime:
         if cached is not None:
             return cached
         return self._all_intent_sources(language)
+
+    def _dynamic_registry_intents_for_query(
+        self, language: str
+    ) -> tuple[DynamicRegistryIntent, ...]:
+        """Return compiled query-independent registry templates for a language."""
+        language = normalize_language(language)
+        cached = self.dynamic_registry_intents.get(language)
+        if cached is not None:
+            return cached
+        compiled = compile_dynamic_registry_intents(self._intent_sources_for_query(language))
+        self.dynamic_registry_intents[language] = compiled
+        return compiled
 
     def _all_intent_sources(self, language: str) -> dict[str, Mapping[str, Any]]:
         """Return built-in, custom, and subscribed intent sources."""

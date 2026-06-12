@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
 
@@ -27,6 +28,43 @@ _OPTIONAL_PATTERN = re.compile(r"\[([^\[\]]+)]")
 _ALTERNATIVE_PATTERN = re.compile(r"\(([^()]+\|[^()]*)\)")
 _ENTITY_SLOT_NAMES = frozenset(ENTITY_SLOT_NAMES)
 _AREA_SLOT_NAMES = frozenset(AREA_SLOT_NAMES)
+
+
+@dataclass(frozen=True, slots=True)
+class RegistrySlotValue:
+    """Precomputed lexical data for one registry slot value."""
+
+    text: str
+    normalized_text: str
+    tokens: tuple[str, ...]
+    position: int
+
+
+type RegistrySlotIndex = dict[str, tuple[RegistrySlotValue, ...]]
+
+
+@dataclass(frozen=True, slots=True)
+class DynamicRegistryTemplate:
+    """Query-independent data needed to expand one registry template."""
+
+    sentence: str
+    sentence_slots: frozenset[str]
+    entity_slots: tuple[str, ...]
+    domains: tuple[str, ...]
+    expansion_rules: Mapping[str, str]
+    base_data_slot_values: Mapping[str, tuple[str, ...]]
+    required_slots: frozenset[str]
+    metadata: Mapping[str, str]
+    literal_token_variants: tuple[tuple[str, ...], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class DynamicRegistryIntent:
+    """Compiled registry templates for one intent."""
+
+    source: CandidateSource
+    intent_name: str
+    templates: tuple[DynamicRegistryTemplate, ...]
 
 
 def build_candidates_from_intent_sources(
@@ -73,6 +111,89 @@ def build_candidates_from_intent_sources(
     return tuple(candidates)
 
 
+def build_registry_slot_index(
+    registry_slot_values: Mapping[str, tuple[str, ...]],
+) -> RegistrySlotIndex:
+    """Precompute normalized registry values while sharing identical slot tuples."""
+    shared: dict[tuple[str, ...], tuple[RegistrySlotValue, ...]] = {}
+    index: RegistrySlotIndex = {}
+    for slot_name, values in registry_slot_values.items():
+        records = shared.get(values)
+        if records is None:
+            records = tuple(
+                RegistrySlotValue(
+                    text=value,
+                    normalized_text=normalized,
+                    tokens=tuple(dict.fromkeys(normalized.split())),
+                    position=position,
+                )
+                for position, value in enumerate(values)
+                if (normalized := normalize_text(value))
+            )
+            shared[values] = records
+        index[slot_name] = records
+    return index
+
+
+def compile_dynamic_registry_intents(
+    intent_sources: Mapping[str, Mapping[str, Any]],
+) -> tuple[DynamicRegistryIntent, ...]:
+    """Compile query-independent dynamic registry template data."""
+    compiled: list[DynamicRegistryIntent] = []
+    for source_key, source_config in intent_sources.items():
+        source = _candidate_source_from_key(source_key)
+        intents = source_config.get("intents", {})
+        if not isinstance(intents, Mapping):
+            continue
+        for intent_name, intent_config in intents.items():
+            if not isinstance(intent_name, str) or not isinstance(intent_config, Mapping):
+                continue
+            templates: list[DynamicRegistryTemplate] = []
+            data_items = intent_config.get("data", [])
+            if not isinstance(data_items, list):
+                continue
+            for data_item in data_items:
+                if not isinstance(data_item, Mapping):
+                    continue
+                sentences = data_item.get("sentences", [])
+                if not isinstance(sentences, list):
+                    continue
+                expansion_rules = _expansion_rules(source_config, intent_config, data_item)
+                base_data_slot_values = _slot_values(source_config, intent_config, data_item)
+                domains = _context_domains(data_item)
+                for sentence in sentences:
+                    if not isinstance(sentence, str):
+                        continue
+                    sentence_slots = _template_slot_names(sentence, expansion_rules)
+                    entity_slots = tuple(sorted(sentence_slots & _ENTITY_SLOT_NAMES))
+                    if not entity_slots:
+                        continue
+                    templates.append(
+                        DynamicRegistryTemplate(
+                            sentence=sentence,
+                            sentence_slots=sentence_slots,
+                            entity_slots=entity_slots,
+                            domains=domains,
+                            expansion_rules=expansion_rules,
+                            base_data_slot_values=base_data_slot_values,
+                            required_slots=frozenset(_required_slots(sentence, expansion_rules)),
+                            metadata=_candidate_metadata(source_key, sentence, expansion_rules),
+                            literal_token_variants=_template_literal_token_variants(
+                                sentence, expansion_rules
+                            ),
+                        )
+                    )
+            if templates:
+                compiled.append(
+                    DynamicRegistryIntent(
+                        source=source,
+                        intent_name=intent_name,
+                        templates=tuple(templates),
+                    )
+                )
+    return tuple(compiled)
+
+
 def build_query_registry_candidates(
     language: str,
     intent_sources: Mapping[str, Mapping[str, Any]],
@@ -80,6 +201,8 @@ def build_query_registry_candidates(
     query: str,
     *,
     max_candidates: int = DEFAULT_MAX_DYNAMIC_CANDIDATES,
+    registry_slot_index: Mapping[str, tuple[RegistrySlotValue, ...]] | None = None,
+    compiled_intents: Sequence[DynamicRegistryIntent] | None = None,
 ) -> tuple[Candidate, ...]:
     """Build query-scoped registry candidates without expanding every entity."""
     if max_candidates < 1:
@@ -88,30 +211,28 @@ def build_query_registry_candidates(
     if not query_normalized or not registry_slot_values:
         return ()
     query_tokens = frozenset(query_normalized.split())
+    if registry_slot_index is None:
+        registry_slot_index = build_registry_slot_index(registry_slot_values)
+    if compiled_intents is None:
+        compiled_intents = compile_dynamic_registry_intents(intent_sources)
 
     candidates: list[Candidate] = []
-    for source_key, source_config in intent_sources.items():
-        candidate_source = _candidate_source_from_key(source_key)
-        intents = source_config.get("intents", {})
-        if not isinstance(intents, Mapping):
-            continue
-        for intent_name, intent_config in intents.items():
-            if not isinstance(intent_name, str) or not isinstance(intent_config, Mapping):
-                continue
-            candidates.extend(
-                _query_candidates_from_intent_config(
-                    language,
-                    source_key,
-                    source_config,
-                    candidate_source,
-                    intent_name,
-                    intent_config,
-                    registry_slot_values,
-                    query_normalized,
-                    query_tokens,
-                    max_candidates=DEFAULT_MAX_CANDIDATES_PER_INTENT,
-                )
+    relevant_cache: dict[int, tuple[str, ...]] = {}
+    scoped_cache: dict[tuple[str, tuple[str, ...]], tuple[RegistrySlotValue, ...]] = {}
+    for compiled_intent in compiled_intents:
+        candidates.extend(
+            _query_candidates_from_compiled_intent(
+                language,
+                compiled_intent,
+                registry_slot_values,
+                registry_slot_index,
+                query_normalized,
+                query_tokens,
+                relevant_cache,
+                scoped_cache,
+                max_candidates=DEFAULT_MAX_CANDIDATES_PER_INTENT,
             )
+        )
     if len(candidates) <= max_candidates:
         return tuple(candidates)
     candidates.sort(
@@ -246,77 +367,176 @@ def _candidates_from_intent_config(
     return tuple(candidates)
 
 
-def _query_candidates_from_intent_config(
+def _query_candidates_from_compiled_intent(
     language: str,
-    source_key: str,
-    source_config: Mapping[str, Any],
-    source: CandidateSource,
-    intent_name: str,
-    intent_config: Mapping[str, Any],
+    compiled_intent: DynamicRegistryIntent,
     registry_slot_values: Mapping[str, tuple[str, ...]],
+    registry_slot_index: Mapping[str, tuple[RegistrySlotValue, ...]],
     query_normalized: str,
     query_tokens: frozenset[str],
+    relevant_cache: dict[int, tuple[str, ...]],
+    scoped_cache: dict[tuple[str, tuple[str, ...]], tuple[RegistrySlotValue, ...]],
     *,
     max_candidates: int,
 ) -> tuple[Candidate, ...]:
-    """Extract dynamic registry candidates for one intent and query."""
-    if max_candidates < 1:
-        return ()
+    """Expand one compiled intent using query-relevant registry values."""
     candidates: list[Candidate] = []
-    data_items = intent_config.get("data", [])
-    if not isinstance(data_items, list):
-        return ()
-    for data_item in data_items:
-        if not isinstance(data_item, Mapping):
+    for template in compiled_intent.templates:
+        if not _literal_token_variants_match_query(template.literal_token_variants, query_tokens):
             continue
-        sentences = data_item.get("sentences", [])
-        if not isinstance(sentences, list):
+        dynamic_registry_slots = _compiled_query_registry_slot_values(
+            template,
+            registry_slot_values,
+            registry_slot_index,
+            query_normalized,
+            query_tokens,
+            relevant_cache,
+            scoped_cache,
+        )
+        if not dynamic_registry_slots:
             continue
-        expansion_rules = _expansion_rules(source_config, intent_config, data_item)
-        base_data_slot_values = _slot_values(source_config, intent_config, data_item)
-        for sentence in sentences:
-            if not isinstance(sentence, str):
-                continue
-            sentence_slots = _template_slot_names(sentence, expansion_rules)
-            if not sentence_slots & _ENTITY_SLOT_NAMES:
-                continue
-            if not _template_literals_match_query(sentence, expansion_rules, query_tokens):
-                continue
-            dynamic_registry_slots = _query_registry_slot_values_for_template(
-                data_item,
-                sentence_slots=sentence_slots,
-                registry_slot_values=registry_slot_values,
-                query_normalized=query_normalized,
-                query_tokens=query_tokens,
-            )
-            if not dynamic_registry_slots:
-                continue
-            slot_values = merge_slot_values(
-                base_data_slot_values,
-                dynamic_registry_slots,
-            )
-            required = _required_slots(sentence, expansion_rules)
-            if any(not slot_values.get(slot) for slot in required):
-                continue
-            base_metadata = _candidate_metadata(source_key, sentence, expansion_rules)
-            presorted_values = _presort_slot_values(slot_values)
-            for expanded_sentence in _candidate_texts(sentence, slot_values, expansion_rules):
-                slots = _extract_slots_from_expanded_text(expanded_sentence, presorted_values)
-                metadata = dict(base_metadata)
-                if slots:
-                    metadata["slots"] = orjson.dumps(slots).decode("utf-8")
-                candidates.append(
-                    Candidate(
-                        text=expanded_sentence,
-                        intent_name=intent_name,
-                        source=source,
-                        language=language,
-                        metadata=metadata,
-                    )
+        slot_values = merge_slot_values(
+            template.base_data_slot_values,
+            dynamic_registry_slots,
+        )
+        if any(not slot_values.get(slot) for slot in template.required_slots):
+            continue
+        presorted_values = _presort_slot_values(slot_values)
+        for expanded_sentence in _candidate_texts(
+            template.sentence,
+            slot_values,
+            template.expansion_rules,
+        ):
+            slots = _extract_slots_from_expanded_text(expanded_sentence, presorted_values)
+            metadata = dict(template.metadata)
+            if slots:
+                metadata["slots"] = orjson.dumps(slots).decode("utf-8")
+            candidates.append(
+                Candidate(
+                    text=expanded_sentence,
+                    intent_name=compiled_intent.intent_name,
+                    source=compiled_intent.source,
+                    language=language,
+                    metadata=metadata,
                 )
-                if len(candidates) >= max_candidates:
-                    return tuple(candidates)
+            )
+            if len(candidates) >= max_candidates:
+                return tuple(candidates)
     return tuple(candidates)
+
+
+def _compiled_query_registry_slot_values(
+    template: DynamicRegistryTemplate,
+    registry_slot_values: Mapping[str, tuple[str, ...]],
+    registry_slot_index: Mapping[str, tuple[RegistrySlotValue, ...]],
+    query_normalized: str,
+    query_tokens: frozenset[str],
+    relevant_cache: dict[int, tuple[str, ...]],
+    scoped_cache: dict[tuple[str, tuple[str, ...]], tuple[RegistrySlotValue, ...]],
+) -> dict[str, tuple[str, ...]]:
+    """Return narrowed registry slots for a compiled template."""
+    constrained = dict(registry_slot_values)
+    if template.sentence_slots & _AREA_SLOT_NAMES:
+        for slot_name in AREA_SLOT_NAMES:
+            constrained.pop(slot_name, None)
+
+    if template.domains:
+        for slot_name in _ENTITY_SLOT_NAMES:
+            constrained.pop(slot_name, None)
+            records = _scoped_registry_slot_records(
+                slot_name,
+                template.domains,
+                registry_slot_index,
+                scoped_cache,
+            )
+            if records:
+                constrained[slot_name] = tuple(record.text for record in records)
+
+    matched_entity_slot = False
+    for slot_name in template.entity_slots:
+        records = _scoped_registry_slot_records(
+            slot_name,
+            template.domains,
+            registry_slot_index,
+            scoped_cache,
+        )
+        if not records:
+            constrained.pop(slot_name, None)
+            continue
+        cache_key = id(records)
+        relevant = relevant_cache.get(cache_key)
+        if relevant is None:
+            relevant = _query_relevant_precomputed_slot_values(
+                records,
+                query_normalized,
+                query_tokens,
+            )
+            relevant_cache[cache_key] = relevant
+        if relevant:
+            constrained[slot_name] = relevant
+            matched_entity_slot = True
+        else:
+            constrained.pop(slot_name, None)
+    return constrained if matched_entity_slot else {}
+
+
+def _scoped_registry_slot_records(
+    slot_name: str,
+    domains: tuple[str, ...],
+    registry_slot_index: Mapping[str, tuple[RegistrySlotValue, ...]],
+    scoped_cache: dict[tuple[str, tuple[str, ...]], tuple[RegistrySlotValue, ...]],
+) -> tuple[RegistrySlotValue, ...]:
+    """Return precomputed registry records for a generic or domain-scoped slot."""
+    if not domains:
+        return registry_slot_index.get(slot_name, ())
+    cache_key = (slot_name, domains)
+    cached = scoped_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    if len(domains) == 1:
+        records = registry_slot_index.get(f"{slot_name}:{domains[0]}", ())[
+            :DEFAULT_MAX_CANDIDATES_PER_INTENT
+        ]
+        scoped_cache[cache_key] = records
+        return records
+
+    selected: list[RegistrySlotValue] = []
+    seen: set[str] = set()
+    for domain in domains:
+        for record in registry_slot_index.get(f"{slot_name}:{domain}", ()):
+            if record.text in seen:
+                continue
+            seen.add(record.text)
+            selected.append(record)
+            if len(selected) >= DEFAULT_MAX_CANDIDATES_PER_INTENT:
+                records = tuple(selected)
+                scoped_cache[cache_key] = records
+                return records
+    records = tuple(selected)
+    scoped_cache[cache_key] = records
+    return records
+
+
+def _query_relevant_precomputed_slot_values(
+    values: tuple[RegistrySlotValue, ...],
+    query_normalized: str,
+    query_tokens: frozenset[str],
+    *,
+    limit: int = DEFAULT_MAX_DYNAMIC_SLOT_VALUES,
+) -> tuple[str, ...]:
+    """Return relevant values using precomputed normalization and tokens."""
+    scored: list[tuple[tuple[bool, bool, bool, int, int], int, str]] = []
+    for value in values:
+        match_key = _slot_value_query_match_key_from_tokens(
+            value.normalized_text,
+            value.tokens,
+            query_normalized,
+            query_tokens,
+        )
+        if match_key is not None:
+            scored.append((match_key, value.position, value.text))
+    scored.sort(key=lambda item: (item[0], -item[1]), reverse=True)
+    return tuple(_deduplicate_texts((value for _, _, value in scored), limit))
 
 
 def _candidate_metadata(
@@ -398,68 +618,13 @@ def _registry_slot_values_for_template(
     return constrained
 
 
-def _query_registry_slot_values_for_template(
-    data_item: Mapping[str, Any],
-    *,
-    sentence_slots: frozenset[str],
-    registry_slot_values: Mapping[str, tuple[str, ...]],
-    query_normalized: str,
-    query_tokens: frozenset[str],
-) -> dict[str, tuple[str, ...]]:
-    """Return registry slots narrowed to values that appear relevant to a query."""
-    constrained = _registry_slot_values_for_template(
-        data_item,
-        sentence_slots=sentence_slots,
-        registry_slot_values=registry_slot_values,
-    )
-    matched_entity_slot = False
-    for slot_name in sentence_slots & _ENTITY_SLOT_NAMES:
-        values = constrained.get(slot_name, ())
-        if not values:
-            constrained.pop(slot_name, None)
-            continue
-        relevant = _query_relevant_slot_values(values, query_normalized, query_tokens)
-        if relevant:
-            constrained[slot_name] = relevant
-            matched_entity_slot = True
-        else:
-            constrained.pop(slot_name, None)
-    return constrained if matched_entity_slot else {}
-
-
-def _query_relevant_slot_values(
-    values: tuple[str, ...],
-    query_normalized: str,
-    query_tokens: frozenset[str],
-    *,
-    limit: int = DEFAULT_MAX_DYNAMIC_SLOT_VALUES,
-) -> tuple[str, ...]:
-    """Return slot values that are lexically relevant to a normalized query."""
-    if limit < 1:
-        return ()
-    scored: list[tuple[tuple[bool, bool, bool, int, int], int, str]] = []
-    for position, value in enumerate(values):
-        value_normalized = normalize_text(value)
-        match_key = _slot_value_query_match_key(
-            value_normalized,
-            query_normalized,
-            query_tokens,
-        )
-        if match_key is not None:
-            scored.append((match_key, position, value))
-    scored.sort(key=lambda item: (item[0], -item[1]), reverse=True)
-    return tuple(_deduplicate_texts((value for _, _, value in scored), limit))
-
-
-def _slot_value_query_match_key(
+def _slot_value_query_match_key_from_tokens(
     value_normalized: str,
+    value_tokens: tuple[str, ...],
     query_normalized: str,
     query_tokens: frozenset[str],
 ) -> tuple[bool, bool, bool, int, int] | None:
-    """Return an ordered relevance key for a slot value and query."""
-    if not value_normalized:
-        return None
-    value_tokens = tuple(dict.fromkeys(value_normalized.split()))
+    """Return registry relevance using precomputed normalized value tokens."""
     if not value_tokens:
         return None
     token_count = len(value_tokens)
@@ -479,13 +644,11 @@ def _slot_value_query_match_key(
     )
 
 
-def _template_literals_match_query(
-    sentence: str,
-    expansion_rules: Mapping[str, str],
+def _literal_token_variants_match_query(
+    literal_variants: tuple[tuple[str, ...], ...],
     query_tokens: frozenset[str],
 ) -> bool:
-    """Return whether a template's literal words are present in a query."""
-    literal_variants = _template_literal_token_variants(sentence, expansion_rules)
+    """Return whether precomputed template literal variants match a query."""
     if not literal_variants:
         return True
     for literal_tokens in literal_variants:

@@ -13,7 +13,7 @@ import homeassistant.helpers.storage
 import pytest
 
 import custom_components.assist_canonicalizer as integration
-from custom_components.assist_canonicalizer import _subscribe_registry_updates
+from custom_components.assist_canonicalizer import _subscribe_registry_updates, grammar_loader
 from custom_components.assist_canonicalizer.candidate import Candidate, CandidateSource
 from custom_components.assist_canonicalizer.const import DEFAULT_MAX_CANDIDATES_PER_TEMPLATE
 from custom_components.assist_canonicalizer.grammar_loader import (
@@ -175,6 +175,68 @@ async def test_rank_with_dynamic_candidates_does_not_starve_later_intents() -> N
     assert ranked[0].candidate.intent_name == "HassTurnOn"
     assert ranked[0].candidate.normalized_text == "turn tail light on"
     assert ranked[0].scores.final_score == 1.0
+
+
+def test_runtime_precomputes_and_shares_registry_slot_records(monkeypatch: Any) -> None:
+    """Normalize identical registry slot tuples once when refreshing the snapshot."""
+    normalized_values: list[str] = []
+    original_normalize_text = grammar_loader.normalize_text
+
+    def track_normalization(text: str) -> str:
+        """Record registry values normalized while building the snapshot."""
+        normalized_values.append(text)
+        return original_normalize_text(text)
+
+    monkeypatch.setattr(grammar_loader, "normalize_text", track_normalization)
+    values = ("Kitchen Light", "Desk Lamp")
+    runtime = CanonicalizerRuntime()
+    runtime.update_registry_slot_values({"name": values, "entity": values})
+
+    assert normalized_values == list(values)
+    assert runtime.registry_slot_index["name"] is runtime.registry_slot_index["entity"]
+    assert runtime.registry_slot_index["name"][0].normalized_text == "kitchen light"
+    assert runtime.registry_slot_index["name"][0].tokens == ("kitchen", "light")
+
+
+def test_runtime_registry_snapshot_update_replaces_dynamic_aliases() -> None:
+    """Use the latest precomputed registry snapshot for dynamic candidates."""
+    intent_sources: dict[str, Mapping[str, Any]] = {
+        "built_in": {
+            "intents": {
+                "HassTurnOn": {
+                    "data": [
+                        {
+                            "sentences": ["turn on {name}"],
+                            "requires_context": {"domain": "light"},
+                        }
+                    ]
+                }
+            }
+        }
+    }
+    runtime = CanonicalizerRuntime()
+    runtime.language_intent_sources["en"] = intent_sources
+    index = build_index("en", [Candidate(text="unrelated", intent_name="HassNevermind")])
+
+    runtime.update_registry_slot_values({"name": ("old lamp",), "name:light": ("old lamp",)})
+    old_ranked = runtime.rank_with_dynamic_candidates("en", index, "turn on old lamp")
+    assert old_ranked[0].candidate.normalized_text == "turn on old lamp"
+
+    runtime.update_registry_slot_values({"name": ("new lamp",), "name:light": ("new lamp",)})
+    new_ranked = runtime.rank_with_dynamic_candidates("en", index, "turn on new lamp")
+
+    assert new_ranked[0].candidate.normalized_text == "turn on new lamp"
+    assert all(record.text != "old lamp" for record in runtime.registry_slot_index["name"])
+
+
+def test_runtime_intent_update_invalidates_compiled_dynamic_templates() -> None:
+    """Discard compiled templates when subscribed intent sources change."""
+    runtime = CanonicalizerRuntime()
+    runtime.dynamic_registry_intents["en"] = ()
+
+    runtime.update_intent_sources({})
+
+    assert runtime.dynamic_registry_intents == {}
 
 
 def test_runtime_normalizes_language_cache_keys() -> None:
