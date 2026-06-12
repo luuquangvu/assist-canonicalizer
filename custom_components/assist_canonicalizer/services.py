@@ -97,6 +97,10 @@ def async_setup_services(hass: Any) -> None:
         """Handle dump_candidates service calls."""
         return await _handle_dump_candidates(hass, call)
 
+    async def handle_clear_index(call: ServiceCall) -> dict[str, Any]:
+        """Handle clear_index service calls."""
+        return await _handle_clear_index(hass, call)
+
     hass.services.async_register(
         DOMAIN,
         SERVICE_TEST_MATCH,
@@ -114,7 +118,7 @@ def async_setup_services(hass: Any) -> None:
     hass.services.async_register(
         DOMAIN,
         SERVICE_CLEAR_INDEX,
-        lambda call: _handle_clear_index(hass, call),
+        handle_clear_index,
         schema=CLEAR_INDEX_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
@@ -210,11 +214,14 @@ async def _handle_rebuild_index(hass: Any, call: ServiceCall) -> dict[str, Any]:
     }
 
 
-def _handle_clear_index(hass: Any, call: ServiceCall) -> dict[str, Any]:
+async def _handle_clear_index(hass: Any, call: ServiceCall) -> dict[str, Any]:
     """Clear one language index or all indexes."""
     runtime = _runtime_from_hass(hass)
     language = call.data.get(ATTR_LANGUAGE)
-    runtime.clear_index(normalize_language(language) if isinstance(language, str) else None)
+    await runtime.async_clear_index(
+        hass,
+        normalize_language(language) if isinstance(language, str) else None,
+    )
     return {ATTR_CANDIDATE_COUNT: runtime.total_candidate_count()}
 
 

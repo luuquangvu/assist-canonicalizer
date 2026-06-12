@@ -84,8 +84,9 @@ async def async_setup_entry(
 
     def intent_updates_callback(intents_update: Any) -> None:
         """Update intent sources and trigger background rebuilds for active languages."""
+        active_languages = list(runtime.indexes)
         runtime.update_intent_sources(intents_update)
-        for language in list(runtime.indexes.keys()):
+        for language in active_languages:
             hass.add_job(runtime.async_rebuild_index, hass, language)
 
     runtime.add_cleanup_callback(
@@ -141,8 +142,9 @@ def _subscribe_registry_updates(hass: HomeAssistantInstance, runtime: Canonicali
     def debounced_rebuild(now: Any = None) -> None:
         """Refresh registry slot values and rebuild active indexes."""
         runtime.rebuild_timer_cancel = None
+        active_languages = list(runtime.indexes)
         _refresh_registry_slot_values(hass, runtime)
-        for language in list(runtime.indexes.keys()):
+        for language in active_languages:
             hass.add_job(runtime.async_rebuild_index, hass, language)
 
     def refresh_from_event(event: Any = None) -> None:

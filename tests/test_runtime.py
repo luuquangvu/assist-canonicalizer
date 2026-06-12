@@ -6,14 +6,20 @@ import asyncio
 import sys
 from collections.abc import Mapping
 from types import ModuleType
-from typing import Any
+from typing import Any, ClassVar
 
 import homeassistant.helpers.event
 import homeassistant.helpers.storage
 import pytest
 
 import custom_components.assist_canonicalizer as integration
-from custom_components.assist_canonicalizer import _subscribe_registry_updates, grammar_loader
+from custom_components.assist_canonicalizer import (
+    _subscribe_registry_updates,
+    grammar_loader,
+)
+from custom_components.assist_canonicalizer import (
+    runtime as runtime_module,
+)
 from custom_components.assist_canonicalizer.candidate import Candidate, CandidateSource
 from custom_components.assist_canonicalizer.const import DEFAULT_MAX_CANDIDATES_PER_TEMPLATE
 from custom_components.assist_canonicalizer.grammar_loader import (
@@ -48,18 +54,24 @@ class FakeHass:
 async def test_async_rebuild_index_coalesces_concurrent_language_jobs(monkeypatch: Any) -> None:
     """Coalesce equivalent language variants into one rebuild job."""
     monkeypatch.setattr(homeassistant.helpers.storage, "Store", MockStore)
-    MockStore.stored_data = None
+    MockStore.reset()
 
     runtime = CanonicalizerRuntime()
     calls = 0
 
-    def fake_build_index(self: CanonicalizerRuntime, language: str) -> CanonicalIndex:
+    def fake_build_index(snapshot: Any) -> CanonicalIndex:
         """Count rebuild calls and return a small index."""
         nonlocal calls
         calls += 1
         return build_index(
-            language,
-            [Candidate(text="turn on light", intent_name="HassTurnOn", language=language)],
+            snapshot.language,
+            [
+                Candidate(
+                    text="turn on light",
+                    intent_name="HassTurnOn",
+                    language=snapshot.language,
+                )
+            ],
         )
 
     async def scenario() -> tuple[CanonicalIndex, CanonicalIndex]:
@@ -72,7 +84,7 @@ async def test_async_rebuild_index_coalesces_concurrent_language_jobs(monkeypatc
         hass.release_job.set()
         return await asyncio.gather(first_task, second_task)
 
-    monkeypatch.setattr(CanonicalizerRuntime, "_build_index", fake_build_index)
+    monkeypatch.setattr(runtime_module, "_build_index_from_snapshot", fake_build_index)
     first, second = await scenario()
 
     assert first is second
@@ -268,21 +280,34 @@ def test_normalize_language_rejects_empty_values() -> None:
 class MockStore:
     """Mock Home Assistant Store helper for runtime tests."""
 
-    stored_data: dict[str, Any] | None = None
+    stored_data: ClassVar[dict[str, dict[str, Any]]] = {}
+    removed_keys: ClassVar[list[str]] = []
 
-    def __init__(self, hass: Any, version: int, key: str) -> None:
+    def __init__(self, hass: Any, version: int, key: str, **kwargs: Any) -> None:
         """Initialize mock store with key and version."""
         self.hass = hass
         self.version = version
         self.key = key
+        self.kwargs = kwargs
 
     async def async_load(self) -> dict[str, Any] | None:
         """Simulate loading data."""
-        return MockStore.stored_data
+        return MockStore.stored_data.get(self.key)
 
     async def async_save(self, data: dict[str, Any]) -> None:
         """Simulate saving data."""
-        MockStore.stored_data = data
+        MockStore.stored_data[self.key] = data
+
+    async def async_remove(self) -> None:
+        """Simulate removing persisted data."""
+        MockStore.stored_data.pop(self.key, None)
+        MockStore.removed_keys.append(self.key)
+
+    @classmethod
+    def reset(cls) -> None:
+        """Reset all mock stores between tests."""
+        cls.stored_data = {}
+        cls.removed_keys = []
 
 
 class HashableFakeHass:
@@ -331,13 +356,15 @@ async def test_persistent_store_save_and_load(monkeypatch: Any) -> None:
     ]
     index = build_index("vi", candidates)
 
-    MockStore.stored_data = None
+    MockStore.reset()
     try:
-        await runtime.async_save_index_to_store(hass, index)
+        snapshot = runtime._create_build_snapshot("vi")
+        await runtime.async_save_index_to_store(hass, index, snapshot.fingerprint)
 
-        assert MockStore.stored_data is not None
-        assert "candidates" in MockStore.stored_data
-        stored_candidates = MockStore.stored_data["candidates"]
+        stored_index = MockStore.stored_data["assist_canonicalizer.index_vi"]
+        assert stored_index["fingerprint"] == snapshot.fingerprint
+        assert stored_index["candidate_count"] == 1
+        stored_candidates = stored_index["candidates"]
         assert len(stored_candidates) == 1
         assert stored_candidates[0]["text"] == "bật đèn"
         assert stored_candidates[0]["intent_name"] == "HassTurnOn"
@@ -349,8 +376,8 @@ async def test_persistent_store_save_and_load(monkeypatch: Any) -> None:
         assert loaded_index is not None
         assert loaded_index.language == "vi"
         assert loaded_index.candidate_count == 1
-        assert len(hass.executor_jobs) == 1
-        executor_target, executor_args = hass.executor_jobs[0]
+        assert len(hass.executor_jobs) == 2
+        executor_target, executor_args = hass.executor_jobs[1]
         assert executor_target is build_index
         assert executor_args[0] == "vi"
         assert len(executor_args[1]) == 1
@@ -361,7 +388,107 @@ async def test_persistent_store_save_and_load(monkeypatch: Any) -> None:
         assert loaded_cand.metadata["sentence_template"] == "bật {name}"
         assert clean_runtime.get_index("vi") is loaded_index
     finally:
-        MockStore.stored_data = None
+        MockStore.reset()
+
+
+async def test_persistent_store_rejects_stale_fingerprint(monkeypatch: Any) -> None:
+    """Reject and remove a persisted index after registry inputs change."""
+    monkeypatch.setattr(homeassistant.helpers.storage, "Store", MockStore)
+    MockStore.reset()
+    hass = HashableFakeHass()
+    runtime = CanonicalizerRuntime()
+    runtime.update_registry_slot_values({"name": ("old lamp",)})
+    snapshot = runtime._create_build_snapshot("en")
+    index = build_index("en", [Candidate(text="turn on old lamp", intent_name="HassTurnOn")])
+    await runtime.async_save_index_to_store(hass, index, snapshot.fingerprint)
+
+    clean_runtime = CanonicalizerRuntime()
+    clean_runtime.update_registry_slot_values({"name": ("new lamp",)})
+    loaded = await clean_runtime.async_load_index_from_store(hass, "en")
+
+    assert loaded is None
+    assert "assist_canonicalizer.index_en" not in MockStore.stored_data
+    assert MockStore.stored_data["assist_canonicalizer.index_manifest"]["languages"] == []
+
+
+async def test_persistent_store_rejects_malformed_candidate(monkeypatch: Any) -> None:
+    """Reject the entire cache instead of silently loading a partial index."""
+    monkeypatch.setattr(homeassistant.helpers.storage, "Store", MockStore)
+    MockStore.reset()
+    hass = HashableFakeHass()
+    runtime = CanonicalizerRuntime()
+    snapshot = runtime._create_build_snapshot("en")
+    index = build_index("en", [Candidate(text="turn on light", intent_name="HassTurnOn")])
+    await runtime.async_save_index_to_store(hass, index, snapshot.fingerprint)
+    MockStore.stored_data["assist_canonicalizer.index_en"]["candidates"][0].pop("normalized_text")
+
+    loaded = await CanonicalizerRuntime().async_load_index_from_store(hass, "en")
+
+    assert loaded is None
+    assert "assist_canonicalizer.index_en" not in MockStore.stored_data
+
+
+async def test_async_clear_index_removes_specific_and_all_stores(monkeypatch: Any) -> None:
+    """Remove persisted data for one language and rotate the epoch for clear-all."""
+    monkeypatch.setattr(homeassistant.helpers.storage, "Store", MockStore)
+    MockStore.reset()
+    hass = HashableFakeHass()
+    runtime = CanonicalizerRuntime()
+    for language in ("en", "vi"):
+        snapshot = runtime._create_build_snapshot(language)
+        index = build_index(
+            language,
+            [Candidate(text=f"sample {language}", intent_name="Sample", language=language)],
+        )
+        runtime.set_index(index)
+        await runtime.async_save_index_to_store(hass, index, snapshot.fingerprint)
+
+    await runtime.async_clear_index(hass, "en-US")
+    assert "en" not in runtime.indexes
+    assert "vi" in runtime.indexes
+    assert "assist_canonicalizer.index_en" not in MockStore.stored_data
+    manifest = MockStore.stored_data["assist_canonicalizer.index_manifest"]
+    old_epoch = manifest["cache_epoch"]
+    assert manifest["languages"] == ["vi"]
+
+    await runtime.async_clear_index(hass)
+    assert runtime.indexes == {}
+    assert "assist_canonicalizer.index_vi" not in MockStore.stored_data
+    manifest = MockStore.stored_data["assist_canonicalizer.index_manifest"]
+    assert manifest["languages"] == []
+    assert manifest["cache_epoch"] != old_epoch
+
+
+async def test_async_rebuild_retries_after_source_generation_changes(monkeypatch: Any) -> None:
+    """Do not publish or persist a build whose source snapshot became stale."""
+    monkeypatch.setattr(homeassistant.helpers.storage, "Store", MockStore)
+    MockStore.reset()
+    hass = HashableFakeHass(async_create_task=lambda coro: asyncio.create_task(coro))
+    runtime = CanonicalizerRuntime()
+    runtime.update_registry_slot_values({"name": ("old lamp",)})
+    build_calls = 0
+
+    def build_and_change_source(snapshot: Any) -> CanonicalIndex:
+        """Change registry inputs during the first index build."""
+        nonlocal build_calls
+        build_calls += 1
+        name = snapshot.registry_slot_values["name"][0]
+        if build_calls == 1:
+            runtime.update_registry_slot_values({"name": ("new lamp",)})
+        return build_index(
+            snapshot.language,
+            [Candidate(text=f"turn on {name}", intent_name="HassTurnOn")],
+        )
+
+    monkeypatch.setattr(runtime_module, "_build_index_from_snapshot", build_and_change_source)
+
+    index = await runtime.async_rebuild_index(hass, "en")
+
+    assert build_calls == 2
+    assert index.candidates[0].text == "turn on new lamp"
+    assert runtime.get_index("en") is index
+    stored = MockStore.stored_data["assist_canonicalizer.index_en"]
+    assert stored["candidates"][0]["text"] == "turn on new lamp"
 
 
 async def test_debounced_rebuild_coalesces_events(monkeypatch: Any) -> None:
