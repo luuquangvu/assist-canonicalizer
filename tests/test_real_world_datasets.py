@@ -391,7 +391,7 @@ def test_select_accepted_with_gate_diagnostics() -> None:
     # 1. Empty ranked list
     res, diag = _select_accepted_with_gate(())
     assert res is None
-    assert diag["reason"] == FallbackReason.EMPTY_INDEX
+    assert diag["reason"] == FallbackReason.EMPTY_INDEX.value
 
     # 2. Accepted candidate
     cand_1 = Candidate(text="turn on light", intent_name="HassTurnOn")
@@ -422,7 +422,7 @@ def test_select_accepted_with_gate_diagnostics() -> None:
     )
     res, diag = _select_accepted_with_gate((rc_low,))
     assert res is None
-    assert diag["reason"] == FallbackReason.LOW_CONFIDENCE
+    assert diag["reason"] == FallbackReason.LOW_CONFIDENCE.value
 
     # 4. Low margin rejection
     cand_2 = Candidate(text="turn off light", intent_name="HassTurnOff")
@@ -438,4 +438,4 @@ def test_select_accepted_with_gate_diagnostics() -> None:
     )
     res, diag = _select_accepted_with_gate((rc_1, rc_2))
     assert res is None
-    assert diag["reason"] == FallbackReason.LOW_MARGIN
+    assert diag["reason"] == FallbackReason.LOW_MARGIN.value

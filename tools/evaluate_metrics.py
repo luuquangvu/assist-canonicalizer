@@ -519,11 +519,11 @@ def _select_accepted_with_gate(
     if result is not None:
         reason = "accepted"
     elif not ranked:
-        reason = FallbackReason.EMPTY_INDEX
+        reason = FallbackReason.EMPTY_INDEX.value
     elif ranked[0].scores.final_score < DEFAULT_MIN_CONFIDENCE:
-        reason = FallbackReason.LOW_CONFIDENCE
+        reason = FallbackReason.LOW_CONFIDENCE.value
     else:
-        reason = FallbackReason.LOW_MARGIN
+        reason = FallbackReason.LOW_MARGIN.value
 
     top_score = ranked[0].scores.final_score if ranked else None
     competing_candidate = (
