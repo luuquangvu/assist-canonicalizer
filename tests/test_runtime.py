@@ -46,7 +46,7 @@ class FakeHass:
 
 
 async def test_async_rebuild_index_coalesces_concurrent_language_jobs(monkeypatch: Any) -> None:
-    """Run one rebuild job per language while concurrent callers await the same task."""
+    """Coalesce equivalent language variants into one rebuild job."""
     monkeypatch.setattr(homeassistant.helpers.storage, "Store", MockStore)
     MockStore.stored_data = None
 
@@ -67,7 +67,7 @@ async def test_async_rebuild_index_coalesces_concurrent_language_jobs(monkeypatc
         hass = FakeHass()
         first_task = asyncio.create_task(runtime.async_rebuild_index(hass, "en"))
         await hass.job_started.wait()
-        second_task = asyncio.create_task(runtime.async_rebuild_index(hass, "en"))
+        second_task = asyncio.create_task(runtime.async_rebuild_index(hass, "en-US"))
         await asyncio.sleep(0)
         hass.release_job.set()
         return await asyncio.gather(first_task, second_task)
@@ -184,7 +184,17 @@ def test_runtime_normalizes_language_cache_keys() -> None:
 
     assert runtime.get_index("vi") is not None
     assert runtime.get_index("VI") is runtime.get_index("vi")
+    assert runtime.get_index("vi-VN") is runtime.get_index("vi")
     assert sorted(runtime.indexes) == ["vi"]
+
+
+def test_normalize_language_preserves_supported_regional_variants() -> None:
+    """Keep regional variants that have distinct Home Assistant language packs."""
+    assert normalize_language("vi-VN") == "vi"
+    assert normalize_language("en_US") == "en"
+    assert normalize_language("pt-br") == "pt-BR"
+    assert normalize_language("de-ch") == "de-CH"
+    assert normalize_language("zh-tw") == "zh-TW"
 
 
 def test_normalize_language_rejects_empty_values() -> None:

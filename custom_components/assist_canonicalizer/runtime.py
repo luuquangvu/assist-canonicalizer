@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any, cast
 
-from .builtin_intents import load_language_intent_sources
+from .builtin_intents import language_variant_for, load_language_intent_sources
 from .candidate import Candidate, CandidateSource
 from .const import DEFAULT_MAX_CANDIDATES, FallbackReason
 from .diagnostics import CanonicalizerDiagnostics
@@ -341,12 +342,16 @@ def _ranked_candidate_sort_key(ranked_candidate: RankedCandidate) -> tuple[float
     )
 
 
+@lru_cache(maxsize=128)
 def normalize_language(language: str) -> str:
-    """Return a canonical language cache key."""
-    normalized = str(language).strip().lower()
-    if not normalized:
+    """Return the Home Assistant language variant as a canonical cache key."""
+    requested = str(language).strip()
+    if not requested:
         raise ValueError("Language must not be empty")
-    return normalized
+    language_variant = language_variant_for(requested)
+    if language_variant is not None:
+        return language_variant
+    return requested.replace("_", "-").lower()
 
 
 def _updated_optional_text(current: str | None, value: str | None, *, clear: bool) -> str | None:
