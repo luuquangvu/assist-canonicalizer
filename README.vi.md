@@ -145,10 +145,10 @@ Công cụ xếp hạng được đo kiểm (benchmark) so với bộ nhận di�
 
 | Chế độ    | Đúng Intent/Slot | Nhận diện sai (Mismatch) | Dự phòng (Fallback) |
 | --------- | ---------------: | -----------------------: | ------------------: |
-| `hassil`  |            31.1% |                     8.3% |               60.6% |
+| `hassil`  |            31.0% |                     8.3% |               60.7% |
 | `lexical` |        **81.7%** |                 **8.3%** |           **10.0%** |
 
-> Độ chính xác nhận diện Intent/Slot tăng từ **31.1% lên 81.7%**. Tổng tỷ lệ lỗi (nhận diện sai + chuyển sang dự phòng) giảm mạnh từ **68.9% xuống còn 18.3%**.
+> Độ chính xác nhận diện Intent/Slot tăng từ **31.0% lên 81.7%**. Tổng tỷ lệ lỗi (nhận diện sai + chuyển sang dự phòng) giảm mạnh từ **69.0% xuống còn 18.3%**.
 
 <!-- BENCHMARK_OVERALL_END -->
 
@@ -166,8 +166,8 @@ Công cụ xếp hạng được đo kiểm (benchmark) so với bộ nhận di�
 | FR       | `lexical` |        **82.4%** |                 **2.4%** |           **15.3%** |
 | NL       | `hassil`  |            34.3% |                     4.8% |               61.0% |
 | NL       | `lexical` |        **73.3%** |                **15.2%** |           **11.4%** |
-| VI       | `hassil`  |            20.7% |                     3.7% |               75.6% |
-| VI       | `lexical` |        **78.0%** |                **13.4%** |            **8.5%** |
+| VI       | `hassil`  |            20.5% |                     3.6% |               75.9% |
+| VI       | `lexical` |        **78.3%** |                **13.3%** |            **8.4%** |
 
 <!-- BENCHMARK_LANGS_END -->
 

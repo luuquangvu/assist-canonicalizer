@@ -638,6 +638,17 @@
       }
     },
     {
+      "query": "đặt shopping_list_item vào danh sách việc cần làm",
+      "language": "vi",
+      "expected_intent": "HassListAddItem",
+      "expected_canonical": "đặt shopping_list_item vào danh sách việc cần làm",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "shopping_list_item": "shopping_list_item",
+        "name": "danh sách việc cần làm"
+      }
+    },
+    {
       "query": "máy hút bụi về sạc",
       "language": "vi",
       "expected_intent": "HassVacuumReturnToBase",
