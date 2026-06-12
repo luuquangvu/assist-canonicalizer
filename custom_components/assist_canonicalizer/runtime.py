@@ -202,15 +202,18 @@ class CanonicalizerRuntime:
                     persisted_languages,
                 )
                 return None
+            candidates = _deserialize_candidates(data)
+            if candidates is None or len(candidates) != data["candidate_count"]:
+                await store.async_remove()
+                persisted_languages.discard(language)
+                await self._async_save_store_manifest(
+                    hass,
+                    cache_epoch,
+                    persisted_languages,
+                )
+                return None
 
-        candidates = _deserialize_candidates(data)
-        if candidates is None:
-            await self._async_remove_persisted_language(hass, language)
-            return None
         index = await hass.async_add_executor_job(build_index, language, candidates)
-        if index.candidate_count != data["candidate_count"]:
-            await self._async_remove_persisted_language(hass, language)
-            return None
         if self.index_generation != generation or self.source_generation != source_generation:
             return None
         self.language_intent_sources[language] = snapshot.intent_sources

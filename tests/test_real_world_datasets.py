@@ -374,3 +374,68 @@ def _recognizes_expected(context: DatasetContext, case: Mapping[str, Any]) -> bo
         )
         for result in results
     )
+
+
+def test_select_accepted_with_gate_diagnostics() -> None:
+    """Verify that _select_accepted_with_gate exposes structured reasons."""
+    from custom_components.assist_canonicalizer.candidate import Candidate
+    from custom_components.assist_canonicalizer.const import FallbackReason
+    from custom_components.assist_canonicalizer.ranking import (
+        RankedCandidate,
+        ScoreBreakdown,
+    )
+    from tools.evaluate_metrics import (
+        _select_accepted_with_gate,
+    )
+
+    # 1. Empty ranked list
+    res, diag = _select_accepted_with_gate(())
+    assert res is None
+    assert diag["reason"] == FallbackReason.EMPTY_INDEX
+
+    # 2. Accepted candidate
+    cand_1 = Candidate(text="turn on light", intent_name="HassTurnOn")
+    rc_1 = RankedCandidate(
+        candidate=cand_1,
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.9,
+            char_ngram_score=0.9,
+            bm25_score=0.9,
+            intent_score=1.0,
+            final_score=0.9,
+        ),
+    )
+    res, diag = _select_accepted_with_gate((rc_1,))
+    assert res is rc_1
+    assert diag["reason"] == "accepted"
+
+    # 3. Low confidence rejection
+    rc_low = RankedCandidate(
+        candidate=cand_1,
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.1,
+            char_ngram_score=0.1,
+            bm25_score=0.1,
+            intent_score=0.1,
+            final_score=0.1,
+        ),
+    )
+    res, diag = _select_accepted_with_gate((rc_low,))
+    assert res is None
+    assert diag["reason"] == FallbackReason.LOW_CONFIDENCE
+
+    # 4. Low margin rejection
+    cand_2 = Candidate(text="turn off light", intent_name="HassTurnOff")
+    rc_2 = RankedCandidate(
+        candidate=cand_2,
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.89,
+            char_ngram_score=0.89,
+            bm25_score=0.89,
+            intent_score=1.0,
+            final_score=0.89,
+        ),
+    )
+    res, diag = _select_accepted_with_gate((rc_1, rc_2))
+    assert res is None
+    assert diag["reason"] == FallbackReason.LOW_MARGIN

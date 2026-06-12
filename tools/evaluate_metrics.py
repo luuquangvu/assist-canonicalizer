@@ -516,6 +516,15 @@ def _select_accepted_with_gate(
     with diagnostic metadata so there is no duplicated gate logic.
     """
     result = _accepted_candidate(ranked)
+    if result is not None:
+        reason = "accepted"
+    elif not ranked:
+        reason = FallbackReason.EMPTY_INDEX
+    elif ranked[0].scores.final_score < DEFAULT_MIN_CONFIDENCE:
+        reason = FallbackReason.LOW_CONFIDENCE
+    else:
+        reason = FallbackReason.LOW_MARGIN
+
     top_score = ranked[0].scores.final_score if ranked else None
     competing_candidate = (
         next(
@@ -539,7 +548,7 @@ def _select_accepted_with_gate(
     )
     return result, {
         "accepted": result is not None,
-        "reason": "accepted" if result is not None else "rejected",
+        "reason": reason,
         "top_score": top_score,
         "competing_score": competing_score,
         "margin": margin,
