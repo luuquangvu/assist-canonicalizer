@@ -51,7 +51,7 @@ if _HAS_STORAGE and storage is not None:
         pass
 
 
-_INDEX_STORE_VERSION = 2
+_INDEX_STORE_VERSION = 1
 _INDEX_BUILD_VERSION = 1
 _INDEX_STORE_PREFIX = f"{DOMAIN}.index_"
 _INDEX_MANIFEST_KEY = f"{DOMAIN}.index_manifest"
