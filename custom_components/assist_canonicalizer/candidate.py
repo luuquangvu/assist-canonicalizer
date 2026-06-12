@@ -36,6 +36,8 @@ class Candidate:
     metadata: Mapping[str, str] = field(default_factory=dict)
     normalized_text: str = ""
     normalized_text_no_diacritics: str = ""
+    normalized_tokens: tuple[str, ...] = field(default_factory=tuple)
+    normalized_tokens_set: frozenset[str] = field(default_factory=frozenset)
 
     def __post_init__(self) -> None:
         """Validate and normalize candidate data."""
@@ -51,6 +53,10 @@ class Candidate:
                 "normalized_text_no_diacritics",
                 normalize_text_no_diacritics(self.text, self.language),
             )
+        if not self.normalized_tokens:
+            object.__setattr__(self, "normalized_tokens", tuple(self.normalized_text.split()))
+        if not self.normalized_tokens_set:
+            object.__setattr__(self, "normalized_tokens_set", frozenset(self.normalized_tokens))
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
 
     @property

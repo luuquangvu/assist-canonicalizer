@@ -154,7 +154,7 @@ def intent_action_score(query: str, candidate: Candidate) -> float:
     return _intent_action_score_from_literal_text(
         literal_text,
         frozenset(normalize_text(query).split()),
-        frozenset(candidate.normalized_text.split()),
+        candidate.normalized_tokens_set,
     )
 
 
@@ -436,10 +436,10 @@ def rank_candidates(
                 intent_score_cache[literal_text] = _exact_intent_score(literal_text, query_tokens)
             exact = intent_score_cache[literal_text]
             if exact >= 1.0:
-                candidate_tokens = frozenset(candidate.normalized_text.split())
+                candidate_tokens = candidate.normalized_tokens_set
                 intent_score = _query_token_coverage(query_tokens, candidate_tokens)
             else:
-                candidate_entity = frozenset(candidate.normalized_text.split())
+                candidate_entity = candidate.normalized_tokens_set
                 intent_score = _positional_intent_score_from_lookup(
                     literal_text, query_tokens, positional_lookup, candidate_entity
                 )

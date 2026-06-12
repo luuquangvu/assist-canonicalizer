@@ -253,7 +253,7 @@ def _query_candidate_relevance_key(
     candidate_normalized = candidate.normalized_text
     if not candidate_normalized:
         return (0, 0, 0.0, 0)
-    candidate_tokens = set(candidate_normalized.split())
+    candidate_tokens = candidate.normalized_tokens_set
     union_size = len(query_tokens | candidate_tokens)
     overlap_score = (len(query_tokens & candidate_tokens) / union_size) if union_size else 0.0
     return (
