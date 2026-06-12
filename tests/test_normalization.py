@@ -24,6 +24,27 @@ def test_normalize_text_no_diacritics() -> None:
     # Empty
     assert normalize_text_no_diacritics("") == ""
 
+    # Assertions for all mappings in GENERIC_LATIN_REPLACEMENTS
+    assert normalize_text_no_diacritics("đ") == "d"
+    assert normalize_text_no_diacritics("ß") == "ss"
+    assert normalize_text_no_diacritics("æ") == "ae"
+    assert normalize_text_no_diacritics("œ") == "oe"
+    assert normalize_text_no_diacritics("ø") == "o"
+    assert normalize_text_no_diacritics("ł") == "l"
+    assert normalize_text_no_diacritics("ı") == "i"  # noqa: RUF001
+    assert normalize_text_no_diacritics("ð") == "d"
+    assert normalize_text_no_diacritics("þ") == "th"
+
+    # Assertions for all mappings in LANGUAGE_SPECIFIC_OVERRIDES (e.g. German "de")
+    assert normalize_text_no_diacritics("ä", "de") == "ae"
+    assert normalize_text_no_diacritics("ö", "de") == "oe"
+    assert normalize_text_no_diacritics("ü", "de") == "ue"
+
+    # Assertions that overrides are language-specific and fall back to standard diacritic stripping
+    assert normalize_text_no_diacritics("ä", "en") == "a"
+    assert normalize_text_no_diacritics("ö", "en") == "o"
+    assert normalize_text_no_diacritics("ü", "en") == "u"
+
 
 def test_normalize_text_applies_nfkc_casefold_punctuation_and_spaces() -> None:
     """Normalize text without language-specific rewriting."""

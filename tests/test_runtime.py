@@ -28,6 +28,7 @@ from custom_components.assist_canonicalizer.grammar_loader import (
 from custom_components.assist_canonicalizer.indexer import CanonicalIndex, build_index
 from custom_components.assist_canonicalizer.runtime import (
     CanonicalizerRuntime,
+    _canonical_fingerprint_value,
     normalize_language,
 )
 
@@ -588,10 +589,6 @@ async def test_debounced_rebuild_coalesces_events(monkeypatch: Any) -> None:
 
 def test_canonical_fingerprint_value_sorting() -> None:
     """Verify that _canonical_fingerprint_value is order-insensitive for mappings."""
-    from custom_components.assist_canonicalizer.runtime import (
-        _canonical_fingerprint_value,
-    )
-
     dict_a = {"a": 1, "b": 2}
     dict_b = {"b": 2, "a": 1}
 

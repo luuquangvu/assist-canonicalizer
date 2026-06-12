@@ -12,11 +12,24 @@ import hassil
 import orjson
 import pytest
 
+from custom_components.assist_canonicalizer.candidate import Candidate
+from custom_components.assist_canonicalizer.const import (
+    DEFAULT_MIN_CONFIDENCE,
+    DEFAULT_MIN_MARGIN,
+    FallbackReason,
+)
 from custom_components.assist_canonicalizer.grammar_loader import (
     build_candidates_from_intent_sources,
     build_query_registry_candidates,
 )
+from custom_components.assist_canonicalizer.ranking import (
+    RankedCandidate,
+    ScoreBreakdown,
+)
 from tools import evaluate_metrics
+from tools.evaluate_metrics import (
+    _select_accepted_with_gate,
+)
 
 evaluate_metrics._bootstrap_project_imports()
 
@@ -378,64 +391,69 @@ def _recognizes_expected(context: DatasetContext, case: Mapping[str, Any]) -> bo
 
 def test_select_accepted_with_gate_diagnostics() -> None:
     """Verify that _select_accepted_with_gate exposes structured reasons."""
-    from custom_components.assist_canonicalizer.candidate import Candidate
-    from custom_components.assist_canonicalizer.const import FallbackReason
-    from custom_components.assist_canonicalizer.ranking import (
-        RankedCandidate,
-        ScoreBreakdown,
-    )
-    from tools.evaluate_metrics import (
-        _select_accepted_with_gate,
-    )
-
     # 1. Empty ranked list
     res, diag = _select_accepted_with_gate(())
     assert res is None
     assert diag["reason"] == FallbackReason.EMPTY_INDEX.value
 
-    # 2. Accepted candidate
+    # 2. Accepted candidate (score above confidence threshold)
     cand_1 = Candidate(text="turn on light", intent_name="HassTurnOn")
+    accepted_score = DEFAULT_MIN_CONFIDENCE + 0.2
     rc_1 = RankedCandidate(
         candidate=cand_1,
         scores=ScoreBreakdown(
-            rapidfuzz_score=0.9,
-            char_ngram_score=0.9,
-            bm25_score=0.9,
+            rapidfuzz_score=accepted_score,
+            char_ngram_score=accepted_score,
+            bm25_score=accepted_score,
             intent_score=1.0,
-            final_score=0.9,
+            final_score=accepted_score,
         ),
     )
     res, diag = _select_accepted_with_gate((rc_1,))
     assert res is rc_1
     assert diag["reason"] == "accepted"
 
-    # 3. Low confidence rejection
+    # 3. Low confidence rejection (score below confidence threshold)
+    low_conf_score = DEFAULT_MIN_CONFIDENCE - 0.05
     rc_low = RankedCandidate(
         candidate=cand_1,
         scores=ScoreBreakdown(
-            rapidfuzz_score=0.1,
-            char_ngram_score=0.1,
-            bm25_score=0.1,
+            rapidfuzz_score=low_conf_score,
+            char_ngram_score=low_conf_score,
+            bm25_score=low_conf_score,
             intent_score=0.1,
-            final_score=0.1,
+            final_score=low_conf_score,
         ),
     )
     res, diag = _select_accepted_with_gate((rc_low,))
     assert res is None
     assert diag["reason"] == FallbackReason.LOW_CONFIDENCE.value
 
-    # 4. Low margin rejection
+    # 4. Low margin rejection (competing score within min margin of top score)
     cand_2 = Candidate(text="turn off light", intent_name="HassTurnOff")
-    rc_2 = RankedCandidate(
-        candidate=cand_2,
+    winner_score = DEFAULT_MIN_CONFIDENCE + 0.1
+    competitor_score = winner_score - (DEFAULT_MIN_MARGIN / 2)
+
+    rc_winner = RankedCandidate(
+        candidate=cand_1,
         scores=ScoreBreakdown(
-            rapidfuzz_score=0.89,
-            char_ngram_score=0.89,
-            bm25_score=0.89,
+            rapidfuzz_score=winner_score,
+            char_ngram_score=winner_score,
+            bm25_score=winner_score,
             intent_score=1.0,
-            final_score=0.89,
+            final_score=winner_score,
         ),
     )
-    res, diag = _select_accepted_with_gate((rc_1, rc_2))
+    rc_competitor = RankedCandidate(
+        candidate=cand_2,
+        scores=ScoreBreakdown(
+            rapidfuzz_score=competitor_score,
+            char_ngram_score=competitor_score,
+            bm25_score=competitor_score,
+            intent_score=1.0,
+            final_score=competitor_score,
+        ),
+    )
+    res, diag = _select_accepted_with_gate((rc_winner, rc_competitor))
     assert res is None
     assert diag["reason"] == FallbackReason.LOW_MARGIN.value

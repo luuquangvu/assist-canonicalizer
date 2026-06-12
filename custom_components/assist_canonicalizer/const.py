@@ -59,6 +59,8 @@ class FallbackReason(StrEnum):
     UNEXPECTED_EXCEPTION = "unexpected_exception"
 
 
+# GENERIC_LATIN_REPLACEMENTS maps specific Latin-extended characters
+# to ASCII/simpler equivalents.
 GENERIC_LATIN_REPLACEMENTS = {
     "đ": "d",
     "ß": "ss",
@@ -71,6 +73,9 @@ GENERIC_LATIN_REPLACEMENTS = {
     "þ": "th",
 }
 
+# LANGUAGE_SPECIFIC_OVERRIDES maps ISO language codes (e.g., "de") to
+# character replacement mappings. These overrides take priority over
+# global/default mappings when canonicalizing text for the given language.
 LANGUAGE_SPECIFIC_OVERRIDES = {
     "de": {
         "ä": "ae",
