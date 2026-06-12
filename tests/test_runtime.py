@@ -583,3 +583,24 @@ async def test_debounced_rebuild_coalesces_events(monkeypatch: Any) -> None:
     await asyncio.sleep(0.01)
 
     assert rebuild_calls == 1
+
+
+def test_canonical_fingerprint_value_sorting() -> None:
+    """Verify that _canonical_fingerprint_value is order-insensitive for mappings."""
+    from custom_components.assist_canonicalizer.runtime import (
+        _canonical_fingerprint_value,
+    )
+
+    dict_a = {"a": 1, "b": 2}
+    dict_b = {"b": 2, "a": 1}
+
+    fp_a = _canonical_fingerprint_value(dict_a)
+    fp_b = _canonical_fingerprint_value(dict_b)
+
+    assert fp_a == fp_b
+
+    # Test nested mappings
+    nested_a = {"x": {"a": 1, "b": 2}, "y": 3}
+    nested_b = {"y": 3, "x": {"b": 2, "a": 1}}
+
+    assert _canonical_fingerprint_value(nested_a) == _canonical_fingerprint_value(nested_b)

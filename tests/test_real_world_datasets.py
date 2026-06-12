@@ -242,6 +242,7 @@ def test_real_world_expected_intents_align_with_hassil(
                     "hassil_intent": top_result.intent.name,
                 }
             )
+    assert not failures, f"{dataset_context.language}: expected_intent mismatch HassIL: {failures}"
 
 
 def _slot_value_matches(expected: Any, hassil_value: Any, query: str) -> bool:

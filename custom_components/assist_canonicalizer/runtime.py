@@ -593,15 +593,15 @@ def _canonical_fingerprint_value(value: Any) -> Any:
     if isinstance(value, Enum):
         return _canonical_fingerprint_value(value.value)
     if isinstance(value, Mapping):
-        return {
-            "mapping": [
-                [
-                    _canonical_fingerprint_value(key),
-                    _canonical_fingerprint_value(item),
-                ]
-                for key, item in value.items()
-            ]
-        }
+        canonical_items = [
+            (
+                _canonical_fingerprint_value(key),
+                _canonical_fingerprint_value(item),
+            )
+            for key, item in value.items()
+        ]
+        canonical_items.sort(key=lambda pair: orjson.dumps(pair[0]))
+        return {"mapping": [[key, item] for key, item in canonical_items]}
     if isinstance(value, Sequence):
         return {"sequence": [_canonical_fingerprint_value(item) for item in value]}
     if isinstance(value, Set):

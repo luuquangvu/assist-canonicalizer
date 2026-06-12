@@ -19,7 +19,16 @@ def normalize_text(text: str) -> str:
 
 
 def normalize_text_no_diacritics(text: str, language: str | None = None) -> str:
-    """Normalize text and strip diacritics/accents for multi-language compatibility."""
+    """Normalize text and strip diacritics/accents for multi-language compatibility.
+
+    The normalization pipeline executes in the following strict order:
+    1. Base Unicode NFKC normalization, lowercasing (casefold), punctuation
+       removal, and whitespace collapse (via `normalize_text`).
+    2. Language-specific overrides (from `LANGUAGE_SPECIFIC_OVERRIDES` in const.py).
+    3. Generic Latin replacements (from `GENERIC_LATIN_REPLACEMENTS` in const.py).
+    4. Accent/diacritic stripping (via Unicode NFD decomposition followed by
+       removing combining diacritics/accents).
+    """
     normalized = normalize_text(text)
     if not normalized:
         return ""
