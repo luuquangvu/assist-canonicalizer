@@ -233,7 +233,10 @@ def test_real_world_expected_intents_align_with_hassil(
                 canonical,
             )
             dynamic_cache[cache_key] = {(c.intent_name, c.text) for c in candidates}
-        if (top_result.intent.name, canonical) in dynamic_cache[cache_key]:
+        if (top_result.intent.name, canonical) in dynamic_cache[cache_key] or (
+            top_result.intent.name,
+            canonical,
+        ) in dataset_context.static_candidate_pairs:
             failures.append(
                 {
                     "query": case["query"],
@@ -297,29 +300,38 @@ def test_real_world_expected_slots_align_with_hassil(
         results = evaluate_metrics.run_hassil_recognize_all(
             case["query"], dataset_context.intents, dataset_context.slot_lists
         )
-        hassil_entities_by_intent: dict[str, dict[str, Any]] = {}
+        hassil_parses_by_intent: dict[str, list[dict[str, Any]]] = {}
         for r in results:
-            hassil_entities_by_intent.setdefault(r.intent.name, {}).update(
+            hassil_parses_by_intent.setdefault(r.intent.name, []).append(
                 {name: ent.value for name, ent in r.entities.items()}
             )
-        hassil_entities = hassil_entities_by_intent.get(case["expected_intent"])
-        if hassil_entities is None:
+        parses = hassil_parses_by_intent.get(case["expected_intent"])
+        if not parses:
             continue
         query = case["query"]
-        mismatched: list[str] = []
-        for key, expected_value in expected_slots.items():
-            hassil_value = hassil_entities.get(key)
-            if hassil_value is None:
-                continue
-            if not _slot_value_matches(expected_value, hassil_value, query):
-                mismatched.append(f"{key}: expected={expected_value!r}, hassil={hassil_value!r}")
-        if mismatched:
+        any_aligns = False
+        all_mismatches: list[str] = []
+        for entities in parses:
+            mismatched = []
+            for key, expected_value in expected_slots.items():
+                hassil_value = entities.get(key)
+                if hassil_value is None:
+                    continue
+                if not _slot_value_matches(expected_value, hassil_value, query):
+                    mismatched.append(
+                        f"{key}: expected={expected_value!r}, hassil={hassil_value!r}"
+                    )
+            if not mismatched:
+                any_aligns = True
+                break
+            all_mismatches.append(", ".join(mismatched))
+        if not any_aligns:
             failures.append(
                 {
                     "query": case["query"],
                     "category": case["category"],
                     "expected_intent": case["expected_intent"],
-                    "mismatches": ", ".join(mismatched),
+                    "mismatches": " | ".join(all_mismatches),
                 }
             )
     assert not failures, f"{dataset_context.language}: expected_slots mismatch HassIL: {failures}"

@@ -200,11 +200,12 @@ def test_runtime_precomputes_and_shares_registry_slot_records(monkeypatch: Any) 
         return original_normalize_text(text)
 
     monkeypatch.setattr(grammar_loader, "normalize_text", track_normalization)
-    values = ("Kitchen Light", "Desk Lamp")
+    values_1 = ("Kitchen Light", "Desk Lamp")
+    values_2 = ("Kitchen Light", "Desk Lamp")
     runtime = CanonicalizerRuntime()
-    runtime.update_registry_slot_values({"name": values, "entity": values})
+    runtime.update_registry_slot_values({"name": values_1, "entity": values_2})
 
-    assert normalized_values == list(values)
+    assert normalized_values == list(values_1)
     assert runtime.registry_slot_index["name"] is runtime.registry_slot_index["entity"]
     assert runtime.registry_slot_index["name"][0].normalized_text == "kitchen light"
     assert runtime.registry_slot_index["name"][0].tokens == ("kitchen", "light")

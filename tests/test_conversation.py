@@ -131,7 +131,7 @@ async def test_conversation_entity_properties_and_reload() -> None:
         "async_clear_index",
         AsyncMock(side_effect=lambda hass, language=None: runtime.clear_index(language)),
     ) as mock_clear:
-        await entity.async_reload("en")
+        await entity.async_reload("en-US")
         mock_clear.assert_awaited_once_with(entity.hass, "en")
     assert "en" not in runtime.indexes
 

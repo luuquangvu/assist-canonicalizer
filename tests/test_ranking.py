@@ -361,3 +361,4 @@ def test_rank_candidates_no_diacritics_collision_falls_back_to_fuzzy() -> None:
     # Should not early return because of different intents.
     # It will go through BM25 / char ngrams / rapidfuzz, and result in both candidates being ranked
     assert len(ranked) == 2
+    assert all(r.scores.final_score < 1.0 for r in ranked)
