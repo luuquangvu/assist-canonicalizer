@@ -4,8 +4,10 @@ import pytest
 
 from custom_components.assist_canonicalizer.normalization import (
     char_ngrams,
+    char_ngrams_normalized,
     normalize_text,
     normalize_text_no_diacritics,
+    tokenize_normalized,
     tokenize_text,
 )
 
@@ -71,3 +73,28 @@ def test_char_ngrams_validation_and_empty() -> None:
     with pytest.raises(ValueError, match="N-gram size must be positive"):
         char_ngrams("abc", size=0)
     assert char_ngrams("   ") == frozenset()
+
+
+def test_tokenize_normalized() -> None:
+    """Test tokenize_normalized helper."""
+    assert tokenize_normalized("bật đèn") == ("bật", "đèn")
+    assert tokenize_normalized("") == ()
+
+
+def test_char_ngrams_edge_cases() -> None:
+    """Test edge cases for char_ngrams and char_ngrams_normalized."""
+    # short text
+    assert char_ngrams("ab", size=3) == frozenset({"ab"})
+
+    # char_ngrams_normalized positive size validation
+    with pytest.raises(ValueError, match="N-gram size must be positive"):
+        char_ngrams_normalized("abc", size=0)
+
+    # char_ngrams_normalized empty text
+    assert char_ngrams_normalized("") == frozenset()
+
+    # char_ngrams_normalized short text
+    assert char_ngrams_normalized("ab", size=3) == frozenset({"ab"})
+
+    # char_ngrams_normalized normal text
+    assert char_ngrams_normalized("abcdef", size=3) == frozenset({"abc", "bcd", "cde", "def"})

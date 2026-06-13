@@ -7,6 +7,7 @@ import sys
 from collections.abc import Mapping
 from types import ModuleType
 from typing import Any, ClassVar
+from unittest.mock import patch
 
 import homeassistant.helpers.event
 import homeassistant.helpers.storage
@@ -699,3 +700,79 @@ async def test_rank_with_dynamic_candidates_preserves_multiple_exact_matches() -
     expected_intents = {"HassShoppingListAddItem", "HassListAddItem"}
     assert {r.candidate.intent_name for r in ranked} == expected_intents
     assert all(r.scores.final_score == 1.0 for r in ranked)
+
+
+def test_rebuild_index_synchronous() -> None:
+    """Verify that rebuild_index builds the index synchronously."""
+    runtime = CanonicalizerRuntime()
+    intent_sources = {
+        "built_in": {
+            "intents": {
+                "HassTurnOn": {
+                    "data": [
+                        {
+                            "sentences": ["bật {name}"],
+                        }
+                    ]
+                }
+            }
+        }
+    }
+    runtime.update_intent_sources(intent_sources)
+    runtime.update_registry_slot_values({"name": ("đèn",)})
+
+    with patch(
+        "custom_components.assist_canonicalizer.runtime.load_language_intent_sources",
+        return_value={},
+    ):
+        index = runtime.rebuild_index("vi")
+
+    assert index.language == "vi"
+    assert index.candidate_count > 0
+    assert index.candidates[0].text == "bật đèn"
+    assert runtime.get_index("vi") is index
+
+
+async def test_async_rebuild_index_real_flow(monkeypatch: Any) -> None:
+    """Verify async_rebuild_index runs the real build snapshot and build index functions."""
+    monkeypatch.setattr(homeassistant.helpers.storage, "Store", MockStore)
+    MockStore.reset()
+    runtime = CanonicalizerRuntime()
+    intent_sources = {
+        "built_in": {
+            "intents": {
+                "HassTurnOn": {
+                    "data": [
+                        {
+                            "sentences": ["bật {name}"],
+                        }
+                    ]
+                }
+            }
+        }
+    }
+    runtime.update_intent_sources(intent_sources)
+    runtime.update_registry_slot_values({"name": ("đèn",)})
+
+    class DummyHass:
+        """Dummy Home Assistant instance for async executor testing."""
+
+        async def async_add_executor_job(self, func: Any, *args: Any) -> Any:
+            """Execute a function synchronously."""
+            return func(*args)
+
+        def async_create_task(self, coro: Any) -> Any:
+            """Create and run an asyncio task."""
+            return asyncio.create_task(coro)
+
+    hass = DummyHass()
+    with patch(
+        "custom_components.assist_canonicalizer.runtime.load_language_intent_sources",
+        return_value={},
+    ):
+        index = await runtime.async_rebuild_index(hass, "vi")
+
+    assert index.language == "vi"
+    assert index.candidate_count > 0
+    assert index.candidates[0].text == "bật đèn"
+    assert runtime.get_index("vi") is index

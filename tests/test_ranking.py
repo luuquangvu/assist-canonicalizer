@@ -7,10 +7,16 @@ from custom_components.assist_canonicalizer.candidate import Candidate, Candidat
 from custom_components.assist_canonicalizer.const import DEFAULT_RAPIDFUZZ_PREFILTER_CANDIDATES
 from custom_components.assist_canonicalizer.indexer import build_index
 from custom_components.assist_canonicalizer.ranking import (
+    CharNGramIndex,
     _query_token_coverage,
     accepted_candidate,
+    char_ngram_similarity,
+    char_ngram_similarity_from_grams,
     intent_action_score,
+    rank_candidates,
+    rapidfuzz_similarity,
     rapidfuzz_similarity_normalized,
+    token_count_ratio,
 )
 
 
@@ -362,3 +368,50 @@ def test_rank_candidates_no_diacritics_collision_falls_back_to_fuzzy() -> None:
     # It will go through BM25 / char ngrams / rapidfuzz, and result in both candidates being ranked
     assert len(ranked) == 2
     assert all(r.scores.final_score < 1.0 for r in ranked)
+
+
+def test_ranking_helpers_and_validation_errors() -> None:
+    """Test ranking utility helpers and guard validations."""
+    # test rapidfuzz_similarity
+    assert rapidfuzz_similarity("bật đèn", "bật đèn") == 1.0
+
+    # test rapidfuzz_similarity_normalized with empty strings
+    assert rapidfuzz_similarity_normalized("", "bật đèn") == 0.0
+    assert rapidfuzz_similarity_normalized("bật đèn", "") == 0.0
+
+    # test token_count_ratio with empty strings
+    assert token_count_ratio("", "bật") == 0.0
+    assert token_count_ratio("bật", "") == 0.0
+
+    # test char_ngram_similarity
+    assert char_ngram_similarity("abc", "abc") == 1.0
+
+    # test char_ngram_similarity_from_grams with empty grams
+    assert char_ngram_similarity_from_grams(frozenset(), frozenset({"abc"})) == 0.0
+
+    # test CharNGramIndex with empty grams
+    char_index = CharNGramIndex.from_grams(())
+    assert char_index.score(frozenset({"abc"})) == ()
+
+    # test CharNGramIndex.score with empty query grams
+    char_index_2 = CharNGramIndex.from_grams((frozenset({"abc"}),))
+    assert char_index_2.score(frozenset()) == (0.0,)
+
+    # test rank_candidates guard validations
+    candidates = [Candidate(text="bật đèn", intent_name="HassTurnOn", language="vi")]
+    with pytest.raises(ValueError, match="max_candidates must be positive"):
+        rank_candidates("bật đèn", candidates, max_candidates=0)
+
+    with pytest.raises(
+        ValueError, match="rapidfuzz_prefilter_candidates must be at least max_candidates"
+    ):
+        rank_candidates("bật đèn", candidates, max_candidates=5, rapidfuzz_prefilter_candidates=2)
+
+    with pytest.raises(ValueError, match="candidate_char_grams length must match candidates"):
+        rank_candidates("bật đèn", candidates, candidate_char_grams=())
+
+    with pytest.raises(ValueError, match="candidate_char_index length must match candidates"):
+        rank_candidates("bật đèn", candidates, candidate_char_index=CharNGramIndex.from_grams(()))
+
+    # test rank_candidates empty candidates
+    assert rank_candidates("bật đèn", []) == ()

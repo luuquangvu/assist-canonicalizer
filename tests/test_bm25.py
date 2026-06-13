@@ -39,3 +39,10 @@ def test_bm25_scoring_zero_average_length() -> None:
     doc_empty = BM25Document(text="  ", tokens=())
     index = BM25Index([doc_empty])
     assert index.score("hello") == (0.0,)
+
+
+def test_bm25_from_texts() -> None:
+    """Verify building index from raw texts using from_texts classmethod."""
+    index = BM25Index.from_texts(["Hello World", "Testing BM25"])
+    assert index.size == 2
+    assert index.score("World") == (1.0, 0.0)
