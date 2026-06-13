@@ -45,17 +45,8 @@ class RegistrySlotIndex(dict[str, tuple[RegistrySlotValue, ...]]):
     """Precomputed registry values index with an inverted index helper."""
 
     def __init__(self, data: dict[str, tuple[RegistrySlotValue, ...]]):
-        """Initialize and precompute inverted indexes for all slots."""
+        """Initialize and create the inverted cache store."""
         super().__init__(data)
-        self.inverted: dict[str, dict[str, list[RegistrySlotValue]]] = {}
-        for key, records in self.items():
-            slot_inv = self.inverted.setdefault(key, {})
-            for record in records:
-                for token in record.tokens:
-                    slot_inv.setdefault(token, []).append(record)
-                for token in record.tokens_no_diacritics:
-                    if token not in record.tokens:
-                        slot_inv.setdefault(token, []).append(record)
         self._inverted_cache: dict[int, dict[str, list[RegistrySlotValue]]] = {}
 
     def get_inverted_for_records(

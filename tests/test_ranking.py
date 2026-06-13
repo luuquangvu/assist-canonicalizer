@@ -10,17 +10,15 @@ from custom_components.assist_canonicalizer.const import (
     DEFAULT_RAPIDFUZZ_PREFILTER_CANDIDATES,
 )
 from custom_components.assist_canonicalizer.indexer import build_index
-from custom_components.assist_canonicalizer.normalization import normalize_text
+from custom_components.assist_canonicalizer.normalization import char_ngrams, normalize_text
 from custom_components.assist_canonicalizer.ranking import (
     CharNGramIndex,
     RankedCandidate,
     ScoreBreakdown,
     _query_token_coverage,
     accepted_candidate,
-    char_ngram_similarity,
     char_ngram_similarity_from_grams,
     rank_candidates,
-    rapidfuzz_similarity,
     rapidfuzz_similarity_normalized,
     token_count_ratio,
 )
@@ -428,8 +426,10 @@ def test_rank_candidates_no_diacritics_collision_falls_back_to_fuzzy() -> None:
 
 def test_ranking_helpers_and_validation_errors() -> None:
     """Test ranking utility helpers and guard validations."""
-    # test rapidfuzz_similarity
-    assert rapidfuzz_similarity("bật đèn", "bật đèn") == 1.0
+    # test rapidfuzz_similarity_normalized
+    assert (
+        rapidfuzz_similarity_normalized(normalize_text("bật đèn"), normalize_text("bật đèn")) == 1.0
+    )
 
     # test rapidfuzz_similarity_normalized with empty strings
     assert rapidfuzz_similarity_normalized("", "bật đèn") == 0.0
@@ -439,8 +439,8 @@ def test_ranking_helpers_and_validation_errors() -> None:
     assert token_count_ratio("", "bật") == 0.0
     assert token_count_ratio("bật", "") == 0.0
 
-    # test char_ngram_similarity
-    assert char_ngram_similarity("abc", "abc") == 1.0
+    # test char_ngram_similarity_from_grams
+    assert char_ngram_similarity_from_grams(char_ngrams("abc"), char_ngrams("abc")) == 1.0
 
     # test char_ngram_similarity_from_grams with empty grams
     assert char_ngram_similarity_from_grams(frozenset(), frozenset({"abc"})) == 0.0

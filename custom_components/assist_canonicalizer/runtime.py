@@ -7,13 +7,12 @@ import hashlib
 from collections.abc import Callable, Mapping, Sequence, Set
 from dataclasses import dataclass, field
 from enum import Enum
-from functools import lru_cache
 from typing import Any, cast
 from uuid import uuid4
 
 import orjson
 
-from .builtin_intents import language_variant_for, load_language_intent_sources
+from .builtin_intents import load_language_intent_sources
 from .candidate import Candidate, CandidateSource
 from .const import DEFAULT_MAX_CANDIDATES, DOMAIN, FallbackReason
 from .diagnostics import CanonicalizerDiagnostics
@@ -28,6 +27,7 @@ from .grammar_loader import (
 from .indexer import CanonicalIndex, build_index
 from .normalization import char_ngrams_normalized
 from .ranking import CharNGramIndex, RankedCandidate, rank_candidates
+from .utils import normalize_language
 
 storage: Any = cast(Any, None)
 
@@ -100,15 +100,6 @@ class CanonicalizerRuntime:
             candidate_count=index.candidate_count,
             index_version=index.version,
         )
-
-    def rebuild_index(self, language: str) -> CanonicalIndex:
-        """Rebuild and store one language index from automatic candidate sources."""
-        language = normalize_language(language)
-        snapshot = self._create_build_snapshot(language)
-        index = _build_index_from_snapshot(snapshot)
-        self.language_intent_sources[language] = snapshot.intent_sources
-        self.set_index(index)
-        return index
 
     async def async_rebuild_index(self, hass: Any, language: str) -> CanonicalIndex:
         """Rebuild one language index once while concurrent callers await it."""
@@ -728,18 +719,6 @@ def _ranked_candidate_sort_key(ranked_candidate: RankedCandidate) -> tuple[float
         ranked_candidate.scores.final_score,
         -ranked_candidate.candidate.source_priority,
     )
-
-
-@lru_cache(maxsize=128)
-def normalize_language(language: str) -> str:
-    """Return the Home Assistant language variant as a canonical cache key."""
-    requested = str(language).strip()
-    if not requested:
-        raise ValueError("Language must not be empty")
-    language_variant = language_variant_for(requested)
-    if language_variant is not None:
-        return language_variant
-    return requested.replace("_", "-").lower()
 
 
 def _updated_optional_text(current: str | None, value: str | None, *, clear: bool) -> str | None:

@@ -29,7 +29,6 @@ from .const import (
     TIEBREAKER_INTENT_MARGIN,
 )
 from .normalization import (
-    char_ngrams,
     char_ngrams_normalized,
     normalize_text,
     normalize_text_no_diacritics,
@@ -92,11 +91,6 @@ class CharNGramIndex:
         return tuple(scores)
 
 
-def rapidfuzz_similarity(query: str, candidate: str) -> float:
-    """Return the strongest RapidFuzz similarity score normalized to 0.0 through 1.0."""
-    return rapidfuzz_similarity_normalized(normalize_text(query), normalize_text(candidate))
-
-
 def rapidfuzz_similarity_normalized(query: str, candidate: str) -> float:
     """Return a RapidFuzz score that penalizes unmatched extra tokens."""
     if not query or not candidate:
@@ -115,13 +109,6 @@ def token_count_ratio(query: str, candidate: str) -> float:
     if query_count == 0 or candidate_count == 0:
         return 0.0
     return min(query_count, candidate_count) / max(query_count, candidate_count)
-
-
-def char_ngram_similarity(query: str, candidate: str, size: int = 3) -> float:
-    """Return character n-gram Jaccard similarity normalized to 0.0 through 1.0."""
-    return char_ngram_similarity_from_grams(
-        char_ngrams(query, size=size), char_ngrams(candidate, size=size)
-    )
 
 
 def char_ngram_similarity_from_grams(
@@ -224,16 +211,27 @@ def _build_positional_lookup(
 ) -> dict[str, frozenset[str]]:
     """Precompute which query tokens each literal token positionally matches.
 
-    Building this lookup once per query avoids O(|literal|*|query|) per
-    candidate; per-candidate scoring then reduces to cheap dict lookups
-    and set subtractions.
+    Uses first-character bucketing to prune the O(|literal|x|query|) inner
+    loop — positional similarity requires at least the first character to
+    match, so tokens that differ at position 0 can never reach any
+    non-trivial positional similarity threshold.
     """
+    first_char_index: dict[str, set[str]] = {}
+    for qtok in query_tokens:
+        if qtok:
+            first_char_index.setdefault(qtok[0], set()).add(qtok)
+
     lookup: dict[str, frozenset[str]] = {}
     for literal_token in literal_tokens_set:
         if literal_token in query_tokens:
             continue
+        candidate_q_tokens = (
+            first_char_index.get(literal_token[0], set()) if literal_token else set()
+        )
+        if not candidate_q_tokens:
+            continue
         matched: list[str] = []
-        for qtok in query_tokens:
+        for qtok in candidate_q_tokens:
             sim = _positional_similarity(literal_token, qtok)
             if sim >= _per_pair_positional_threshold(literal_token, qtok):
                 matched.append(qtok)
@@ -419,23 +417,18 @@ def rank_candidates(
             )
             for index, candidate in enumerate(candidates)
         )
-    prefiltered = (
-        (
-            -(CHAR_NGRAM_WEIGHT * char_score + BM25_WEIGHT * bm25_score),
-            index,
-            candidate,
-            bm25_score,
-            char_score,
-        )
-        for index, (candidate, bm25_score, char_score) in enumerate(
-            zip(candidates, bm25_scores, char_scores, strict=True)
-        )
-    )
+
+    prefilter_keys = [
+        -(CHAR_NGRAM_WEIGHT * cs + BM25_WEIGHT * bs)
+        for cs, bs in zip(char_scores, bm25_scores, strict=True)
+    ]
     prefilter_limit = min(len(candidates), rapidfuzz_prefilter_candidates)
-    strongest_prefiltered = nsmallest(prefilter_limit, prefiltered)
+    top_indices = nsmallest(
+        prefilter_limit, range(len(prefilter_keys)), key=lambda i: prefilter_keys[i]
+    )
     prefiltered_literal_tokens = set()
-    for _, _, candidate, _, _ in strongest_prefiltered:
-        literal_text = candidate.metadata.get("literal_text")
+    for idx in top_indices:
+        literal_text = candidates[idx].metadata.get("literal_text")
         if literal_text:
             for variant in _literal_token_variants(literal_text):
                 prefiltered_literal_tokens.update(variant)
@@ -445,7 +438,10 @@ def rank_candidates(
         else {}
     )
     ranked: list[RankedCandidate] = []
-    for _, _, candidate, bm25_score, char_score in strongest_prefiltered:
+    for idx in top_indices:
+        candidate = candidates[idx]
+        bm25_score = bm25_scores[idx]
+        char_score = char_scores[idx]
         rapidfuzz_score = rapidfuzz_similarity_normalized(
             query_normalized, candidate.normalized_text
         )

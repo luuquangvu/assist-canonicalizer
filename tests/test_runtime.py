@@ -29,9 +29,10 @@ from custom_components.assist_canonicalizer.grammar_loader import (
 from custom_components.assist_canonicalizer.indexer import CanonicalIndex, build_index
 from custom_components.assist_canonicalizer.runtime import (
     CanonicalizerRuntime,
+    _build_index_from_snapshot,
     _canonical_fingerprint_value,
-    normalize_language,
 )
+from custom_components.assist_canonicalizer.utils import normalize_language
 
 
 class FakeHass:
@@ -703,7 +704,7 @@ async def test_rank_with_dynamic_candidates_preserves_multiple_exact_matches() -
 
 
 def test_rebuild_index_synchronous() -> None:
-    """Verify that rebuild_index builds the index synchronously."""
+    """Verify that index building from snapshot constructs correct candidates."""
     runtime = CanonicalizerRuntime()
     intent_sources = {
         "built_in": {
@@ -725,12 +726,13 @@ def test_rebuild_index_synchronous() -> None:
         "custom_components.assist_canonicalizer.runtime.load_language_intent_sources",
         return_value={},
     ):
-        index = runtime.rebuild_index("vi")
+        snapshot = runtime._create_build_snapshot("vi")
+
+        index = _build_index_from_snapshot(snapshot)
 
     assert index.language == "vi"
     assert index.candidate_count > 0
     assert index.candidates[0].text == "bật đèn"
-    assert runtime.get_index("vi") is index
 
 
 async def test_async_rebuild_index_real_flow(monkeypatch: Any) -> None:

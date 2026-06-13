@@ -34,11 +34,6 @@ class BM25Index:
         self._one_minus_b = 1.0 - b
         self._term_frequencies = tuple(Counter(document.tokens) for document in self._documents)
         self._document_lengths = tuple(len(document.tokens) for document in self._documents)
-        document_frequencies = self._build_document_frequencies()
-        self._inverse_document_frequencies = self._build_inverse_document_frequencies(
-            document_frequencies
-        )
-        self._postings = self._build_postings()
         token_count = sum(self._document_lengths)
         self._average_length = token_count / len(self._documents) if self._documents else 0.0
         self._b_over_avg_len = self._b / self._average_length if self._average_length > 0 else 0.0
@@ -46,10 +41,15 @@ class BM25Index:
             self._k1 * (self._one_minus_b + self._b_over_avg_len * length)
             for length in self._document_lengths
         )
+        document_frequencies = self._build_document_frequencies()
+        self._inverse_document_frequencies = self._build_inverse_document_frequencies(
+            document_frequencies
+        )
         self._idf_k1_plus_1 = {
             token: idf * self._k1_plus_1
             for token, idf in self._inverse_document_frequencies.items()
         }
+        self._postings = self._build_postings()
 
     @classmethod
     def from_texts(cls, texts: Sequence[str], k1: float = 1.5, b: float = 0.75) -> BM25Index:
@@ -103,16 +103,23 @@ class BM25Index:
             for token, document_frequency in document_frequencies.items()
         }
 
-    def _build_postings(self) -> dict[str, tuple[tuple[int, int], ...]]:
-        """Build posting lists of document indexes and term frequencies by token."""
-        postings: dict[str, list[tuple[int, int]]] = {}
+    def _build_postings(self) -> dict[str, tuple[tuple[int, float], ...]]:
+        """Build posting lists with precomputed per-document score contributions."""
+        postings: dict[str, list[tuple[int, float]]] = {}
         for document_index, term_frequencies in enumerate(self._term_frequencies):
+            len_factor = self._document_len_factors[document_index]
+            idf_k1p1 = self._idf_k1_plus_1
             for token, frequency in term_frequencies.items():
-                postings.setdefault(token, []).append((document_index, frequency))
+                idf_mult = idf_k1p1.get(token)
+                if idf_mult is None:
+                    continue
+                denominator = frequency + len_factor
+                precomputed = (idf_mult * frequency) / denominator
+                postings.setdefault(token, []).append((document_index, precomputed))
         return {token: tuple(values) for token, values in postings.items()}
 
     def _score_documents(self, query_tokens: tuple[str, ...]) -> tuple[float, ...]:
-        """Return unnormalized BM25 scores for all matching documents."""
+        """Return unnormalized BM25 scores using precomputed posting contributions."""
         if self._average_length == 0:
             return tuple(0.0 for _ in self._documents)
         raw_scores = [0.0] * len(self._documents)
@@ -121,12 +128,11 @@ class BM25Index:
             if token in seen_tokens:
                 continue
             seen_tokens.add(token)
-            idf_k1_plus_1 = self._idf_k1_plus_1.get(token)
-            if idf_k1_plus_1 is None:
+            postings = self._postings.get(token)
+            if postings is None:
                 continue
-            for document_index, frequency in self._postings[token]:
-                denominator = frequency + self._document_len_factors[document_index]
-                raw_scores[document_index] += (idf_k1_plus_1 * frequency) / denominator
+            for document_index, precomputed_score in postings:
+                raw_scores[document_index] += precomputed_score
         return tuple(raw_scores)
 
     def score_custom_documents(
@@ -142,7 +148,6 @@ class BM25Index:
             return tuple(0.0 for _ in documents)
 
         tokenized_docs = [tokenize_normalized(doc) for doc in documents]
-        doc_lengths = [len(tokens) for tokens in tokenized_docs]
 
         avg_len = self._average_length
         if avg_len == 0:
@@ -153,13 +158,15 @@ class BM25Index:
 
         use_k1 = k1 if k1 is not None else self._k1
         use_b = b if b is not None else self._b
-
-        doc_token_counters = [Counter(tokens) for tokens in tokenized_docs]
         use_k1_plus_1 = use_k1 + 1
-
         one_minus_b = 1.0 - use_b
         b_over_avg = use_b / avg_len
-        doc_len_factors = [use_k1 * (one_minus_b + b_over_avg * dl) for dl in doc_lengths]
+
+        doc_token_counters: list[Counter[str]] = []
+        doc_len_factors: list[float] = []
+        for tokens in tokenized_docs:
+            doc_token_counters.append(Counter(tokens))
+            doc_len_factors.append(use_k1 * (one_minus_b + b_over_avg * len(tokens)))
 
         raw_scores = [0.0] * len(documents)
         seen_tokens: set[str] = set()
