@@ -42,6 +42,14 @@ class BM25Index:
         token_count = sum(self._document_lengths)
         self._average_length = token_count / len(self._documents) if self._documents else 0.0
         self._b_over_avg_len = self._b / self._average_length if self._average_length > 0 else 0.0
+        self._document_len_factors = tuple(
+            self._k1 * (self._one_minus_b + self._b_over_avg_len * length)
+            for length in self._document_lengths
+        )
+        self._idf_k1_plus_1 = {
+            token: idf * self._k1_plus_1
+            for token, idf in self._inverse_document_frequencies.items()
+        }
 
     @classmethod
     def from_texts(cls, texts: Sequence[str], k1: float = 1.5, b: float = 0.75) -> BM25Index:
@@ -113,16 +121,12 @@ class BM25Index:
             if token in seen_tokens:
                 continue
             seen_tokens.add(token)
-            inverse_document_frequency = self._inverse_document_frequencies.get(token)
-            if inverse_document_frequency is None:
+            idf_k1_plus_1 = self._idf_k1_plus_1.get(token)
+            if idf_k1_plus_1 is None:
                 continue
             for document_index, frequency in self._postings[token]:
-                document_length = self._document_lengths[document_index]
-                denominator = frequency + self._k1 * (
-                    self._one_minus_b + self._b_over_avg_len * document_length
-                )
-                numerator = inverse_document_frequency * (frequency * self._k1_plus_1)
-                raw_scores[document_index] += numerator / denominator
+                denominator = frequency + self._document_len_factors[document_index]
+                raw_scores[document_index] += (idf_k1_plus_1 * frequency) / denominator
         return tuple(raw_scores)
 
     def score_custom_documents(
@@ -155,7 +159,7 @@ class BM25Index:
 
         one_minus_b = 1.0 - use_b
         b_over_avg = use_b / avg_len
-        doc_len_factors = [one_minus_b + b_over_avg * dl for dl in doc_lengths]
+        doc_len_factors = [use_k1 * (one_minus_b + b_over_avg * dl) for dl in doc_lengths]
 
         raw_scores = [0.0] * len(documents)
         seen_tokens: set[str] = set()
@@ -168,13 +172,14 @@ class BM25Index:
                 if not any(token in counter for counter in doc_token_counters):
                     continue
                 idf = default_idf
+
+            idf_k1_plus_1 = idf * use_k1_plus_1
             for doc_idx, counter in enumerate(doc_token_counters):
                 frequency = counter.get(token, 0)
                 if frequency == 0:
                     continue
-                denominator = frequency + use_k1 * doc_len_factors[doc_idx]
-                numerator = idf * (frequency * use_k1_plus_1)
-                raw_scores[doc_idx] += numerator / denominator
+                denominator = frequency + doc_len_factors[doc_idx]
+                raw_scores[doc_idx] += (idf_k1_plus_1 * frequency) / denominator
 
         max_score = max(raw_scores, default=0.0)
         if max_score <= 0:

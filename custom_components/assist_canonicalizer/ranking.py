@@ -158,7 +158,11 @@ def _positional_similarity(a: str, b: str) -> float:
     max_len = max(len(a), len(b))
     if max_len == 0:
         return 0.0
-    return sum(1 for c1, c2 in zip(a, b, strict=False) if c1 == c2) / max_len
+    matches = 0
+    for c1, c2 in zip(a, b, strict=False):
+        if c1 == c2:
+            matches += 1
+    return matches / max_len
 
 
 def _query_token_coverage(
@@ -174,7 +178,7 @@ def _query_token_coverage(
     """
     if not query_tokens:
         return 1.0
-    matched = sum(1 for token in query_tokens if token in candidate_tokens)
+    matched = len(query_tokens & candidate_tokens)
     coverage = matched / len(query_tokens)
     return coverage * coverage
 
@@ -189,7 +193,7 @@ def _exact_intent_score(
         return 1.0
     max_score = 0.0
     for literal_tokens in variants:
-        matched = sum(1 for token in literal_tokens if token in query_tokens)
+        matched = len(literal_tokens & query_tokens)
         score = matched / len(literal_tokens)
         if score > max_score:
             max_score = score
@@ -299,13 +303,13 @@ def _non_entity_coverage(
 
 
 @lru_cache(maxsize=8192)
-def _literal_token_variants(literal_text: str) -> tuple[tuple[str, ...], ...]:
+def _literal_token_variants(literal_text: str) -> tuple[frozenset[str], ...]:
     """Return normalized literal token variants for intent action scoring."""
     variants = []
     for variant in literal_text.split("|"):
         if not variant.strip():
             continue
-        literal_tokens = tuple(dict.fromkeys(normalize_text(variant).split()))
+        literal_tokens = frozenset(normalize_text(variant).split())
         if literal_tokens:
             variants.append(literal_tokens)
     return tuple(variants)
@@ -450,9 +454,10 @@ def rank_candidates(
         coverage = _query_token_coverage(query_tokens, candidate_tokens)
         intent_score = coverage
         if literal_text:
-            if literal_text not in intent_score_cache:
-                intent_score_cache[literal_text] = _exact_intent_score(literal_text, query_tokens)
-            exact = intent_score_cache[literal_text]
+            exact = intent_score_cache.get(literal_text)
+            if exact is None:
+                exact = _exact_intent_score(literal_text, query_tokens)
+                intent_score_cache[literal_text] = exact
             if exact >= 1.0:
                 variants = _literal_token_variants(literal_text)
                 total_unique = len({tok for var in variants for tok in var})

@@ -90,8 +90,8 @@ class DynamicRegistryTemplate:
     base_data_slot_values: Mapping[str, tuple[str, ...]]
     required_slots: frozenset[str]
     metadata: Mapping[str, str]
-    literal_token_variants: tuple[tuple[str, ...], ...]
-    literal_token_variants_no_diac: tuple[tuple[str, ...], ...]
+    literal_token_variants: tuple[frozenset[str], ...]
+    literal_token_variants_no_diac: tuple[frozenset[str], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,7 +212,7 @@ def compile_dynamic_registry_intents(
                         continue
                     variants = _template_literal_token_variants(sentence, expansion_rules)
                     no_diac_variants = tuple(
-                        tuple(_cached_normalize_no_diac(token, language) for token in tokens)
+                        frozenset(_cached_normalize_no_diac(token, language) for token in tokens)
                         for tokens in variants
                     )
                     templates.append(
@@ -768,8 +768,8 @@ def _slot_value_query_match_key_from_tokens(
 
 
 def _literal_token_variants_match_query(
-    literal_variants: tuple[tuple[str, ...], ...],
-    literal_variants_no_diac: tuple[tuple[str, ...], ...],
+    literal_variants: tuple[frozenset[str], ...],
+    literal_variants_no_diac: tuple[frozenset[str], ...],
     query_tokens: frozenset[str],
     *,
     query_tokens_no_diac: frozenset[str] | None = None,
@@ -778,14 +778,14 @@ def _literal_token_variants_match_query(
     if not literal_variants:
         return True
     for literal_tokens in literal_variants:
-        matched = sum(1 for token in literal_tokens if token in query_tokens)
+        matched = len(literal_tokens & query_tokens)
         if matched == len(literal_tokens):
             return True
         if matched > 0 and matched / len(literal_tokens) >= 0.5:
             return True
     if query_tokens_no_diac:
         for literal_tokens_no_diac in literal_variants_no_diac:
-            matched_no_diac = sum(1 for t in literal_tokens_no_diac if t in query_tokens_no_diac)
+            matched_no_diac = len(literal_tokens_no_diac & query_tokens_no_diac)
             if matched_no_diac == len(literal_tokens_no_diac):
                 return True
             if matched_no_diac > 0 and matched_no_diac / len(literal_tokens_no_diac) >= 0.5:
@@ -804,7 +804,7 @@ def _template_literal_text(
 def _template_literal_token_variants(
     text: str,
     expansion_rules: Mapping[str, str],
-) -> tuple[tuple[str, ...], ...]:
+) -> tuple[frozenset[str], ...]:
     """Return normalized literal token variants for query matching."""
     return _cached_template_literal_token_variants(
         text, _expansion_rules_cache_key(expansion_rules)
@@ -844,7 +844,7 @@ def _cached_template_literal_text(
 def _cached_template_literal_token_variants(
     text: str,
     expansion_rules_key: tuple[tuple[str, str], ...],
-) -> tuple[tuple[str, ...], ...]:
+) -> tuple[frozenset[str], ...]:
     """Return cached normalized literal token variants for query matching."""
     literal_text = _cached_template_literal_text(text, expansion_rules_key)
     if not literal_text:
