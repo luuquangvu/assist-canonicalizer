@@ -287,10 +287,6 @@ class CanonicalizerRuntime:
             for persisted_language in persisted_languages:
                 await _index_store(hass, persisted_language).async_remove()
 
-    def _build_index(self, language: str) -> CanonicalIndex:
-        """Build one language index without mutating runtime cache."""
-        return _build_index_from_snapshot(self._create_build_snapshot(language))
-
     def rank_with_dynamic_candidates(
         self,
         language: str,

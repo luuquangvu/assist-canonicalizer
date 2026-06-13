@@ -151,18 +151,6 @@ def lexical_score(
     )
 
 
-def intent_action_score(query: str, candidate: Candidate) -> float:
-    """Return how well query words cover localized template literal words."""
-    literal_text = candidate.metadata.get("literal_text")
-    if not literal_text:
-        return 1.0
-    return _intent_action_score_from_literal_text(
-        literal_text,
-        frozenset(normalize_text(query).split()),
-        candidate.normalized_tokens_set,
-    )
-
-
 def _positional_similarity(a: str, b: str) -> float:
     """Character-level positional similarity — cheap edit-distance proxy."""
     max_len = max(len(a), len(b))
@@ -422,7 +410,7 @@ def rank_candidates(
                     )
                     for c in no_diac_matches[:max_candidates]
                 )
-    query_grams = char_ngrams(query_normalized)
+    query_grams = char_ngrams_normalized(query_normalized)
     query_tokens = frozenset(query_normalized.split())
     intent_score_cache: dict[str, float] = {}
     if positional_literal_tokens is None:

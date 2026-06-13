@@ -29,6 +29,7 @@ class BM25Index:
             raise ValueError("b must be between 0 and 1")
         self._documents = tuple(documents)
         self._k1 = k1
+        self._k1_plus_1 = k1 + 1
         self._b = b
         self._term_frequencies = tuple(Counter(document.tokens) for document in self._documents)
         self._document_lengths = tuple(len(document.tokens) for document in self._documents)
@@ -110,9 +111,8 @@ class BM25Index:
                 denominator = frequency + self._k1 * (
                     1 - self._b + self._b * document_length / self._average_length
                 )
-                raw_scores[document_index] += (
-                    inverse_document_frequency * (frequency * (self._k1 + 1)) / denominator
-                )
+                numerator = inverse_document_frequency * (frequency * self._k1_plus_1)
+                raw_scores[document_index] += numerator / denominator
         return tuple(raw_scores)
 
     def score_custom_documents(
@@ -141,22 +141,25 @@ class BM25Index:
         use_k1 = k1 if k1 is not None else self._k1
         use_b = b if b is not None else self._b
 
+        doc_token_counters = [Counter(tokens) for tokens in tokenized_docs]
+        use_k1_plus_1 = use_k1 + 1
+
         raw_scores = [0.0] * len(documents)
         for token in query_tokens:
             idf = self._inverse_document_frequencies.get(token)
             if idf is None:
-                if any(token in doc_tokens for doc_tokens in tokenized_docs):
-                    idf = default_idf
-                else:
+                if not any(token in counter for counter in doc_token_counters):
                     continue
-            for doc_idx, doc_tokens in enumerate(tokenized_docs):
-                frequency = doc_tokens.count(token)
+                idf = default_idf
+            for doc_idx, counter in enumerate(doc_token_counters):
+                frequency = counter.get(token, 0)
                 if frequency == 0:
                     continue
                 denominator = frequency + use_k1 * (
                     1 - use_b + use_b * doc_lengths[doc_idx] / avg_len
                 )
-                raw_scores[doc_idx] += idf * (frequency * (use_k1 + 1)) / denominator
+                numerator = idf * (frequency * use_k1_plus_1)
+                raw_scores[doc_idx] += numerator / denominator
 
         max_score = max(raw_scores, default=0.0)
         if max_score <= 0:

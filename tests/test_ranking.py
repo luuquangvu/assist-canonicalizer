@@ -18,7 +18,6 @@ from custom_components.assist_canonicalizer.ranking import (
     accepted_candidate,
     char_ngram_similarity,
     char_ngram_similarity_from_grams,
-    intent_action_score,
     rank_candidates,
     rapidfuzz_similarity,
     rapidfuzz_similarity_normalized,
@@ -268,18 +267,18 @@ def test_rank_candidates_uses_english_builtin_action_alignment() -> None:
     assert ranked[0].candidate.intent_name == "HassTurnOn"
 
 
-def test_intent_action_score_supports_alternatives() -> None:
-    """Verify that intent_action_score handles multiple options separated by pipe."""
-    candidate = Candidate(
-        text="bật quạt",
-        intent_name="HassTurnOn",
-        language="vi",
-        metadata={"literal_text": "bật|mở|bật lên"},
-    )
-    assert ranking.intent_action_score("bật quạt", candidate) == 1.0
-    assert ranking.intent_action_score("mở quạt", candidate) == 1.0
-    assert ranking.intent_action_score("bật lên quạt", candidate) == 1.0
-    assert ranking.intent_action_score("tắt quạt", candidate) == 0.0
+def test_exact_intent_score_supports_alternatives() -> None:
+    """Verify that exact intent action scoring handles multiple options separated by pipe."""
+    from custom_components.assist_canonicalizer.normalization import normalize_text
+
+    query_tokens_bat = frozenset(normalize_text("bật quạt").split())
+    query_tokens_mo = frozenset(normalize_text("mở quạt").split())
+    query_tokens_len = frozenset(normalize_text("bật lên quạt").split())
+    query_tokens_tat = frozenset(normalize_text("tắt quạt").split())
+    assert ranking._exact_intent_score("bật|mở|bật lên", query_tokens_bat) == 1.0
+    assert ranking._exact_intent_score("bật|mở|bật lên", query_tokens_mo) == 1.0
+    assert ranking._exact_intent_score("bật|mở|bật lên", query_tokens_len) == 1.0
+    assert ranking._exact_intent_score("bật|mở|bật lên", query_tokens_tat) == 0.0
 
 
 def test_build_index_validation_errors() -> None:
@@ -336,12 +335,10 @@ def test_query_token_coverage_empty_candidate() -> None:
 
 def test_intent_action_score_fallback_uses_1_0_when_no_literal_text() -> None:
     """Return 1.0 as fallback when candidate has no literal_text metadata."""
-    candidate = Candidate(
-        text="đèn phòng khách",
-        intent_name="HassTurnOn",
-        language="vi",
-    )
-    score = intent_action_score("tắt đèn phòng khách", candidate)
+    from custom_components.assist_canonicalizer.normalization import normalize_text
+
+    query_tokens = frozenset(normalize_text("tắt đèn phòng khách").split())
+    score = ranking._exact_intent_score("", query_tokens)
     assert score == 1.0
 
 

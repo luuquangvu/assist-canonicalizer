@@ -24,8 +24,6 @@ from .registry import AREA_SLOT_NAMES, ENTITY_SLOT_NAMES, merge_slot_values
 _TEMPLATE_MARKERS = frozenset("{}[]<>|()")
 _SLOT_PATTERN = re.compile(r"{([^{}]+)}")
 _RULE_PATTERN = re.compile(r"<([^<>]+)>")
-_OPTIONAL_PATTERN = re.compile(r"\[([^\[\]]+)]")
-_ALTERNATIVE_PATTERN = re.compile(r"\(([^()]+\|[^()]*)\)")
 _ENTITY_SLOT_NAMES = frozenset(ENTITY_SLOT_NAMES)
 _AREA_SLOT_NAMES = frozenset(AREA_SLOT_NAMES)
 
@@ -248,7 +246,7 @@ def build_query_registry_candidates(
     query: str,
     *,
     max_candidates: int = DEFAULT_MAX_DYNAMIC_CANDIDATES,
-    registry_slot_index: Mapping[str, tuple[RegistrySlotValue, ...]] | None = None,
+    registry_slot_index: RegistrySlotIndex | None = None,
     compiled_intents: Sequence[DynamicRegistryIntent] | None = None,
 ) -> tuple[Candidate, ...]:
     """Build query-scoped registry candidates without expanding every entity."""
@@ -338,6 +336,28 @@ def expand_sentence_template(
     return deduplicated[:max_expansions]
 
 
+def _build_candidate(
+    expanded_sentence: str,
+    intent_name: str,
+    source: CandidateSource,
+    language: str,
+    base_metadata: Mapping[str, str],
+    presorted_values: dict[str, list[str]],
+) -> Candidate:
+    """Construct a Candidate with extracted slot metadata."""
+    slots = _extract_slots_from_expanded_text(expanded_sentence, presorted_values)
+    metadata = dict(base_metadata)
+    if slots:
+        metadata["slots"] = orjson.dumps(slots).decode("utf-8")
+    return Candidate(
+        text=expanded_sentence,
+        intent_name=intent_name,
+        source=source,
+        language=language,
+        metadata=metadata,
+    )
+
+
 def _candidates_from_intent_config(
     language: str,
     source_key: str,
@@ -401,17 +421,14 @@ def _candidates_from_intent_config(
             base_metadata = _candidate_metadata(source_key, sentence, expansion_rules)
             presorted_values = _presort_slot_values(slot_values)
             for expanded_sentence in _candidate_texts(sentence, slot_values, expansion_rules):
-                slots = _extract_slots_from_expanded_text(expanded_sentence, presorted_values)
-                metadata = dict(base_metadata)
-                if slots:
-                    metadata["slots"] = orjson.dumps(slots).decode("utf-8")
                 candidates.append(
-                    Candidate(
-                        text=expanded_sentence,
-                        intent_name=intent_name,
-                        source=source,
-                        language=language,
-                        metadata=metadata,
+                    _build_candidate(
+                        expanded_sentence,
+                        intent_name,
+                        source,
+                        language,
+                        base_metadata,
+                        presorted_values,
                     )
                 )
                 if len(candidates) >= max_candidates:
@@ -423,7 +440,7 @@ def _query_candidates_from_compiled_intent(
     language: str,
     compiled_intent: DynamicRegistryIntent,
     registry_slot_values: Mapping[str, tuple[str, ...]],
-    registry_slot_index: Mapping[str, tuple[RegistrySlotValue, ...]],
+    registry_slot_index: RegistrySlotIndex,
     query_normalized: str,
     query_tokens: frozenset[str],
     relevant_cache: dict[int, tuple[str, ...]],
@@ -468,17 +485,14 @@ def _query_candidates_from_compiled_intent(
             slot_values,
             template.expansion_rules,
         ):
-            slots = _extract_slots_from_expanded_text(expanded_sentence, presorted_values)
-            metadata = dict(template.metadata)
-            if slots:
-                metadata["slots"] = orjson.dumps(slots).decode("utf-8")
             candidates.append(
-                Candidate(
-                    text=expanded_sentence,
-                    intent_name=compiled_intent.intent_name,
-                    source=compiled_intent.source,
-                    language=language,
-                    metadata=metadata,
+                _build_candidate(
+                    expanded_sentence,
+                    compiled_intent.intent_name,
+                    compiled_intent.source,
+                    language,
+                    template.metadata,
+                    presorted_values,
                 )
             )
             if len(candidates) >= max_candidates:
@@ -489,7 +503,7 @@ def _query_candidates_from_compiled_intent(
 def _compiled_query_registry_slot_values(
     template: DynamicRegistryTemplate,
     registry_slot_values: Mapping[str, tuple[str, ...]],
-    registry_slot_index: Mapping[str, tuple[RegistrySlotValue, ...]],
+    registry_slot_index: RegistrySlotIndex,
     query_normalized: str,
     query_tokens: frozenset[str],
     relevant_cache: dict[int, tuple[str, ...]],
@@ -590,12 +604,14 @@ def _query_relevant_precomputed_slot_values(
     query_tokens: frozenset[str],
     *,
     limit: int = DEFAULT_MAX_DYNAMIC_SLOT_VALUES,
-    registry_slot_index: Mapping[str, tuple[RegistrySlotValue, ...]] | None = None,
+    registry_slot_index: RegistrySlotIndex | None = None,
     query_no_diac: str | None = None,
     query_tokens_no_diac: frozenset[str] | None = None,
 ) -> tuple[str, ...]:
     """Return relevant values using precomputed normalization and tokens."""
-    if isinstance(registry_slot_index, RegistrySlotIndex):
+    if registry_slot_index is None:
+        candidate_records = set(values)
+    else:
         lookup = registry_slot_index.get_inverted_for_records(values)
         candidate_records = set()
         for token in query_tokens:
@@ -605,8 +621,6 @@ def _query_relevant_precomputed_slot_values(
             for token in query_tokens_no_diac:
                 if token in lookup:
                     candidate_records.update(lookup[token])
-    else:
-        candidate_records = values
 
     scored: list[tuple[tuple[bool, bool, bool, int, int], int, str]] = []
     for value in candidate_records:
@@ -1097,6 +1111,31 @@ class _HassilSequenceNode(_HassilNode):
             req.update(child.required_slots(rules, seen))
         return req
 
+    def _accumulate(
+        self,
+        child_fragments: list[tuple[str, ...]],
+        limit: int,
+    ) -> tuple[str, ...]:
+        """Cartesian-product accumulation of child fragments with deduplication."""
+        if not child_fragments:
+            return ("",)
+        current = ("",)
+        for fragments in child_fragments:
+            next_results: dict[str, None] = {}
+            for prefix in current:
+                for fragment in fragments:
+                    combined = f"{prefix}{fragment}"
+                    if combined not in next_results:
+                        next_results[combined] = None
+                        if len(next_results) >= limit:
+                            break
+                if len(next_results) >= limit:
+                    break
+            current = tuple(next_results.keys())
+            if not current:
+                break
+        return current
+
     def literal_variants(
         self,
         rules: Mapping[str, str],
@@ -1106,23 +1145,8 @@ class _HassilSequenceNode(_HassilNode):
         """Return unique literal word variants for this node."""
         if not self.children:
             return ("",)
-        current_variants = ("",)
-        for child in self.children:
-            next_variants: dict[str, None] = {}
-            child_vars = child.literal_variants(rules, seen, limit)
-            for cv in current_variants:
-                for chv in child_vars:
-                    combined = f"{cv}{chv}"
-                    if combined not in next_variants:
-                        next_variants[combined] = None
-                        if len(next_variants) >= limit:
-                            break
-                if len(next_variants) >= limit:
-                    break
-            current_variants = tuple(next_variants.keys())
-            if not current_variants:
-                break
-        return current_variants
+        child_fragments = [child.literal_variants(rules, seen, limit) for child in self.children]
+        return self._accumulate(child_fragments, limit)
 
     def expand(
         self,
@@ -1134,23 +1158,8 @@ class _HassilSequenceNode(_HassilNode):
         """Expand node into all spoken text variants using slots and rules."""
         if not self.children:
             return ("",)
-        current_expansions = ("",)
-        for child in self.children:
-            next_expansions: dict[str, None] = {}
-            child_expansions = child.expand(slot_values, rules, seen, limit)
-            for cv in current_expansions:
-                for chv in child_expansions:
-                    combined = f"{cv}{chv}"
-                    if combined not in next_expansions:
-                        next_expansions[combined] = None
-                        if len(next_expansions) >= limit:
-                            break
-                if len(next_expansions) >= limit:
-                    break
-            current_expansions = tuple(next_expansions.keys())
-            if not current_expansions:
-                break
-        return current_expansions
+        child_fragments = [child.expand(slot_values, rules, seen, limit) for child in self.children]
+        return self._accumulate(child_fragments, limit)
 
 
 _PARSED_TEMPLATE_CACHE: dict[str, _HassilNode] = {}
