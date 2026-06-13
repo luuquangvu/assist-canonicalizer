@@ -4,10 +4,16 @@ import pytest
 
 from custom_components.assist_canonicalizer import ranking
 from custom_components.assist_canonicalizer.candidate import Candidate, CandidateSource
-from custom_components.assist_canonicalizer.const import DEFAULT_RAPIDFUZZ_PREFILTER_CANDIDATES
+from custom_components.assist_canonicalizer.const import (
+    DEFAULT_MIN_CONFIDENCE,
+    DEFAULT_MIN_MARGIN,
+    DEFAULT_RAPIDFUZZ_PREFILTER_CANDIDATES,
+)
 from custom_components.assist_canonicalizer.indexer import build_index
 from custom_components.assist_canonicalizer.ranking import (
     CharNGramIndex,
+    RankedCandidate,
+    ScoreBreakdown,
     _query_token_coverage,
     accepted_candidate,
     char_ngram_similarity,
@@ -63,7 +69,14 @@ def test_accepted_candidate_enforces_margin_for_competing_intents() -> None:
     )
     ranked = index.rank("turn kitchen")
 
-    assert accepted_candidate(ranked, min_confidence=0.1, min_margin=0.99) is None
+    assert (
+        accepted_candidate(
+            ranked,
+            min_confidence=DEFAULT_MIN_CONFIDENCE / 5.0,
+            min_margin=DEFAULT_MIN_MARGIN + 0.95,
+        )
+        is None
+    )
 
 
 def test_accepted_candidate_allows_exact_top_against_fuzzy_competing_intent() -> None:
@@ -77,7 +90,14 @@ def test_accepted_candidate_allows_exact_top_against_fuzzy_competing_intent() ->
     )
     ranked = index.rank("turn on kitchen light")
 
-    assert accepted_candidate(ranked, min_confidence=0.1, min_margin=0.99) is ranked[0]
+    assert (
+        accepted_candidate(
+            ranked,
+            min_confidence=DEFAULT_MIN_CONFIDENCE / 5.0,
+            min_margin=DEFAULT_MIN_MARGIN + 0.95,
+        )
+        is ranked[0]
+    )
 
 
 def test_accepted_candidate_allows_close_candidates_with_same_intent() -> None:
@@ -90,7 +110,49 @@ def test_accepted_candidate_allows_close_candidates_with_same_intent() -> None:
         ],
     )
     ranked = index.rank("turn on kitchen")
-    assert accepted_candidate(ranked, min_confidence=0.1, min_margin=0.99) is not None
+    assert (
+        accepted_candidate(
+            ranked,
+            min_confidence=DEFAULT_MIN_CONFIDENCE / 5.0,
+            min_margin=DEFAULT_MIN_MARGIN + 0.95,
+        )
+        is not None
+    )
+
+
+def test_accepted_candidate_allows_identical_text_with_different_intent() -> None:
+    """Accept candidate when competing intent has identical text."""
+    score = DEFAULT_MIN_CONFIDENCE + 0.1
+    top = RankedCandidate(
+        candidate=Candidate(text="turn on kitchen light", intent_name="HassTurnOn", language="en"),
+        scores=ScoreBreakdown(
+            rapidfuzz_score=score,
+            char_ngram_score=score,
+            bm25_score=score,
+            intent_score=score,
+            final_score=score,
+        ),
+    )
+    competitor = RankedCandidate(
+        candidate=Candidate(text="turn on kitchen light", intent_name="HassTurnOff", language="en"),
+        scores=ScoreBreakdown(
+            rapidfuzz_score=score,
+            char_ngram_score=score,
+            bm25_score=score,
+            intent_score=score,
+            final_score=score,
+        ),
+    )
+
+    ranked = (top, competitor)
+    assert (
+        accepted_candidate(
+            ranked,
+            min_confidence=DEFAULT_MIN_CONFIDENCE,
+            min_margin=DEFAULT_MIN_MARGIN,
+        )
+        is top
+    )
 
 
 def test_index_rank_reuses_prebuilt_lexical_index(monkeypatch) -> None:

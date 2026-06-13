@@ -474,6 +474,7 @@ def accepted_candidate(
             item
             for item in ranked[1:]
             if item.candidate.intent_name != top_candidate.candidate.intent_name
+            and item.candidate.normalized_text != top_candidate.candidate.normalized_text
         ),
         None,
     )
