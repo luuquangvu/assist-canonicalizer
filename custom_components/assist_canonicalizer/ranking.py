@@ -296,38 +296,6 @@ def _non_entity_coverage(
     return coverage * coverage
 
 
-def _intent_action_score_from_literal_text(
-    literal_text: str,
-    query_tokens: frozenset[str],
-    candidate_tokens: frozenset[str] | None = None,
-) -> float:
-    """Return how well query tokens cover localized template literal words.
-
-    When ``candidate_tokens`` are provided the search space is filtered to
-    exclude candidate entity tokens, preventing e.g. ``tắt`` (turn off)
-    from accidentally matching ``tắm`` (bath) inside a correctly-spelled
-    query like ``bật quạt phòng tắm``.
-    """
-    exact = _exact_intent_score(literal_text, query_tokens)
-    if exact >= 1.0:
-        return exact
-    if candidate_tokens is not None:
-        search_tokens = query_tokens - candidate_tokens
-        if not search_tokens:
-            return exact
-    else:
-        search_tokens = query_tokens
-    all_literal: set[str] = set()
-    for variant in _literal_token_variants(literal_text):
-        all_literal.update(variant)
-    if not all_literal:
-        return exact
-    lookup = _build_positional_lookup(frozenset(all_literal), search_tokens)
-    return _positional_intent_score_from_lookup(
-        literal_text, search_tokens, lookup, candidate_tokens
-    )
-
-
 @lru_cache(maxsize=8192)
 def _literal_token_variants(literal_text: str) -> tuple[tuple[str, ...], ...]:
     """Return normalized literal token variants for intent action scoring."""
@@ -421,11 +389,7 @@ def rank_candidates(
                 for variant in _literal_token_variants(literal_text):
                     all_tokens.update(variant)
         positional_literal_tokens = frozenset(all_tokens)
-    positional_lookup = (
-        _build_positional_lookup(positional_literal_tokens, query_tokens)
-        if positional_literal_tokens
-        else {}
-    )
+
     if reference_bm25_index is not None:
         bm25_scores = reference_bm25_index.score_custom_documents(
             query_normalized, tuple(candidate.normalized_text for candidate in candidates)
@@ -463,6 +427,17 @@ def rank_candidates(
     )
     prefilter_limit = min(len(candidates), rapidfuzz_prefilter_candidates)
     strongest_prefiltered = nsmallest(prefilter_limit, prefiltered)
+    prefiltered_literal_tokens = set()
+    for _, _, candidate, _, _ in strongest_prefiltered:
+        literal_text = candidate.metadata.get("literal_text")
+        if literal_text:
+            for variant in _literal_token_variants(literal_text):
+                prefiltered_literal_tokens.update(variant)
+    positional_lookup = (
+        _build_positional_lookup(frozenset(prefiltered_literal_tokens), query_tokens)
+        if prefiltered_literal_tokens
+        else {}
+    )
     ranked: list[RankedCandidate] = []
     for _, _, candidate, bm25_score, char_score in strongest_prefiltered:
         rapidfuzz_score = rapidfuzz_similarity_normalized(

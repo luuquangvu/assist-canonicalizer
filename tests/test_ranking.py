@@ -10,6 +10,7 @@ from custom_components.assist_canonicalizer.const import (
     DEFAULT_RAPIDFUZZ_PREFILTER_CANDIDATES,
 )
 from custom_components.assist_canonicalizer.indexer import build_index
+from custom_components.assist_canonicalizer.normalization import normalize_text
 from custom_components.assist_canonicalizer.ranking import (
     CharNGramIndex,
     RankedCandidate,
@@ -269,8 +270,6 @@ def test_rank_candidates_uses_english_builtin_action_alignment() -> None:
 
 def test_exact_intent_score_supports_alternatives() -> None:
     """Verify that exact intent action scoring handles multiple options separated by pipe."""
-    from custom_components.assist_canonicalizer.normalization import normalize_text
-
     query_tokens_bat = frozenset(normalize_text("bật quạt").split())
     query_tokens_mo = frozenset(normalize_text("mở quạt").split())
     query_tokens_len = frozenset(normalize_text("bật lên quạt").split())
@@ -335,8 +334,6 @@ def test_query_token_coverage_empty_candidate() -> None:
 
 def test_intent_action_score_fallback_uses_1_0_when_no_literal_text() -> None:
     """Return 1.0 as fallback when candidate has no literal_text metadata."""
-    from custom_components.assist_canonicalizer.normalization import normalize_text
-
     query_tokens = frozenset(normalize_text("tắt đèn phòng khách").split())
     score = ranking._exact_intent_score("", query_tokens)
     assert score == 1.0

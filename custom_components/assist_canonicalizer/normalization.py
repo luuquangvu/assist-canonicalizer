@@ -63,14 +63,7 @@ def tokenize_normalized(text: str) -> tuple[str, ...]:
 
 def char_ngrams(text: str, size: int = 3) -> frozenset[str]:
     """Return character n-grams for normalized text."""
-    if size < 1:
-        raise ValueError("N-gram size must be positive")
-    compact = normalize_text(text).replace(" ", "")
-    if not compact:
-        return frozenset()
-    if len(compact) <= size:
-        return frozenset({compact})
-    return frozenset(compact[index : index + size] for index in range(len(compact) - size + 1))
+    return char_ngrams_normalized(normalize_text(text), size)
 
 
 def char_ngrams_normalized(text: str, size: int = 3) -> frozenset[str]:

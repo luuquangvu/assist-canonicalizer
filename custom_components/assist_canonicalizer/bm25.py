@@ -33,8 +33,10 @@ class BM25Index:
         self._b = b
         self._term_frequencies = tuple(Counter(document.tokens) for document in self._documents)
         self._document_lengths = tuple(len(document.tokens) for document in self._documents)
-        self._document_frequencies = self._build_document_frequencies()
-        self._inverse_document_frequencies = self._build_inverse_document_frequencies()
+        document_frequencies = self._build_document_frequencies()
+        self._inverse_document_frequencies = self._build_inverse_document_frequencies(
+            document_frequencies
+        )
         self._postings = self._build_postings()
         token_count = sum(self._document_lengths)
         self._average_length = token_count / len(self._documents) if self._documents else 0.0
@@ -81,12 +83,14 @@ class BM25Index:
                 frequencies[token] = frequencies.get(token, 0) + 1
         return frequencies
 
-    def _build_inverse_document_frequencies(self) -> dict[str, float]:
+    def _build_inverse_document_frequencies(
+        self, document_frequencies: dict[str, int]
+    ) -> dict[str, float]:
         """Build BM25 inverse document frequency values by token."""
         document_count = len(self._documents)
         return {
             token: log(1 + (document_count - document_frequency + 0.5) / (document_frequency + 0.5))
-            for token, document_frequency in self._document_frequencies.items()
+            for token, document_frequency in document_frequencies.items()
         }
 
     def _build_postings(self) -> dict[str, tuple[tuple[int, int], ...]]:
