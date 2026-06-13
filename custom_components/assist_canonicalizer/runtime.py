@@ -78,7 +78,7 @@ class CanonicalizerRuntime:
     language_intent_sources: dict[str, dict[str, Mapping[str, Any]]] = field(default_factory=dict)
     config_path: Callable[..., str] | None = None
     registry_slot_values: dict[str, tuple[str, ...]] = field(default_factory=dict)
-    registry_slot_index: RegistrySlotIndex = field(default_factory=dict)
+    registry_slot_index: RegistrySlotIndex = field(default_factory=lambda: RegistrySlotIndex({}))
     dynamic_registry_intents: dict[str, tuple[DynamicRegistryIntent, ...]] = field(
         default_factory=dict
     )
@@ -317,6 +317,7 @@ class CanonicalizerRuntime:
             query,
             dynamic_candidates,
             max_candidates=max_candidates,
+            reference_bm25_index=index._bm25_index,
             candidate_char_index=CharNGramIndex.from_grams(
                 tuple(
                     char_ngrams_normalized(candidate.normalized_text)
@@ -398,7 +399,9 @@ class CanonicalizerRuntime:
         cached = self.dynamic_registry_intents.get(language)
         if cached is not None:
             return cached
-        compiled = compile_dynamic_registry_intents(self._intent_sources_for_query(language))
+        compiled = compile_dynamic_registry_intents(
+            self._intent_sources_for_query(language), language
+        )
         self.dynamic_registry_intents[language] = compiled
         return compiled
 
@@ -731,8 +734,6 @@ def _merge_ranked_candidates(
         key=_ranked_candidate_sort_key,
         reverse=True,
     )
-    if ranked and ranked[0].scores.final_score >= 1.0:
-        return tuple(item for item in ranked if item.scores.final_score >= 1.0)
     return tuple(ranked[:max_candidates])
 
 

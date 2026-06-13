@@ -114,3 +114,51 @@ class BM25Index:
                     inverse_document_frequency * (frequency * (self._k1 + 1)) / denominator
                 )
         return tuple(raw_scores)
+
+    def score_custom_documents(
+        self,
+        query: str,
+        documents: Sequence[str],
+        k1: float | None = None,
+        b: float | None = None,
+    ) -> tuple[float, ...]:
+        """Score custom normalized documents using this index for IDF/avg_length."""
+        query_tokens = tokenize_text(query)
+        if not query_tokens or not documents:
+            return tuple(0.0 for _ in documents)
+
+        tokenized_docs = [tokenize_normalized(doc) for doc in documents]
+        doc_lengths = [len(tokens) for tokens in tokenized_docs]
+
+        avg_len = self._average_length
+        if avg_len == 0:
+            return tuple(0.0 for _ in documents)
+
+        # Default IDF value for unseen tokens
+        document_count = len(self._documents)
+        default_idf = log(1 + (document_count - 0 + 0.5) / (0 + 0.5)) if document_count else 0.0
+
+        use_k1 = k1 if k1 is not None else self._k1
+        use_b = b if b is not None else self._b
+
+        raw_scores = [0.0] * len(documents)
+        for token in query_tokens:
+            idf = self._inverse_document_frequencies.get(token)
+            if idf is None:
+                if any(token in doc_tokens for doc_tokens in tokenized_docs):
+                    idf = default_idf
+                else:
+                    continue
+            for doc_idx, doc_tokens in enumerate(tokenized_docs):
+                frequency = doc_tokens.count(token)
+                if frequency == 0:
+                    continue
+                denominator = frequency + use_k1 * (
+                    1 - use_b + use_b * doc_lengths[doc_idx] / avg_len
+                )
+                raw_scores[doc_idx] += idf * (frequency * (use_k1 + 1)) / denominator
+
+        max_score = max(raw_scores, default=0.0)
+        if max_score <= 0:
+            return tuple(0.0 for _ in raw_scores)
+        return tuple(score / max_score for score in raw_scores)

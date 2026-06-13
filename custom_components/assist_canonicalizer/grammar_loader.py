@@ -18,7 +18,7 @@ from .const import (
     DEFAULT_MAX_DYNAMIC_SLOT_VALUES,
     DEFAULT_MAX_TOTAL_CANDIDATES_PER_LANGUAGE,
 )
-from .normalization import normalize_text
+from .normalization import normalize_text, normalize_text_no_diacritics
 from .registry import AREA_SLOT_NAMES, ENTITY_SLOT_NAMES, merge_slot_values
 
 _TEMPLATE_MARKERS = frozenset("{}[]<>|()")
@@ -38,9 +38,45 @@ class RegistrySlotValue:
     normalized_text: str
     tokens: tuple[str, ...]
     position: int
+    normalized_no_diacritics: str
+    tokens_no_diacritics: tuple[str, ...]
 
 
-type RegistrySlotIndex = dict[str, tuple[RegistrySlotValue, ...]]
+class RegistrySlotIndex(dict[str, tuple[RegistrySlotValue, ...]]):
+    """Precomputed registry values index with an inverted index helper."""
+
+    def __init__(self, data: dict[str, tuple[RegistrySlotValue, ...]]):
+        """Initialize and precompute inverted indexes for all slots."""
+        super().__init__(data)
+        self.inverted: dict[str, dict[str, list[RegistrySlotValue]]] = {}
+        for key, records in self.items():
+            slot_inv = self.inverted.setdefault(key, {})
+            for record in records:
+                for token in record.tokens:
+                    slot_inv.setdefault(token, []).append(record)
+                for token in record.tokens_no_diacritics:
+                    if token not in record.tokens:
+                        slot_inv.setdefault(token, []).append(record)
+        self._inverted_cache: dict[int, dict[str, list[RegistrySlotValue]]] = {}
+
+    def get_inverted_for_records(
+        self, records: tuple[RegistrySlotValue, ...]
+    ) -> dict[str, list[RegistrySlotValue]]:
+        """Get or build the inverted index for the given records tuple."""
+        record_id = id(records)
+        lookup = self._inverted_cache.get(record_id)
+        if lookup is not None:
+            return lookup
+
+        lookup = {}
+        for record in records:
+            for token in record.tokens:
+                lookup.setdefault(token, []).append(record)
+            for token in record.tokens_no_diacritics:
+                if token not in record.tokens:
+                    lookup.setdefault(token, []).append(record)
+        self._inverted_cache[record_id] = lookup
+        return lookup
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +92,7 @@ class DynamicRegistryTemplate:
     required_slots: frozenset[str]
     metadata: Mapping[str, str]
     literal_token_variants: tuple[tuple[str, ...], ...]
+    literal_token_variants_no_diac: tuple[tuple[str, ...], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,10 +150,11 @@ def build_candidates_from_intent_sources(
 
 def build_registry_slot_index(
     registry_slot_values: Mapping[str, tuple[str, ...]],
+    language: str | None = None,
 ) -> RegistrySlotIndex:
     """Precompute normalized registry values while sharing identical slot tuples."""
     shared: dict[tuple[str, ...], tuple[RegistrySlotValue, ...]] = {}
-    index: RegistrySlotIndex = {}
+    data: dict[str, tuple[RegistrySlotValue, ...]] = {}
     for slot_name, values in registry_slot_values.items():
         records = shared.get(values)
         if records is None:
@@ -124,19 +162,24 @@ def build_registry_slot_index(
                 RegistrySlotValue(
                     text=value,
                     normalized_text=normalized,
-                    tokens=tuple(dict.fromkeys(normalized.split())),
+                    tokens=tokens,
                     position=position,
+                    normalized_no_diacritics=normalized_no_diac,
+                    tokens_no_diacritics=tuple(dict.fromkeys(normalized_no_diac.split())),
                 )
                 for position, value in enumerate(values)
                 if (normalized := normalize_text(value))
+                and (tokens := tuple(dict.fromkeys(normalized.split())))
+                and (normalized_no_diac := _cached_normalize_no_diac(value, language)) is not None
             )
             shared[values] = records
-        index[slot_name] = records
-    return index
+        data[slot_name] = records
+    return RegistrySlotIndex(data)
 
 
 def compile_dynamic_registry_intents(
     intent_sources: Mapping[str, Mapping[str, Any]],
+    language: str | None = None,
 ) -> tuple[DynamicRegistryIntent, ...]:
     """Compile query-independent dynamic registry template data."""
     compiled: list[DynamicRegistryIntent] = []
@@ -168,6 +211,11 @@ def compile_dynamic_registry_intents(
                     entity_slots = tuple(sorted(sentence_slots & _ENTITY_SLOT_NAMES))
                     if not entity_slots:
                         continue
+                    variants = _template_literal_token_variants(sentence, expansion_rules)
+                    no_diac_variants = tuple(
+                        tuple(_cached_normalize_no_diac(token, language) for token in tokens)
+                        for tokens in variants
+                    )
                     templates.append(
                         DynamicRegistryTemplate(
                             sentence=sentence,
@@ -178,9 +226,8 @@ def compile_dynamic_registry_intents(
                             base_data_slot_values=base_data_slot_values,
                             required_slots=frozenset(_required_slots(sentence, expansion_rules)),
                             metadata=_candidate_metadata(source_key, sentence, expansion_rules),
-                            literal_token_variants=_template_literal_token_variants(
-                                sentence, expansion_rules
-                            ),
+                            literal_token_variants=variants,
+                            literal_token_variants_no_diac=no_diac_variants,
                         )
                     )
             if templates:
@@ -212,9 +259,12 @@ def build_query_registry_candidates(
         return ()
     query_tokens = frozenset(query_normalized.split())
     if registry_slot_index is None:
-        registry_slot_index = build_registry_slot_index(registry_slot_values)
+        registry_slot_index = build_registry_slot_index(registry_slot_values, language)
     if compiled_intents is None:
-        compiled_intents = compile_dynamic_registry_intents(intent_sources)
+        compiled_intents = compile_dynamic_registry_intents(intent_sources, language)
+
+    query_no_diac = normalize_text_no_diacritics(query, language)
+    query_tokens_no_diac = frozenset(query_no_diac.split())
 
     candidates: list[Candidate] = []
     relevant_cache: dict[int, tuple[str, ...]] = {}
@@ -231,6 +281,8 @@ def build_query_registry_candidates(
                 relevant_cache,
                 scoped_cache,
                 max_candidates=DEFAULT_MAX_CANDIDATES_PER_INTENT,
+                query_no_diac=query_no_diac,
+                query_tokens_no_diac=query_tokens_no_diac,
             )
         )
     if len(candidates) <= max_candidates:
@@ -378,11 +430,18 @@ def _query_candidates_from_compiled_intent(
     scoped_cache: dict[tuple[str, tuple[str, ...]], tuple[RegistrySlotValue, ...]],
     *,
     max_candidates: int,
+    query_no_diac: str | None = None,
+    query_tokens_no_diac: frozenset[str] | None = None,
 ) -> tuple[Candidate, ...]:
     """Expand one compiled intent using query-relevant registry values."""
     candidates: list[Candidate] = []
     for template in compiled_intent.templates:
-        if not _literal_token_variants_match_query(template.literal_token_variants, query_tokens):
+        if not _literal_token_variants_match_query(
+            template.literal_token_variants,
+            template.literal_token_variants_no_diac,
+            query_tokens,
+            query_tokens_no_diac=query_tokens_no_diac,
+        ):
             continue
         dynamic_registry_slots = _compiled_query_registry_slot_values(
             template,
@@ -392,6 +451,8 @@ def _query_candidates_from_compiled_intent(
             query_tokens,
             relevant_cache,
             scoped_cache,
+            query_no_diac=query_no_diac,
+            query_tokens_no_diac=query_tokens_no_diac,
         )
         if not dynamic_registry_slots:
             continue
@@ -433,6 +494,9 @@ def _compiled_query_registry_slot_values(
     query_tokens: frozenset[str],
     relevant_cache: dict[int, tuple[str, ...]],
     scoped_cache: dict[tuple[str, tuple[str, ...]], tuple[RegistrySlotValue, ...]],
+    *,
+    query_no_diac: str | None = None,
+    query_tokens_no_diac: frozenset[str] | None = None,
 ) -> dict[str, tuple[str, ...]]:
     """Return narrowed registry slots for a compiled template."""
     constrained = dict(registry_slot_values)
@@ -470,6 +534,9 @@ def _compiled_query_registry_slot_values(
                 records,
                 query_normalized,
                 query_tokens,
+                registry_slot_index=registry_slot_index,
+                query_no_diac=query_no_diac,
+                query_tokens_no_diac=query_tokens_no_diac,
             )
             relevant_cache[cache_key] = relevant
         if relevant:
@@ -523,15 +590,35 @@ def _query_relevant_precomputed_slot_values(
     query_tokens: frozenset[str],
     *,
     limit: int = DEFAULT_MAX_DYNAMIC_SLOT_VALUES,
+    registry_slot_index: Mapping[str, tuple[RegistrySlotValue, ...]] | None = None,
+    query_no_diac: str | None = None,
+    query_tokens_no_diac: frozenset[str] | None = None,
 ) -> tuple[str, ...]:
     """Return relevant values using precomputed normalization and tokens."""
+    if isinstance(registry_slot_index, RegistrySlotIndex):
+        lookup = registry_slot_index.get_inverted_for_records(values)
+        candidate_records = set()
+        for token in query_tokens:
+            if token in lookup:
+                candidate_records.update(lookup[token])
+        if query_tokens_no_diac:
+            for token in query_tokens_no_diac:
+                if token in lookup:
+                    candidate_records.update(lookup[token])
+    else:
+        candidate_records = values
+
     scored: list[tuple[tuple[bool, bool, bool, int, int], int, str]] = []
-    for value in values:
+    for value in candidate_records:
         match_key = _slot_value_query_match_key_from_tokens(
             value.normalized_text,
             value.tokens,
             query_normalized,
             query_tokens,
+            value_no_diac=value.normalized_no_diacritics,
+            value_tokens_no_diac=value.tokens_no_diacritics,
+            query_no_diac=query_no_diac,
+            query_tokens_no_diac=query_tokens_no_diac,
         )
         if match_key is not None:
             scored.append((match_key, value.position, value.text))
@@ -623,16 +710,37 @@ def _slot_value_query_match_key_from_tokens(
     value_tokens: tuple[str, ...],
     query_normalized: str,
     query_tokens: frozenset[str],
+    *,
+    value_no_diac: str | None = None,
+    value_tokens_no_diac: tuple[str, ...] | None = None,
+    query_no_diac: str | None = None,
+    query_tokens_no_diac: frozenset[str] | None = None,
 ) -> tuple[bool, bool, bool, int, int] | None:
     """Return registry relevance using precomputed normalized value tokens."""
     if not value_tokens:
         return None
     token_count = len(value_tokens)
-    if value_normalized == query_normalized:
+
+    # 1. Exact matches
+    exact = value_normalized == query_normalized
+    if not exact and value_no_diac and query_no_diac:
+        exact = value_no_diac == query_no_diac
+    if exact:
         return (True, True, True, token_count, -token_count)
-    if value_normalized in query_normalized:
+
+    # 2. Substring matches
+    substring = value_normalized in query_normalized
+    if not substring and value_no_diac and query_no_diac:
+        substring = value_no_diac in query_no_diac
+    if substring:
         return (False, True, True, token_count, -token_count)
-    matched = sum(1 for token in value_tokens if token in query_tokens)
+
+    # 3. Token overlaps
+    matched = len(query_tokens.intersection(value_tokens))
+    if value_tokens_no_diac and query_tokens_no_diac:
+        matched_no_diac = len(query_tokens_no_diac.intersection(value_tokens_no_diac))
+        matched = max(matched, matched_no_diac)
+
     if matched < min(2, token_count):
         return None
     return (
@@ -646,7 +754,10 @@ def _slot_value_query_match_key_from_tokens(
 
 def _literal_token_variants_match_query(
     literal_variants: tuple[tuple[str, ...], ...],
+    literal_variants_no_diac: tuple[tuple[str, ...], ...],
     query_tokens: frozenset[str],
+    *,
+    query_tokens_no_diac: frozenset[str] | None = None,
 ) -> bool:
     """Return whether precomputed template literal variants match a query."""
     if not literal_variants:
@@ -657,6 +768,13 @@ def _literal_token_variants_match_query(
             return True
         if matched > 0 and matched / len(literal_tokens) >= 0.5:
             return True
+    if query_tokens_no_diac:
+        for literal_tokens_no_diac in literal_variants_no_diac:
+            matched_no_diac = sum(1 for t in literal_tokens_no_diac if t in query_tokens_no_diac)
+            if matched_no_diac == len(literal_tokens_no_diac):
+                return True
+            if matched_no_diac > 0 and matched_no_diac / len(literal_tokens_no_diac) >= 0.5:
+                return True
     return False
 
 
@@ -683,6 +801,12 @@ def _expansion_rules_cache_key(
 ) -> tuple[tuple[str, str], ...]:
     """Return a stable cache key for expansion rules."""
     return tuple(sorted(expansion_rules.items()))
+
+
+@lru_cache(maxsize=8192)
+def _cached_normalize_no_diac(text: str, language: str | None = None) -> str:
+    """Cache diacritics removal for efficient lookups."""
+    return normalize_text_no_diacritics(text, language)
 
 
 @lru_cache(maxsize=8192)

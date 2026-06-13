@@ -5,10 +5,12 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
+import orjson
+
 from .bm25 import BM25Index
 from .candidate import Candidate, deduplicate_candidates
 from .const import DEFAULT_MAX_CANDIDATES, DEFAULT_MAX_TOTAL_CANDIDATES_PER_LANGUAGE
-from .normalization import char_ngrams_normalized
+from .normalization import char_ngrams_normalized, normalize_text
 from .ranking import CharNGramIndex, RankedCandidate, _literal_token_variants, rank_candidates
 
 
@@ -33,6 +35,39 @@ class CanonicalIndex:
 
     def __post_init__(self) -> None:
         """Prebuild reusable lexical ranking structures."""
+        slot_tokens = set()
+        for candidate in self.candidates:
+            slots_json = candidate.metadata.get("slots")
+            if slots_json:
+                try:
+                    c_slots = orjson.loads(slots_json)
+                    for val in c_slots.values():
+                        val_norm = normalize_text(str(val))
+                        slot_tokens.update(val_norm.split())
+                except Exception:
+                    pass
+
+        unique_templates = set()
+        for candidate in self.candidates:
+            temp = candidate.metadata.get("sentence_template")
+            if temp:
+                unique_templates.add(temp)
+
+        from collections import Counter
+
+        tdf = Counter()
+        for temp in unique_templates:
+            tokens = set(normalize_text(temp).split())
+            tdf.update(tokens)
+
+        total_templates = len(unique_templates)
+        ignored_tokens = set()
+        if total_templates > 0:
+            for token, count in tdf.items():
+                ratio = count / total_templates
+                if ratio > 0.05 and len(token) <= 3 and token not in slot_tokens:
+                    ignored_tokens.add(token)
+
         normalized_texts = tuple(candidate.normalized_text for candidate in self.candidates)
         object.__setattr__(
             self,

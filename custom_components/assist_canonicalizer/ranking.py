@@ -316,6 +316,7 @@ def rank_candidates(
     max_candidates: int = DEFAULT_MAX_CANDIDATES,
     *,
     bm25_index: BM25Index | None = None,
+    reference_bm25_index: BM25Index | None = None,
     candidate_char_grams: Sequence[frozenset[str]] | None = None,
     candidate_char_index: CharNGramIndex | None = None,
     positional_literal_tokens: frozenset[str] | None = None,
@@ -394,11 +395,17 @@ def rank_candidates(
         if positional_literal_tokens
         else {}
     )
-    if bm25_index is None:
+    if reference_bm25_index is not None:
+        bm25_scores = reference_bm25_index.score_custom_documents(
+            query_normalized, tuple(candidate.normalized_text for candidate in candidates)
+        )
+    elif bm25_index is None:
         bm25_index = BM25Index.from_normalized_texts(
             tuple(candidate.normalized_text for candidate in candidates)
         )
-    bm25_scores = bm25_index.score(query_normalized)
+        bm25_scores = bm25_index.score(query_normalized)
+    else:
+        bm25_scores = bm25_index.score(query_normalized)
     if candidate_char_index is not None:
         char_scores = candidate_char_index.score(query_grams)
     else:
@@ -431,20 +438,20 @@ def rank_candidates(
             query_normalized, candidate.normalized_text
         )
         literal_text = candidate.metadata.get("literal_text")
+        candidate_tokens = candidate.normalized_tokens_set
+        coverage = _query_token_coverage(query_tokens, candidate_tokens)
         if literal_text:
             if literal_text not in intent_score_cache:
                 intent_score_cache[literal_text] = _exact_intent_score(literal_text, query_tokens)
             exact = intent_score_cache[literal_text]
             if exact >= 1.0:
-                candidate_tokens = candidate.normalized_tokens_set
-                intent_score = _query_token_coverage(query_tokens, candidate_tokens)
+                intent_score = coverage
             else:
-                candidate_entity = candidate.normalized_tokens_set
                 intent_score = _positional_intent_score_from_lookup(
-                    literal_text, query_tokens, positional_lookup, candidate_entity
+                    literal_text, query_tokens, positional_lookup, candidate_tokens
                 )
         else:
-            intent_score = 1.0
+            intent_score = coverage
         combined = lexical_score(rapidfuzz_score, char_score, bm25_score, intent_score)
         scores = ScoreBreakdown(
             rapidfuzz_score=rapidfuzz_score,
