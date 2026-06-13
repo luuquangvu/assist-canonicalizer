@@ -769,16 +769,20 @@ def _literal_token_variants_match_query(
     if not literal_variants:
         return True
     for literal_tokens in literal_variants:
-        matched = len(literal_tokens & query_tokens)
-        if matched == len(literal_tokens):
+        if literal_tokens.isdisjoint(query_tokens):
+            continue
+        if literal_tokens.issubset(query_tokens):
             return True
+        matched = len(literal_tokens & query_tokens)
         if matched > 0 and matched / len(literal_tokens) >= 0.5:
             return True
     if query_tokens_no_diac:
         for literal_tokens_no_diac in literal_variants_no_diac:
-            matched_no_diac = len(literal_tokens_no_diac & query_tokens_no_diac)
-            if matched_no_diac == len(literal_tokens_no_diac):
+            if literal_tokens_no_diac.isdisjoint(query_tokens_no_diac):
+                continue
+            if literal_tokens_no_diac.issubset(query_tokens_no_diac):
                 return True
+            matched_no_diac = len(literal_tokens_no_diac & query_tokens_no_diac)
             if matched_no_diac > 0 and matched_no_diac / len(literal_tokens_no_diac) >= 0.5:
                 return True
     return False

@@ -179,8 +179,13 @@ def _exact_intent_score(
         return 1.0
     max_score = 0.0
     for literal_tokens in variants:
-        matched = len(literal_tokens & query_tokens)
-        score = matched / len(literal_tokens)
+        if literal_tokens.issubset(query_tokens):
+            return 1.0
+        if literal_tokens.isdisjoint(query_tokens):
+            score = 0.0
+        else:
+            matched = len(literal_tokens & query_tokens)
+            score = matched / len(literal_tokens)
         if score > max_score:
             max_score = score
     return max_score
@@ -256,7 +261,7 @@ def _positional_intent_score_from_lookup(
     variants = _literal_token_variants(literal_text)
     if not variants:
         return 1.0
-    if candidate_entity is not None and not query_tokens - candidate_entity:
+    if candidate_entity is not None and query_tokens.issubset(candidate_entity):
         return _exact_intent_score(literal_text, query_tokens)
     best_score = 0.0
     for literal_tokens in variants:
