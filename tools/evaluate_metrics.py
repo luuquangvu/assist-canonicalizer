@@ -156,6 +156,8 @@ REGISTRY_SLOTS: dict[str, dict[str, tuple[str, ...]]] = {
             "Bedroom Light",
             "Kitchen Light",
         ),
+        "name:vacuum": ("vacuum",),
+        "name:todo": ("shopping list",),
     },
     "vi": {
         "name": (
@@ -163,6 +165,8 @@ REGISTRY_SLOTS: dict[str, dict[str, tuple[str, ...]]] = {
             "quạt phòng khách",
             "đèn phòng ngủ",
         ),
+        "name:vacuum": ("máy hút bụi", "robot hút bụi"),
+        "name:todo": ("danh sách việc cần làm",),
     },
     "de": {
         "name": (
@@ -170,6 +174,8 @@ REGISTRY_SLOTS: dict[str, dict[str, tuple[str, ...]]] = {
             "Badezimmerlüfter",
             "Schlafzimmerlampe",
         ),
+        "name:vacuum": ("staubsauger",),
+        "name:todo": ("einkaufsliste",),
     },
     "fr": {
         "name": (
@@ -177,6 +183,8 @@ REGISTRY_SLOTS: dict[str, dict[str, tuple[str, ...]]] = {
             "ventilateur du salon",
             "lumière de la chambre",
         ),
+        "name:vacuum": ("aspirateur",),
+        "name:todo": ("liste de courses",),
     },
     "nl": {
         "name": (
@@ -185,6 +193,8 @@ REGISTRY_SLOTS: dict[str, dict[str, tuple[str, ...]]] = {
             "badkamerventilator",
             "stofzuiger",
         ),
+        "name:vacuum": ("stofzuiger",),
+        "name:todo": ("boodschappenlijst", "todolijst"),
     },
 }
 

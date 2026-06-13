@@ -192,6 +192,35 @@ def test_real_world_hard_categories_are_not_direct_hassil_matches(
     assert not failures, f"{dataset_context.language}: hard category too easy: {failures}"
 
 
+def test_real_world_registry_has_domain_scoped_slots(
+    dataset_context: DatasetContext,
+) -> None:
+    """Assert every dataset-tested intent produces at least one candidate.
+
+    When an intent with ``requires_context: {domain: X}`` lacks domain-scoped
+    registry keys (e.g. ``name:vacuum``), the grammar loader silently produces
+    0 candidates — a behaviour drift between the benchmark dataset and a real
+    Home Assistant deployment.
+
+    Rather than reverse-engineering which domain-scoped keys are needed, this
+    test directly checks the output: every intent referenced by the dataset
+    must appear in the generated candidate pairs.
+    """
+    tested_intents: set[str] = {case["expected_intent"] for case in dataset_context.cases}
+    intent_candidates: dict[str, list[str]] = {}
+    for intent_name, text in dataset_context.static_candidate_pairs:
+        intent_candidates.setdefault(intent_name, []).append(text)
+
+    zero_candidate: list[str] = sorted(
+        intent for intent in tested_intents if not intent_candidates.get(intent)
+    )
+
+    assert not zero_candidate, (
+        f"{dataset_context.language}: these dataset-tested intents produce 0 candidates "
+        f"(registry may be missing domain-scoped keys): {zero_candidate}"
+    )
+
+
 def test_real_world_extra_words_are_not_exact_candidates(
     dataset_context: DatasetContext,
 ) -> None:

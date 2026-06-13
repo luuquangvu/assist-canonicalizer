@@ -525,23 +525,23 @@ def _apply_intent_disambiguation(
     ranked: list[RankedCandidate],
     tiebreaker_margin: float = TIEBREAKER_INTENT_MARGIN,
 ) -> None:
-    """Re-rank top-2 candidates when scores are close but intents differ.
+    """Re-rank when a different-intent candidate is nearly tied with the top.
 
-    When two candidates with different intents have final scores within
-    ``tiebreaker_margin``, the one with the higher ``intent_score`` is
-    promoted to the top position.  This resolves cases where entity-level
-    overlap dominates but the user's action intent is clear.
+    When the top two candidates belong to different intents and their score
+    gap is less than ``tiebreaker_margin``, the second candidate is promoted
+    to position 0 if it has a higher intent_score.
     """
     if len(ranked) < 2:
         return
-    top, second = ranked[0], ranked[1]
-    if top.candidate.intent_name == second.candidate.intent_name:
+    top = ranked[0]
+    competitor = ranked[1]
+    if competitor.candidate.intent_name == top.candidate.intent_name:
         return
-    margin = top.scores.final_score - second.scores.final_score
+    margin = top.scores.final_score - competitor.scores.final_score
     if margin > tiebreaker_margin:
         return
-    if second.scores.intent_score > top.scores.intent_score:
-        ranked[0], ranked[1] = second, top
+    if competitor.scores.intent_score > top.scores.intent_score:
+        ranked[0], ranked[1] = competitor, top
 
 
 def accepted_candidate(
