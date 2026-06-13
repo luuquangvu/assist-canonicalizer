@@ -77,13 +77,15 @@ class BM25Index:
     def score(self, query: str) -> tuple[float, ...]:
         """Return normalized BM25 scores for every indexed document."""
         query_tokens = tokenize_text(query)
-        if not query_tokens or not self._documents:
-            return tuple(0.0 for _ in self._documents)
+        doc_count = len(self._documents)
+        if not query_tokens or not doc_count:
+            return (0.0,) * doc_count
         raw_scores = self._score_documents(query_tokens)
         max_score = max(raw_scores, default=0.0)
         if max_score <= 0:
-            return tuple(0.0 for _ in raw_scores)
-        return tuple(score / max_score for score in raw_scores)
+            return (0.0,) * doc_count
+        inv_max = 1.0 / max_score
+        return tuple(score * inv_max for score in raw_scores)
 
     def _build_document_frequencies(self) -> dict[str, int]:
         """Build document frequency counts for indexed tokens."""

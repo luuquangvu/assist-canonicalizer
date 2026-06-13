@@ -39,8 +39,9 @@ def normalize_text_no_diacritics(text: str, language: str | None = None) -> str:
             for source, target in LANGUAGE_SPECIFIC_OVERRIDES[lang_code].items():
                 normalized = normalized.replace(source, target)
 
-    for source, target in GENERIC_LATIN_REPLACEMENTS.items():
-        normalized = normalized.replace(source, target)
+    if any(c in normalized for c in GENERIC_LATIN_REPLACEMENTS):
+        for source, target in GENERIC_LATIN_REPLACEMENTS.items():
+            normalized = normalized.replace(source, target)
 
     nfd_form = unicodedata.normalize("NFD", normalized)
     return "".join(c for c in nfd_form if not unicodedata.combining(c))
@@ -59,11 +60,6 @@ def tokenize_normalized(text: str) -> tuple[str, ...]:
     if not text:
         return ()
     return tuple(text.split())
-
-
-def char_ngrams(text: str, size: int = 3) -> frozenset[str]:
-    """Return character n-grams for normalized text."""
-    return char_ngrams_normalized(normalize_text(text), size)
 
 
 def char_ngrams_normalized(text: str, size: int = 3) -> frozenset[str]:

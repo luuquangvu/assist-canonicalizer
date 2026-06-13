@@ -10,7 +10,10 @@ from custom_components.assist_canonicalizer.const import (
     DEFAULT_RAPIDFUZZ_PREFILTER_CANDIDATES,
 )
 from custom_components.assist_canonicalizer.indexer import build_index
-from custom_components.assist_canonicalizer.normalization import char_ngrams, normalize_text
+from custom_components.assist_canonicalizer.normalization import (
+    char_ngrams_normalized,
+    normalize_text,
+)
 from custom_components.assist_canonicalizer.ranking import (
     CharNGramIndex,
     RankedCandidate,
@@ -440,7 +443,12 @@ def test_ranking_helpers_and_validation_errors() -> None:
     assert token_count_ratio("bật", "") == 0.0
 
     # test char_ngram_similarity_from_grams
-    assert char_ngram_similarity_from_grams(char_ngrams("abc"), char_ngrams("abc")) == 1.0
+    assert (
+        char_ngram_similarity_from_grams(
+            char_ngrams_normalized("abc"), char_ngrams_normalized("abc")
+        )
+        == 1.0
+    )
 
     # test char_ngram_similarity_from_grams with empty grams
     assert char_ngram_similarity_from_grams(frozenset(), frozenset({"abc"})) == 0.0
@@ -462,9 +470,6 @@ def test_ranking_helpers_and_validation_errors() -> None:
         ValueError, match="rapidfuzz_prefilter_candidates must be at least max_candidates"
     ):
         rank_candidates("bật đèn", candidates, max_candidates=5, rapidfuzz_prefilter_candidates=2)
-
-    with pytest.raises(ValueError, match="candidate_char_grams length must match candidates"):
-        rank_candidates("bật đèn", candidates, candidate_char_grams=())
 
     with pytest.raises(ValueError, match="candidate_char_index length must match candidates"):
         rank_candidates("bật đèn", candidates, candidate_char_index=CharNGramIndex.from_grams(()))

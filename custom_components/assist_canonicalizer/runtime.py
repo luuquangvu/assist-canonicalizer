@@ -414,13 +414,6 @@ class CanonicalizerRuntime:
             {key: tuple(values) for key, values in self.registry_slot_values.items()},
         )
 
-    def _create_build_snapshot(self, language: str) -> IndexBuildSnapshot:
-        """Load and fingerprint the current inputs for one language."""
-        return _create_build_snapshot(
-            normalize_language(language),
-            *self._capture_build_inputs(),
-        )
-
     def _invalidate_source_dependent_indexes(self, *, clear_sources: bool) -> None:
         """Invalidate indexes whenever candidate-producing inputs change."""
         self.source_generation += 1

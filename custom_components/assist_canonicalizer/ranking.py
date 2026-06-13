@@ -46,6 +46,15 @@ class ScoreBreakdown:
     final_score: float
 
 
+_PERFECT_SCORE = ScoreBreakdown(
+    rapidfuzz_score=1.0,
+    char_ngram_score=1.0,
+    bm25_score=1.0,
+    intent_score=1.0,
+    final_score=1.0,
+)
+
+
 @dataclass(frozen=True, slots=True)
 class RankedCandidate:
     """Candidate paired with ranking scores."""
@@ -142,13 +151,13 @@ def _positional_similarity(a: str, b: str) -> float:
     """Character-level positional similarity — cheap edit-distance proxy."""
     if a == b:
         return 1.0
-    max_len = max(len(a), len(b))
+    len_a = len(a)
+    len_b = len(b)
+    max_len = len_a if len_a > len_b else len_b
     if max_len == 0:
         return 0.0
-    matches = 0
-    for c1, c2 in zip(a, b, strict=False):
-        if c1 == c2:
-            matches += 1
+    min_len = len_a if len_a < len_b else len_b
+    matches = sum(1 for i in range(min_len) if a[i] == b[i])
     return matches / max_len
 
 
@@ -294,9 +303,8 @@ def _non_entity_coverage(
     non_entity = query_tokens - positional_literal_tokens
     if not non_entity:
         return 1.0
-    matched = sum(1 for token in non_entity if token in candidate_tokens)
+    matched = len(non_entity & candidate_tokens)
     coverage = matched / len(non_entity)
-
     return coverage * coverage
 
 
@@ -320,7 +328,6 @@ def rank_candidates(
     *,
     bm25_index: BM25Index | None = None,
     reference_bm25_index: BM25Index | None = None,
-    candidate_char_grams: Sequence[frozenset[str]] | None = None,
     candidate_char_index: CharNGramIndex | None = None,
     positional_literal_tokens: frozenset[str] | None = None,
     rapidfuzz_prefilter_candidates: int = DEFAULT_RAPIDFUZZ_PREFILTER_CANDIDATES,
@@ -335,8 +342,6 @@ def rank_candidates(
         raise ValueError("rapidfuzz_prefilter_candidates must be at least max_candidates")
     if not candidates:
         return ()
-    if candidate_char_grams is not None and len(candidate_char_grams) != len(candidates):
-        raise ValueError("candidate_char_grams length must match candidates")
     if candidate_char_index is not None and len(candidate_char_index.gram_counts) != len(
         candidates
     ):
@@ -349,16 +354,7 @@ def rank_candidates(
         exact_matches = exact_normalized_lookup.get(query_normalized)
         if exact_matches:
             return tuple(
-                RankedCandidate(
-                    candidate=c,
-                    scores=ScoreBreakdown(
-                        rapidfuzz_score=1.0,
-                        char_ngram_score=1.0,
-                        bm25_score=1.0,
-                        intent_score=1.0,
-                        final_score=1.0,
-                    ),
-                )
+                RankedCandidate(candidate=c, scores=_PERFECT_SCORE)
                 for c in exact_matches[:max_candidates]
             )
 
@@ -370,16 +366,7 @@ def rank_candidates(
             unique_intents = {c.intent_name for c in no_diac_matches}
             if len(unique_intents) == 1:
                 return tuple(
-                    RankedCandidate(
-                        candidate=c,
-                        scores=ScoreBreakdown(
-                            rapidfuzz_score=1.0,
-                            char_ngram_score=1.0,
-                            bm25_score=1.0,
-                            intent_score=1.0,
-                            final_score=1.0,
-                        ),
-                    )
+                    RankedCandidate(candidate=c, scores=_PERFECT_SCORE)
                     for c in no_diac_matches[:max_candidates]
                 )
     query_grams = char_ngrams_normalized(query_normalized)
@@ -411,11 +398,9 @@ def rank_candidates(
         char_scores = tuple(
             char_ngram_similarity_from_grams(
                 query_grams,
-                char_ngrams_normalized(candidate.normalized_text)
-                if candidate_char_grams is None
-                else candidate_char_grams[index],
+                char_ngrams_normalized(candidate.normalized_text),
             )
-            for index, candidate in enumerate(candidates)
+            for candidate in candidates
         )
 
     prefilter_keys = [
