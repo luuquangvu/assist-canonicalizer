@@ -484,17 +484,6 @@ class CanonicalizerRuntime:
             }
         )
 
-    async def _async_remove_persisted_language(self, hass: Any, language: str) -> None:
-        """Remove one invalid language store and its manifest entry."""
-        async with self._storage_lock:
-            await _index_store(hass, language).async_remove()
-            manifest = await self._async_load_store_manifest(hass)
-            if manifest is None:
-                return
-            cache_epoch, persisted_languages = manifest
-            persisted_languages.discard(language)
-            await self._async_save_store_manifest(hass, cache_epoch, persisted_languages)
-
     def add_cleanup_callback(self, callback: Callable[[], None]) -> None:
         """Remember a cleanup callback for unload."""
         self.cleanup_callbacks.append(callback)

@@ -31,6 +31,7 @@ class BM25Index:
         self._k1 = k1
         self._k1_plus_1 = k1 + 1
         self._b = b
+        self._one_minus_b = 1.0 - b
         self._term_frequencies = tuple(Counter(document.tokens) for document in self._documents)
         self._document_lengths = tuple(len(document.tokens) for document in self._documents)
         document_frequencies = self._build_document_frequencies()
@@ -40,6 +41,7 @@ class BM25Index:
         self._postings = self._build_postings()
         token_count = sum(self._document_lengths)
         self._average_length = token_count / len(self._documents) if self._documents else 0.0
+        self._b_over_avg_len = self._b / self._average_length if self._average_length > 0 else 0.0
 
     @classmethod
     def from_texts(cls, texts: Sequence[str], k1: float = 1.5, b: float = 0.75) -> BM25Index:
@@ -106,14 +108,18 @@ class BM25Index:
         if self._average_length == 0:
             return tuple(0.0 for _ in self._documents)
         raw_scores = [0.0] * len(self._documents)
+        seen_tokens: set[str] = set()
         for token in query_tokens:
+            if token in seen_tokens:
+                continue
+            seen_tokens.add(token)
             inverse_document_frequency = self._inverse_document_frequencies.get(token)
             if inverse_document_frequency is None:
                 continue
             for document_index, frequency in self._postings[token]:
                 document_length = self._document_lengths[document_index]
                 denominator = frequency + self._k1 * (
-                    1 - self._b + self._b * document_length / self._average_length
+                    self._one_minus_b + self._b_over_avg_len * document_length
                 )
                 numerator = inverse_document_frequency * (frequency * self._k1_plus_1)
                 raw_scores[document_index] += numerator / denominator
@@ -138,7 +144,6 @@ class BM25Index:
         if avg_len == 0:
             return tuple(0.0 for _ in documents)
 
-        # Default IDF value for unseen tokens
         document_count = len(self._documents)
         default_idf = log(1 + (document_count - 0 + 0.5) / (0 + 0.5)) if document_count else 0.0
 
@@ -148,8 +153,16 @@ class BM25Index:
         doc_token_counters = [Counter(tokens) for tokens in tokenized_docs]
         use_k1_plus_1 = use_k1 + 1
 
+        one_minus_b = 1.0 - use_b
+        b_over_avg = use_b / avg_len
+        doc_len_factors = [one_minus_b + b_over_avg * dl for dl in doc_lengths]
+
         raw_scores = [0.0] * len(documents)
+        seen_tokens: set[str] = set()
         for token in query_tokens:
+            if token in seen_tokens:
+                continue
+            seen_tokens.add(token)
             idf = self._inverse_document_frequencies.get(token)
             if idf is None:
                 if not any(token in counter for counter in doc_token_counters):
@@ -159,9 +172,7 @@ class BM25Index:
                 frequency = counter.get(token, 0)
                 if frequency == 0:
                     continue
-                denominator = frequency + use_k1 * (
-                    1 - use_b + use_b * doc_lengths[doc_idx] / avg_len
-                )
+                denominator = frequency + use_k1 * doc_len_factors[doc_idx]
                 numerator = idf * (frequency * use_k1_plus_1)
                 raw_scores[doc_idx] += numerator / denominator
 

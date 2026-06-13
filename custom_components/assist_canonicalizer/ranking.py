@@ -153,6 +153,8 @@ def lexical_score(
 
 def _positional_similarity(a: str, b: str) -> float:
     """Character-level positional similarity — cheap edit-distance proxy."""
+    if a == b:
+        return 1.0
     max_len = max(len(a), len(b))
     if max_len == 0:
         return 0.0
@@ -226,11 +228,11 @@ def _build_positional_lookup(
     for literal_token in literal_tokens_set:
         if literal_token in query_tokens:
             continue
-        matched: set[str] = set()
+        matched: list[str] = []
         for qtok in query_tokens:
             sim = _positional_similarity(literal_token, qtok)
             if sim >= _per_pair_positional_threshold(literal_token, qtok):
-                matched.add(qtok)
+                matched.append(qtok)
                 if sim >= 0.99:
                     break
         if matched:
@@ -452,10 +454,9 @@ def rank_candidates(
                 intent_score_cache[literal_text] = _exact_intent_score(literal_text, query_tokens)
             exact = intent_score_cache[literal_text]
             if exact >= 1.0:
-                all_literal: set[str] = set()
-                for variant in _literal_token_variants(literal_text):
-                    all_literal.update(variant)
-                if len(all_literal) >= 2:
+                variants = _literal_token_variants(literal_text)
+                total_unique = len({tok for var in variants for tok in var})
+                if total_unique >= 2:
                     matched_q = sum(1 for t in query_tokens if t in candidate_tokens)
                     unsq = matched_q / len(query_tokens) if query_tokens else 1.0
                     intent_score = max(coverage, unsq)
@@ -463,7 +464,7 @@ def rank_candidates(
                 intent_score = _positional_intent_score_from_lookup(
                     literal_text, query_tokens, positional_lookup, candidate_tokens
                 )
-            if positional_literal_tokens is not None and candidate_tokens is not None:
+            if positional_literal_tokens:
                 penalty = _non_entity_coverage(
                     query_tokens,
                     positional_literal_tokens,
