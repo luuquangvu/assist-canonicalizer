@@ -113,23 +113,11 @@ def rapidfuzz_similarity_normalized(query: str, candidate: str) -> float:
 
 def token_count_ratio(query: str, candidate: str) -> float:
     """Return a length ratio that penalizes unmatched extra tokens."""
-    query_count = len(query.split())
-    candidate_count = len(candidate.split())
-    if query_count == 0 or candidate_count == 0:
+    if not query or not candidate:
         return 0.0
+    query_count = query.count(" ") + 1
+    candidate_count = candidate.count(" ") + 1
     return min(query_count, candidate_count) / max(query_count, candidate_count)
-
-
-def char_ngram_similarity_from_grams(
-    query_grams: frozenset[str],
-    candidate_grams: frozenset[str],
-) -> float:
-    """Return character n-gram Jaccard similarity from precomputed grams."""
-    if not query_grams or not candidate_grams:
-        return 0.0
-    intersection_size = len(query_grams & candidate_grams)
-    union_size = len(query_grams) + len(candidate_grams) - intersection_size
-    return intersection_size / union_size if union_size else 0.0
 
 
 def lexical_score(
@@ -156,8 +144,10 @@ def _positional_similarity(a: str, b: str) -> float:
     max_len = len_a if len_a > len_b else len_b
     if max_len == 0:
         return 0.0
-    min_len = len_a if len_a < len_b else len_b
-    matches = sum(1 for i in range(min_len) if a[i] == b[i])
+    matches = 0
+    for x, y in zip(a, b, strict=False):
+        if x == y:
+            matches += 1
     return matches / max_len
 
 
@@ -225,18 +215,16 @@ def _build_positional_lookup(
     match, so tokens that differ at position 0 can never reach any
     non-trivial positional similarity threshold.
     """
-    first_char_index: dict[str, set[str]] = {}
+    first_char_index: dict[str, list[str]] = {}
     for qtok in query_tokens:
         if qtok:
-            first_char_index.setdefault(qtok[0], set()).add(qtok)
+            first_char_index.setdefault(qtok[0], []).append(qtok)
 
     lookup: dict[str, frozenset[str]] = {}
     for literal_token in literal_tokens_set:
         if literal_token in query_tokens:
             continue
-        candidate_q_tokens = (
-            first_char_index.get(literal_token[0], set()) if literal_token else set()
-        )
+        candidate_q_tokens = first_char_index.get(literal_token[0], []) if literal_token else []
         if not candidate_q_tokens:
             continue
         matched: list[str] = []
@@ -392,16 +380,11 @@ def rank_candidates(
         bm25_scores = bm25_index.score(query_normalized)
     else:
         bm25_scores = bm25_index.score(query_normalized)
-    if candidate_char_index is not None:
-        char_scores = candidate_char_index.score(query_grams)
-    else:
-        char_scores = tuple(
-            char_ngram_similarity_from_grams(
-                query_grams,
-                char_ngrams_normalized(candidate.normalized_text),
-            )
-            for candidate in candidates
+    if candidate_char_index is None:
+        candidate_char_index = CharNGramIndex.from_grams(
+            tuple(char_ngrams_normalized(candidate.normalized_text) for candidate in candidates)
         )
+    char_scores = candidate_char_index.score(query_grams)
 
     prefilter_keys = [
         -(CHAR_NGRAM_WEIGHT * cs + BM25_WEIGHT * bs)

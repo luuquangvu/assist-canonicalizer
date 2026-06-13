@@ -10,17 +10,13 @@ from custom_components.assist_canonicalizer.const import (
     DEFAULT_RAPIDFUZZ_PREFILTER_CANDIDATES,
 )
 from custom_components.assist_canonicalizer.indexer import build_index
-from custom_components.assist_canonicalizer.normalization import (
-    char_ngrams_normalized,
-    normalize_text,
-)
+from custom_components.assist_canonicalizer.normalization import normalize_text
 from custom_components.assist_canonicalizer.ranking import (
     CharNGramIndex,
     RankedCandidate,
     ScoreBreakdown,
     _query_token_coverage,
     accepted_candidate,
-    char_ngram_similarity_from_grams,
     rank_candidates,
     rapidfuzz_similarity_normalized,
     token_count_ratio,
@@ -441,17 +437,6 @@ def test_ranking_helpers_and_validation_errors() -> None:
     # test token_count_ratio with empty strings
     assert token_count_ratio("", "bật") == 0.0
     assert token_count_ratio("bật", "") == 0.0
-
-    # test char_ngram_similarity_from_grams
-    assert (
-        char_ngram_similarity_from_grams(
-            char_ngrams_normalized("abc"), char_ngrams_normalized("abc")
-        )
-        == 1.0
-    )
-
-    # test char_ngram_similarity_from_grams with empty grams
-    assert char_ngram_similarity_from_grams(frozenset(), frozenset({"abc"})) == 0.0
 
     # test CharNGramIndex with empty grams
     char_index = CharNGramIndex.from_grams(())
