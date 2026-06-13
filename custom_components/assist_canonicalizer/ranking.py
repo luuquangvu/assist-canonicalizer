@@ -19,9 +19,14 @@ from .const import (
     DEFAULT_MIN_MARGIN,
     DEFAULT_RAPIDFUZZ_PREFILTER_CANDIDATES,
     INTENT_ACTION_WEIGHT,
+    NON_ENTITY_PENALTY_BLEND,
+    POSITIONAL_SIMILARITY_BASE_THRESHOLD,
+    POSITIONAL_SIMILARITY_MEDIUM_THRESHOLD,
     POSITIONAL_SIMILARITY_PARTIAL_CREDIT,
-    POSITIONAL_SIMILARITY_THRESHOLD,
+    POSITIONAL_SIMILARITY_SHORT_3_THRESHOLD,
+    POSITIONAL_SIMILARITY_VERY_SHORT_THRESHOLD,
     RAPIDFUZZ_WEIGHT,
+    TIEBREAKER_INTENT_MARGIN,
 )
 from .normalization import (
     char_ngrams,
@@ -181,8 +186,7 @@ def _query_token_coverage(
         return 1.0
     matched = sum(1 for token in query_tokens if token in candidate_tokens)
     coverage = matched / len(query_tokens)
-
-    return coverage**2
+    return coverage * coverage
 
 
 def _exact_intent_score(
@@ -202,6 +206,24 @@ def _exact_intent_score(
     return max_score
 
 
+def _per_pair_positional_threshold(a: str, b: str) -> float:
+    """Return the positional similarity threshold for a pair of tokens.
+
+    Shorter tokens are more susceptible to false-positive matches
+    (e.g. ``tắt`` vs ``tát`` = 2/3 = 0.667) than long tokens where
+    positional overlap is a reliable signal.  The threshold is driven
+    by the shorter token in the pair.
+    """
+    min_len = min(len(a), len(b))
+    if min_len <= 2:
+        return POSITIONAL_SIMILARITY_VERY_SHORT_THRESHOLD
+    if min_len <= 3:
+        return POSITIONAL_SIMILARITY_SHORT_3_THRESHOLD
+    if min_len <= 5:
+        return POSITIONAL_SIMILARITY_MEDIUM_THRESHOLD
+    return POSITIONAL_SIMILARITY_BASE_THRESHOLD
+
+
 def _build_positional_lookup(
     literal_tokens_set: frozenset[str],
     query_tokens: frozenset[str],
@@ -219,7 +241,7 @@ def _build_positional_lookup(
         matched: set[str] = set()
         for qtok in query_tokens:
             sim = _positional_similarity(literal_token, qtok)
-            if sim >= POSITIONAL_SIMILARITY_THRESHOLD:
+            if sim >= _per_pair_positional_threshold(literal_token, qtok):
                 matched.add(qtok)
                 if sim >= 0.99:
                     break
@@ -263,6 +285,27 @@ def _positional_intent_score_from_lookup(
         if score > best_score:
             best_score = score
     return best_score
+
+
+def _non_entity_coverage(
+    query_tokens: frozenset[str],
+    positional_literal_tokens: frozenset[str],
+    candidate_tokens: frozenset[str],
+) -> float:
+    """Return how well a candidate covers query tokens that no entity contains.
+
+    Tokens in the query that do not appear in any candidate's entity slots
+    (``positional_literal_tokens`` represents all known entity/literal tokens)
+    are typically politeness words, filler words, or action synonyms.  A
+    candidate whose tokens cover more of these should be preferred.
+    """
+    non_entity = query_tokens - positional_literal_tokens
+    if not non_entity:
+        return 1.0
+    matched = sum(1 for token in non_entity if token in candidate_tokens)
+    coverage = matched / len(non_entity)
+
+    return coverage * coverage
 
 
 def _intent_action_score_from_literal_text(
@@ -440,18 +483,30 @@ def rank_candidates(
         literal_text = candidate.metadata.get("literal_text")
         candidate_tokens = candidate.normalized_tokens_set
         coverage = _query_token_coverage(query_tokens, candidate_tokens)
+        intent_score = coverage
         if literal_text:
             if literal_text not in intent_score_cache:
                 intent_score_cache[literal_text] = _exact_intent_score(literal_text, query_tokens)
             exact = intent_score_cache[literal_text]
             if exact >= 1.0:
-                intent_score = coverage
+                all_literal: set[str] = set()
+                for variant in _literal_token_variants(literal_text):
+                    all_literal.update(variant)
+                if len(all_literal) >= 2:
+                    matched_q = sum(1 for t in query_tokens if t in candidate_tokens)
+                    unsq = matched_q / len(query_tokens) if query_tokens else 1.0
+                    intent_score = max(coverage, unsq)
             else:
                 intent_score = _positional_intent_score_from_lookup(
                     literal_text, query_tokens, positional_lookup, candidate_tokens
                 )
-        else:
-            intent_score = coverage
+            if positional_literal_tokens is not None and candidate_tokens is not None:
+                penalty = _non_entity_coverage(
+                    query_tokens,
+                    positional_literal_tokens,
+                    candidate_tokens,
+                )
+                intent_score *= 1.0 - NON_ENTITY_PENALTY_BLEND + NON_ENTITY_PENALTY_BLEND * penalty
         combined = lexical_score(rapidfuzz_score, char_score, bm25_score, intent_score)
         scores = ScoreBreakdown(
             rapidfuzz_score=rapidfuzz_score,
@@ -462,7 +517,31 @@ def rank_candidates(
         )
         ranked.append(RankedCandidate(candidate=candidate, scores=scores))
     ranked.sort(key=lambda item: item.scores.final_score, reverse=True)
+    _apply_intent_disambiguation(ranked)
     return tuple(ranked[:max_candidates])
+
+
+def _apply_intent_disambiguation(
+    ranked: list[RankedCandidate],
+    tiebreaker_margin: float = TIEBREAKER_INTENT_MARGIN,
+) -> None:
+    """Re-rank top-2 candidates when scores are close but intents differ.
+
+    When two candidates with different intents have final scores within
+    ``tiebreaker_margin``, the one with the higher ``intent_score`` is
+    promoted to the top position.  This resolves cases where entity-level
+    overlap dominates but the user's action intent is clear.
+    """
+    if len(ranked) < 2:
+        return
+    top, second = ranked[0], ranked[1]
+    if top.candidate.intent_name == second.candidate.intent_name:
+        return
+    margin = top.scores.final_score - second.scores.final_score
+    if margin > tiebreaker_margin:
+        return
+    if second.scores.intent_score > top.scores.intent_score:
+        ranked[0], ranked[1] = second, top
 
 
 def accepted_candidate(
