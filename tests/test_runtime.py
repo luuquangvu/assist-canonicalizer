@@ -602,3 +602,100 @@ def test_canonical_fingerprint_value_sorting() -> None:
     nested_b = {"y": 3, "x": {"b": 2, "a": 1}}
 
     assert _canonical_fingerprint_value(nested_a) == _canonical_fingerprint_value(nested_b)
+
+
+async def test_rank_with_dynamic_candidates_filters_exact_matches() -> None:
+    """Verify that only candidates with score >= 1.0 are returned if an exact match exists."""
+    intent_sources: dict[str, Mapping[str, Any]] = {
+        "built_in": {
+            "intents": {
+                "HassTurnOn": {
+                    "data": [
+                        {
+                            "sentences": ["bật {name}"],
+                            "requires_context": {"domain": "light"},
+                        }
+                    ]
+                }
+            }
+        }
+    }
+    registry_slots = {
+        "name": ("đèn phòng khách", "đèn bếp"),
+        "name:light": ("đèn phòng khách", "đèn bếp"),
+    }
+
+    runtime = CanonicalizerRuntime()
+    runtime.update_registry_slot_values(registry_slots)
+    runtime.language_intent_sources["vi"] = intent_sources
+
+    indexed_candidates = [
+        Candidate(
+            text="bật đèn bếp",
+            intent_name="HassTurnOn",
+            source=CandidateSource.BUILT_IN,
+            language="vi",
+            metadata={"literal_text": "bật"},
+        )
+    ]
+    index = build_index("vi", indexed_candidates)
+
+    ranked = runtime.rank_with_dynamic_candidates("vi", index, "bật đèn bếp")
+
+    assert len(ranked) == 1
+    assert ranked[0].candidate.normalized_text == "bật đèn bếp"
+    assert ranked[0].scores.final_score == 1.0
+
+
+async def test_rank_with_dynamic_candidates_preserves_multiple_exact_matches() -> None:
+    """Verify that multiple exact matches (with different intents) are all preserved."""
+    intent_sources: dict[str, Mapping[str, Any]] = {
+        "built_in": {
+            "intents": {
+                "HassShoppingListAddItem": {
+                    "data": [
+                        {
+                            "sentences": ["đặt {name} vào danh sách mua sắm"],
+                        }
+                    ]
+                },
+                "HassListAddItem": {
+                    "data": [
+                        {
+                            "sentences": ["đặt {name} vào danh sách mua sắm"],
+                        }
+                    ]
+                },
+            }
+        }
+    }
+    registry_slots = {"name": ("sữa",), "name:shopping_list": ("sữa",)}
+
+    runtime = CanonicalizerRuntime()
+    runtime.update_registry_slot_values(registry_slots)
+    runtime.language_intent_sources["vi"] = intent_sources
+
+    indexed_candidates = [
+        Candidate(
+            text="đặt sữa vào danh sách mua sắm",
+            intent_name="HassShoppingListAddItem",
+            source=CandidateSource.BUILT_IN,
+            language="vi",
+            metadata={"literal_text": "đặt|vào|danh|sách|mua|sắm"},
+        ),
+        Candidate(
+            text="đặt sữa vào danh sách mua sắm",
+            intent_name="HassListAddItem",
+            source=CandidateSource.BUILT_IN,
+            language="vi",
+            metadata={"literal_text": "đặt|vào|danh|sách|mua|sắm"},
+        ),
+    ]
+    index = build_index("vi", indexed_candidates)
+
+    ranked = runtime.rank_with_dynamic_candidates("vi", index, "đặt sữa vào danh sách mua sắm")
+
+    assert len(ranked) == 2
+    expected_intents = {"HassShoppingListAddItem", "HassListAddItem"}
+    assert {r.candidate.intent_name for r in ranked} == expected_intents
+    assert all(r.scores.final_score == 1.0 for r in ranked)

@@ -714,10 +714,13 @@ def _merge_ranked_candidates(
     dynamic: tuple[RankedCandidate, ...],
     max_candidates: int,
 ) -> tuple[RankedCandidate, ...]:
-    """Merge ranked candidates while keeping the strongest score per text."""
-    selected: dict[str, RankedCandidate] = {}
+    """Merge ranked candidates while keeping the strongest score per text and intent."""
+    selected: dict[tuple[str, str], RankedCandidate] = {}
     for ranked_candidate in (*primary, *dynamic):
-        key = ranked_candidate.candidate.normalized_text
+        key = (
+            ranked_candidate.candidate.normalized_text,
+            ranked_candidate.candidate.intent_name,
+        )
         existing = selected.get(key)
         if existing is None or _ranked_candidate_sort_key(
             ranked_candidate
@@ -728,6 +731,8 @@ def _merge_ranked_candidates(
         key=_ranked_candidate_sort_key,
         reverse=True,
     )
+    if ranked and ranked[0].scores.final_score >= 1.0:
+        return tuple(item for item in ranked if item.scores.final_score >= 1.0)
     return tuple(ranked[:max_candidates])
 
 
