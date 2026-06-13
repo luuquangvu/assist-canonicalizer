@@ -146,9 +146,9 @@ The ranking engine was benchmarked against the default Home Assistant Hassil int
 | Mode      | Intent/Slot | Mismatch |  Fallback |
 | --------- | ----------: | -------: | --------: |
 | `hassil`  |       31.0% |     8.3% |     60.7% |
-| `lexical` |   **81.7%** | **8.3%** | **10.0%** |
+| `lexical` |   **82.0%** | **7.9%** | **10.2%** |
 
-> Intent/slot accuracy jumped from **31.0% to 81.7%**. The combined error rate (mismatch + fallback) dropped from **69.0% to 18.3%**.
+> Intent/slot accuracy jumped from **31.0% to 82.0%**. The combined error rate (mismatch + fallback) dropped from **69.0% to 18.0%**.
 
 <!-- BENCHMARK_OVERALL_END -->
 
@@ -159,11 +159,11 @@ The ranking engine was benchmarked against the default Home Assistant Hassil int
 | Language | Mode      | Intent/Slot |  Mismatch |  Fallback |
 | -------- | --------- | ----------: | --------: | --------: |
 | EN       | `hassil`  |       30.6% |     13.5% |     55.9% |
-| EN       | `lexical` |   **86.5%** |  **6.3%** |  **7.2%** |
+| EN       | `lexical` |   **87.4%** |  **5.4%** |  **7.2%** |
 | DE       | `hassil`  |       33.3% |     11.5% |     55.2% |
-| DE       | `lexical` |   **88.5%** |  **3.4%** |  **8.0%** |
+| DE       | `lexical` |   **89.7%** |  **2.3%** |  **8.0%** |
 | FR       | `hassil`  |       35.3% |      7.1% |     57.6% |
-| FR       | `lexical` |   **82.4%** |  **2.4%** | **15.3%** |
+| FR       | `lexical` |   **81.2%** |  **2.4%** | **16.5%** |
 | NL       | `hassil`  |       34.3% |      4.8% |     61.0% |
 | NL       | `lexical` |   **73.3%** | **15.2%** | **11.4%** |
 | VI       | `hassil`  |       20.5% |      3.6% |     75.9% |
