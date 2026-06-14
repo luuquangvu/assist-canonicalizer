@@ -161,8 +161,8 @@ DEFAULT_ITERATIONS = 5
 DEFAULT_WARMUP = 1
 DEFAULT_GRANULARITY = "medium"
 DEFAULT_MAX_REGRESSION_PCT = 20.0
-BENCHMARK_DIR = "benchmark"
-BASELINE_DIR = "benchmark/baseline"
+BENCHMARK_DIR = "scratch"
+BASELINE_DIR = "scratch/baseline"
 
 
 PROFILING_TARGETS = ("evaluate", "build_index", "rank", "components", "all")
@@ -513,16 +513,40 @@ class BaselineManager:
         """Initialize with the repository root path."""
         self._baseline_dir: Path = Path(repo_root) / BASELINE_DIR
 
-    def load(self, target: str) -> dict[str, Any] | None:
-        """Load a baseline JSON file for *target*."""
+    def load(self, target: str, *, warn_on_missing: bool = False) -> dict[str, Any] | None:
+        """Load a baseline JSON file for *target*.
+
+        Args:
+            target: Profiling target name (e.g. ``rank``).
+            warn_on_missing: If ``True``, emit a warning to stderr when the
+                baseline file is missing, corrupted, or unreadable (intended
+                for when ``--baseline`` was explicitly passed by the user).
+        """
         path = self._baseline_dir / f"{target}_baseline.json"
         if not path.is_file():
+            if warn_on_missing:
+                print(f"Warning: baseline file not found: {path}", file=sys.stderr)
             return None
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            return data if isinstance(data, dict) else None
-        except (json.JSONDecodeError, OSError):
+            data_str = path.read_text(encoding="utf-8")
+        except OSError:
+            if warn_on_missing:
+                print(f"Warning: cannot read baseline file: {path}", file=sys.stderr)
             return None
+        try:
+            data = json.loads(data_str)
+        except json.JSONDecodeError:
+            if warn_on_missing:
+                print(f"Warning: baseline file is not valid JSON: {path}", file=sys.stderr)
+            return None
+        if not isinstance(data, dict):
+            if warn_on_missing:
+                print(
+                    f"Warning: baseline file content is not a JSON object: {path}",
+                    file=sys.stderr,
+                )
+            return None
+        return data
 
     def save(self, target: str, data: dict[str, Any]) -> None:
         """Save *data* as the new baseline for *target*."""
@@ -536,11 +560,13 @@ class BaselineManager:
         target: str,
         current: dict[str, Any],
         max_regression_pct: float = DEFAULT_MAX_REGRESSION_PCT,
+        *,
+        warn_on_missing: bool = False,
     ) -> list[str]:
         """Compare current metrics against baseline; return regression messages."""
-        baseline = self.load(target)
+        baseline = self.load(target, warn_on_missing=warn_on_missing)
         if baseline is None:
-            return [f"No baseline found for target '{target}'; skipping regression check."]
+            return []
 
         regressions: list[str] = []
 
@@ -683,41 +709,52 @@ class ReportGenerator:
         if phases:
             lines.append("## Phase Timing")
             lines.append("")
-            lines.append(
-                "| Phase | Mean (ms) | Median (ms) | p95 (ms) | p99 (ms) "
-                "| StdDev (ms) | Memory Δ (MB) |"
+            ph_headers = (
+                "Phase",
+                "Mean (ms)",
+                "Median (ms)",
+                "p95 (ms)",
+                "p99 (ms)",
+                "StdDev (ms)",
+                "Memory Δ (MB)",
             )
-            lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
+            ph_rows: list[tuple[str, ...]] = []
             for name, phase_data in phases.items():
                 e = phase_data.get("elapsed", {})
                 m = phase_data.get("memory_delta_mb", {})
-                lines.append(
-                    f"| {name} | "
-                    f"{e.get('mean', 0) * 1000:.2f} | "
-                    f"{e.get('median', 0) * 1000:.2f} | "
-                    f"{e.get('p95', 0) * 1000:.2f} | "
-                    f"{e.get('p99', 0) * 1000:.2f} | "
-                    f"{e.get('stddev', 0) * 1000:.2f} | "
-                    f"{m.get('mean', 0):.2f} |"
+                ph_rows.append(
+                    (
+                        name,
+                        f"{e.get('mean', 0) * 1000:.2f}",
+                        f"{e.get('median', 0) * 1000:.2f}",
+                        f"{e.get('p95', 0) * 1000:.2f}",
+                        f"{e.get('p99', 0) * 1000:.2f}",
+                        f"{e.get('stddev', 0) * 1000:.2f}",
+                        f"{m.get('mean', 0):.2f}",
+                    )
                 )
+            lines.extend(_md_aligned_table(ph_headers, "<>", ph_rows))
             lines.append("")
 
         components = report.get("components", {})
         if components:
             lines.append("## Scoring Component Micro-Profile")
             lines.append("")
-            lines.append("| Component | Mean (μs) | Median (μs) | p95 (μs) | p99 (μs) | CoV% |")
-            lines.append("| --- | ---: | ---: | ---: | ---: | ---: |")
+            cp_headers = ("Component", "Mean (μs)", "Median (μs)", "p95 (μs)", "p99 (μs)", "CoV%")
+            cp_rows: list[tuple[str, ...]] = []
             for name, comp_data in components.items():
                 e = comp_data.get("elapsed", {})
-                lines.append(
-                    f"| {name} | "
-                    f"{e.get('mean', 0) * 1_000_000:.1f} | "
-                    f"{e.get('median', 0) * 1_000_000:.1f} | "
-                    f"{e.get('p95', 0) * 1_000_000:.1f} | "
-                    f"{e.get('p99', 0) * 1_000_000:.1f} | "
-                    f"{e.get('cov_pct', 0):.1f} |"
+                cp_rows.append(
+                    (
+                        name,
+                        f"{e.get('mean', 0) * 1_000_000:.1f}",
+                        f"{e.get('median', 0) * 1_000_000:.1f}",
+                        f"{e.get('p95', 0) * 1_000_000:.1f}",
+                        f"{e.get('p99', 0) * 1_000_000:.1f}",
+                        f"{e.get('cov_pct', 0):.1f}",
+                    )
                 )
+            lines.extend(_md_aligned_table(cp_headers, "<>", cp_rows))
             lines.append("")
 
         regressions = report.get("regressions", [])
@@ -728,6 +765,8 @@ class ReportGenerator:
                 lines.append(f"- {r}")
             lines.append("")
 
+        while lines and lines[-1] == "":
+            lines.pop()
         atomic_write(path, "\n".join(lines) + "\n")
         print(f"Markdown report saved to {Path(path)}")
 
@@ -896,6 +935,8 @@ class ReportGenerator:
         lines.append("PROFILE_OK")
         lines.append("=" * 80)
 
+        while lines and lines[-1] == "":
+            lines.pop()
         atomic_write(path, "\n".join(lines) + "\n")
         print(f"Text report saved to {Path(path)}")
 
@@ -974,25 +1015,91 @@ def _print_phase_table(title: str, phases: dict[str, Any]) -> None:
         print(line)
 
 
+def _md_aligned_table(
+    headers: tuple[str, ...],
+    alignments: str,
+    rows: list[tuple[str, ...]],
+) -> list[str]:
+    """Return Prettier-compatible aligned Markdown table as a list of lines.
+
+    Column widths are computed dynamically from header and data cell lengths,
+    following the :func:`tools.evaluate_metrics._markdown_report` pattern.
+
+    Args:
+        headers: Per-column header strings.
+        alignments: Alignment spec (same convention as
+            :func:`tools.evaluate_metrics.align_table`):
+            ``"<"`` — left-align all; ``">"`` — right-align all;
+            ``"<>"`` — first column left, remainder right.
+        rows: Data rows; each tuple must have the same length as *headers*.
+    """
+    if not headers:
+        return []
+    ncols = len(headers)
+    # Expand alignments to per-column list (same logic as align_table)
+    if len(alignments) == 1:
+        aligns = list(alignments * ncols)
+    else:
+        aligns = list(alignments)
+        if len(aligns) < ncols:
+            aligns.extend([aligns[-1]] * (ncols - len(aligns)))
+        aligns = aligns[:ncols]
+
+    # -- Phase 1: compute max column widths --
+    widths = [len(h) for h in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(cell))
+    widths = [max(w, 3) for w in widths]  # guarantee at least 3 dashes for separators
+
+    # -- Phase 2: render --
+    lines: list[str] = []
+
+    # Header row
+    hdr_parts = [f" {h:{a}{w}} " for h, a, w in zip(headers, aligns, widths, strict=True)]
+    lines.append("|" + "|".join(hdr_parts) + "|")
+
+    # Separator row
+    sep_parts: list[str] = []
+    for i, w in enumerate(widths):
+        dashes = w - 1  # colon occupies 1 char
+        if aligns[i] == ">":
+            sep_parts.append(" " + "-" * dashes + ": ")
+        else:
+            sep_parts.append(" :" + "-" * dashes + " ")
+    lines.append("|" + "|".join(sep_parts) + "|")
+
+    # Data rows
+    for row in rows:
+        parts = [f" {c:{a}{w}} " for c, a, w in zip(row, aligns, widths, strict=True)]
+        lines.append("|" + "|".join(parts) + "|")
+
+    return lines
+
+
 def _md_stat_table(title: str, stats: dict[str, Any]) -> list[str]:
-    """Build a Markdown statistical table section."""
-    lines: list[str] = [title, ""]
-    lines.append("| Metric | Mean | Median | p95 | p99 | StdDev | Min | Max | CoV% |")
-    lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+    """Build a Markdown statistical table section with dynamic column alignment."""
+    headers = ("Metric", "Mean", "Median", "p95", "p99", "StdDev", "Min", "Max", "CoV%")
+    rows: list[tuple[str, ...]] = []
     for name, s in stats.items():
         if isinstance(s, dict):
-            lines.append(
-                f"| {name} | "
-                f"{s.get('mean', 0):.4f} | "
-                f"{s.get('median', 0):.4f} | "
-                f"{s.get('p95', 0):.4f} | "
-                f"{s.get('p99', 0):.4f} | "
-                f"{s.get('stddev', 0):.4f} | "
-                f"{s.get('min', 0):.4f} | "
-                f"{s.get('max', 0):.4f} | "
-                f"{s.get('cov_pct', 0):.1f} |"
+            rows.append(
+                (
+                    name,
+                    f"{s.get('mean', 0):.4f}",
+                    f"{s.get('median', 0):.4f}",
+                    f"{s.get('p95', 0):.4f}",
+                    f"{s.get('p99', 0):.4f}",
+                    f"{s.get('stddev', 0):.4f}",
+                    f"{s.get('min', 0):.4f}",
+                    f"{s.get('max', 0):.4f}",
+                    f"{s.get('cov_pct', 0):.1f}",
+                )
             )
-    lines.append("")
+    lines: list[str] = [title, ""]
+    if rows:
+        lines.extend(_md_aligned_table(headers, "<>", rows))
+        lines.append("")
     return lines
 
 
@@ -1630,6 +1737,8 @@ def _build_report(
     target_result: dict[str, Any],
     baseline: BaselineManager,
     max_regression_pct: float,
+    *,
+    warn_on_missing: bool = False,
 ) -> dict[str, Any]:
     """Assemble the full profiling report.
 
@@ -1644,6 +1753,8 @@ def _build_report(
         target_result: Per-target result dictionary from the profiler.
         baseline: Baseline manager instance.
         max_regression_pct: Maximum regression threshold percentage.
+        warn_on_missing: If ``True``, emit stderr warnings when the baseline
+            file is missing, corrupted, or unreadable.
 
     Returns:
         Complete report dictionary.
@@ -1688,7 +1799,9 @@ def _build_report(
     report["resource"] = {**cpu_metrics, **mem_metrics}
 
     # Baseline regression
-    regressions = baseline.compare(target, report, max_regression_pct)
+    regressions = baseline.compare(
+        target, report, max_regression_pct, warn_on_missing=warn_on_missing
+    )
     report["regressions"] = regressions
 
     # Stability assessment (phase_stats is now a dict of dicts, not StatsResult)
@@ -1725,6 +1838,8 @@ def _run_profiling(
     output_txt: str | None,
     save_baseline: bool,
     languages: list[str] | None,
+    *,
+    warn_on_missing: bool = False,
 ) -> dict[str, Any]:
     """Coordinate the profiling run for one target.
 
@@ -1741,6 +1856,8 @@ def _run_profiling(
         output_txt: Optional plain text output path.
         save_baseline: Whether to save results as new baseline.
         languages: Optional language code filter list.
+        warn_on_missing: If ``True``, emit stderr warnings when the baseline
+            file is missing, corrupted, or unreadable.
 
     Returns:
         The assembled report dictionary.
@@ -1775,7 +1892,8 @@ def _run_profiling(
         elif target == "components":
             # Components profiling doesn't use granularity (always fine)
             target_result = _profile_components(datasets, iterations, warmup, timer, monitor)
-            target_result["components"] = target_result  # Flatten for reporting
+            # Wrap so _build_report can extract via target_result.get("components", {})
+            target_result = {"components": target_result}
         else:
             print(f"Unknown target: {target}", file=sys.stderr)
             return {}
@@ -1796,6 +1914,7 @@ def _run_profiling(
         target_result,
         baseline,
         max_regression_pct,
+        warn_on_missing=warn_on_missing,
     )
 
     # Output
@@ -1939,6 +2058,9 @@ def main() -> None:
     # Initialize baseline manager
     baseline_mgr = BaselineManager(_REPO_ROOT)
 
+    # Determine whether user explicitly requested baseline regression
+    _explicit_baseline: bool = bool(args.baseline)
+
     # If --baseline specified, load from that path instead
     if args.baseline:
         safe_baseline = sanitize_path_required(_REPO_ROOT, "baseline", args.baseline)
@@ -1983,6 +2105,7 @@ def main() -> None:
                     out_txt,
                     args.save_baseline,
                     args.languages,
+                    warn_on_missing=_explicit_baseline,
                 )
                 all_reports[tgt] = report
 
@@ -2010,6 +2133,7 @@ def main() -> None:
                 safe_output_txt,
                 args.save_baseline,
                 args.languages,
+                warn_on_missing=_explicit_baseline,
             )
 
         # Optional cProfile run
