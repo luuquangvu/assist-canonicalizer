@@ -606,7 +606,7 @@ def _record_case_result(
     expected_canonical: str,
     expected_intent: str,
     expected_slots: Mapping[str, Any],
-    latency_ms: float | None = 0.0,
+    latency_ms: float | None = None,
 ) -> tuple[bool, str, dict[str, Any]]:
     """Record one evaluated case and return whether it matched completely."""
     stats.total += 1
