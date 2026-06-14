@@ -1954,6 +1954,18 @@ def main() -> None:
         print(f"Error: Invalid target {args.target}", file=sys.stderr)
         sys.exit(1)
 
+    # Reconstruct character by character via integer-index lookup to
+    # sever the path-injection taint chain
+    target_allowed = "abcdefghijklmnopqrstuvwxyz_"
+    safe_target_chars = []
+    for char in args.target:
+        idx = target_allowed.find(char)
+        if idx == -1:
+            print(f"Error: Target contains invalid character {char!r}", file=sys.stderr)
+            sys.exit(1)
+        safe_target_chars.append(target_allowed[idx])
+    safe_target = "".join(safe_target_chars)
+
     if args.iterations < 1:
         print("Error: --iterations must be positive", file=sys.stderr)
         sys.exit(1)
@@ -1993,7 +2005,7 @@ def main() -> None:
     print("PROFILE_START", flush=True)
 
     try:
-        if args.target == "all":
+        if safe_target == "all":
             # Run all targets sequentially, aggregate results
             all_reports: dict[str, Any] = {}
             for tgt in ("build_index", "rank", "components", "evaluate"):
@@ -2043,7 +2055,7 @@ def main() -> None:
             print(f"\nAggregate all-targets report saved to {agg_path}")
         else:
             _run_profiling(
-                args.target,
+                safe_target,
                 datasets,
                 args.iterations,
                 args.warmup,
