@@ -56,7 +56,14 @@ def _render_md_table(
             widths[i] = max(widths[i], len(cell))
 
     # Expand alignment specifier
-    aligns = [alignments] * ncols if len(alignments) == 1 else list(alignments)[:ncols]
+    if len(alignments) == 1:
+        aligns = [alignments] * ncols
+    else:
+        aligns = list(alignments)
+        if len(aligns) < ncols:
+            # Pad with last alignment character to match column count
+            aligns.extend([aligns[-1]] * (ncols - len(aligns)))
+        aligns = aligns[:ncols]
 
     def _fmt(row: tuple[str, ...]) -> str:
         parts = [f" {c:{a}{w}} " for c, a, w in zip(row, aligns, widths, strict=True)]
@@ -203,7 +210,7 @@ def _generate_overall_section(report: dict[str, Any], is_vi: bool) -> str:
             f"dropped from **{hass_err:.1f}% to {lex_err:.1f}%**."
         )
 
-    table = _render_md_table(headers, data_rows, alignments="<>>>")
+    table = _render_md_table(headers, data_rows, alignments="<>")
     return f"\n\n{table}\n\n{summary_sentence}\n\n"
 
 
@@ -261,7 +268,7 @@ def _generate_langs_section(report: dict[str, Any], is_vi: bool) -> str:
             )
         )
 
-    table = _render_md_table(headers, data_rows, alignments="<<>>>")
+    table = _render_md_table(headers, data_rows, alignments="<<>")
     return "\n\n" + table + "\n\n"
 
 

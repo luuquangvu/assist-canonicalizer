@@ -1241,8 +1241,14 @@ def align_table(
             widths[i] = max(widths[i], len(cell))
     widths = [w + padding for w in widths]
 
-    aligns = list(alignments * ncols) if len(alignments) == 1 else list(alignments)
-    aligns = aligns[:ncols]
+    if len(alignments) == 1:
+        aligns = list(alignments * ncols)
+    else:
+        aligns = list(alignments)
+        if len(aligns) < ncols:
+            # Pad with last alignment character to match column count
+            aligns.extend([aligns[-1]] * (ncols - len(aligns)))
+        aligns = aligns[:ncols]
 
     hdr_parts = [f"{h:{a}{w}}" for h, a, w in zip(headers, aligns, widths, strict=True)]
     header_line = sep.join(hdr_parts)

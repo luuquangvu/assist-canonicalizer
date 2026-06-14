@@ -785,7 +785,7 @@ class ReportGenerator:
                         )
                     )
             if _rows_agg:
-                hdr, sep, data = align_table(_headers_agg, _rows_agg, alignments="<>>>>>>>")
+                hdr, sep, data = align_table(_headers_agg, _rows_agg, alignments="<>")
                 lines.append("\nAggregate Performance:")
                 lines.append(hdr)
                 lines.append(sep)
@@ -810,7 +810,7 @@ class ReportGenerator:
                     )
                 )
             if _rows_ph:
-                hdr, sep, data = align_table(_headers_ph, _rows_ph, alignments="<>>>>>>")
+                hdr, sep, data = align_table(_headers_ph, _rows_ph, alignments="<>")
                 lines.extend(["", "Phase Timing Breakdown:", hdr, sep, *data])
 
         # -- Components ------------------------------------------------------
@@ -831,7 +831,7 @@ class ReportGenerator:
                     )
                 )
             if _rows_cp:
-                hdr, sep, data = align_table(_headers_cp, _rows_cp, alignments="<>>>>>")
+                hdr, sep, data = align_table(_headers_cp, _rows_cp, alignments="<>")
                 lines.extend(["", "Scoring Component Micro-Profile:", hdr, sep, *data])
 
         # -- Per-language ----------------------------------------------------
@@ -858,7 +858,7 @@ class ReportGenerator:
                             )
                         )
                 if _la_rows:
-                    hdr, sep, data = align_table(_headers_agg, _la_rows, alignments="<>>>>>>>")
+                    hdr, sep, data = align_table(_headers_agg, _la_rows, alignments="<>")
                     lines.extend(["  Aggregate:", "  " + hdr, "  " + sep])
                     lines.extend("  " + d for d in data)
 
@@ -880,7 +880,7 @@ class ReportGenerator:
                         )
                     )
                 if _lp_rows:
-                    hdr, sep, data = align_table(_headers_ph, _lp_rows, alignments="<>>>>>>")
+                    hdr, sep, data = align_table(_headers_ph, _lp_rows, alignments="<>")
                     lines.extend(["  Phase Timing:", "  " + hdr, "  " + sep])
                     lines.extend("  " + d for d in data)
 
@@ -932,7 +932,7 @@ def _print_stat_block(title: str, stats: dict[str, Any]) -> None:
                 )
             )
 
-    hdr, sep, data = align_table(_headers, _rows, alignments="<>>>>>>>")
+    hdr, sep, data = align_table(_headers, _rows, alignments="<>")
     print(hdr)
     print(sep)
     for line in data:
@@ -967,7 +967,7 @@ def _print_phase_table(title: str, phases: dict[str, Any]) -> None:
             )
         )
 
-    hdr, sep, data = align_table(_headers, _rows, alignments="<>>>>>>")
+    hdr, sep, data = align_table(_headers, _rows, alignments="<>")
     print(hdr)
     print(sep)
     for line in data:
