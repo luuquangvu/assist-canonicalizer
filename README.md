@@ -144,7 +144,7 @@ The ranking engine was benchmarked against the default Home Assistant Hassil int
 <!-- BENCHMARK_OVERALL_START -->
 
 | Mode      | Intent/Slot | Mismatch | Fallback |
-| --------- | ----------: | -------: | -------: |
+| :-------- | ----------: | -------: | -------: |
 | `hassil`  |       31.0% |     8.3% |    60.7% |
 | `lexical` |   **83.7%** | **8.9%** | **7.4%** |
 
@@ -157,7 +157,7 @@ The ranking engine was benchmarked against the default Home Assistant Hassil int
 <!-- BENCHMARK_LANGS_START -->
 
 | Language | Mode      | Intent/Slot |  Mismatch |  Fallback |
-| -------- | --------- | ----------: | --------: | --------: |
+| :------- | :-------- | ----------: | --------: | --------: |
 | EN       | `hassil`  |       30.6% |     13.5% |     55.9% |
 | EN       | `lexical` |   **88.3%** |  **6.3%** |  **5.4%** |
 | DE       | `hassil`  |       33.3% |     11.5% |     55.2% |
