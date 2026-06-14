@@ -2066,12 +2066,10 @@ def main() -> None:
     # Determine whether user explicitly requested baseline regression
     _explicit_baseline: bool = bool(args.baseline)
 
-    # If --baseline specified, load from that path instead
+    # If --baseline specified, point the manager's directory directly at that path.
     if args.baseline:
         safe_baseline = sanitize_path_required(_REPO_ROOT, "baseline", args.baseline)
-        baseline_mgr = BaselineManager(
-            str(Path(safe_baseline).parent.parent) if BASELINE_DIR in safe_baseline else _REPO_ROOT
-        )
+        baseline_mgr._baseline_dir = Path(safe_baseline)
 
     print("PROFILE_START", flush=True)
 
