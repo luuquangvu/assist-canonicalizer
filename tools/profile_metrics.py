@@ -1997,10 +1997,13 @@ def main() -> None:
     # Determine whether user explicitly requested baseline regression
     _explicit_baseline: bool = bool(args.baseline)
 
-    # If --baseline specified, point the manager's directory directly at that path.
+    # If --baseline specified, accept either a baseline directory or a baseline JSON file.
     if args.baseline:
         safe_baseline = sanitize_path_required(_REPO_ROOT, "baseline", args.baseline)
-        baseline_mgr._baseline_dir = Path(safe_baseline)
+        baseline_path = Path(safe_baseline)
+        baseline_mgr._baseline_dir = (
+            baseline_path.parent if baseline_path.suffix == ".json" else baseline_path
+        )
 
     print("PROFILE_START", flush=True)
 
