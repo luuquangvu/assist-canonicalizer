@@ -84,38 +84,44 @@ class CharNGramIndex:
 
     def score(self, query_grams: frozenset[str]) -> list[float]:
         """Return exact normalized Jaccard scores for all indexed candidates."""
+        _nothing: tuple[int, ...] = ()
         if not query_grams:
             return [0.0] * len(self.gram_counts)
         intersections = [0] * len(self.gram_counts)
+        _postings = self.postings
+        _postings_get = _postings.get
         for gram in query_grams:
-            for index in self.postings.get(gram, ()):
+            for index in _postings_get(gram, _nothing):
                 intersections[index] += 1
         query_count = len(query_grams)
+        _gram_counts = self.gram_counts
         scores = [0.0] * len(self.gram_counts)
         for index, intersection_size in enumerate(intersections):
             if intersection_size == 0:
                 continue
-            union_size = query_count + self.gram_counts[index] - intersection_size
+            union_size = query_count + _gram_counts[index] - intersection_size
             scores[index] = intersection_size / union_size if union_size else 0.0
         return scores
 
 
-def rapidfuzz_similarity_normalized(query: str, candidate: str) -> float:
+def rapidfuzz_similarity_normalized(
+    query: str, candidate: str, *, query_token_count: int | None = None
+) -> float:
     """Return a RapidFuzz score that penalizes unmatched extra tokens."""
     if not query or not candidate:
         return 0.0
     wratio = float(fuzz.WRatio(query, candidate))
     token_sort = float(fuzz.token_sort_ratio(query, candidate))
     token_set = float(fuzz.token_set_ratio(query, candidate))
-    token_set *= token_count_ratio(query, candidate)
+    token_set *= token_count_ratio(query, candidate, query_token_count=query_token_count)
     return (wratio + token_sort + token_set) / 300.0
 
 
-def token_count_ratio(query: str, candidate: str) -> float:
+def token_count_ratio(query: str, candidate: str, *, query_token_count: int | None = None) -> float:
     """Return a length ratio that penalizes unmatched extra tokens."""
     if not query or not candidate:
         return 0.0
-    query_count = query.count(" ") + 1
+    query_count = query_token_count if query_token_count is not None else query.count(" ") + 1
     candidate_count = candidate.count(" ") + 1
     return min(query_count, candidate_count) / max(query_count, candidate_count)
 
@@ -285,6 +291,8 @@ def _non_entity_coverage(
     query_tokens: frozenset[str],
     positional_literal_tokens: frozenset[str],
     candidate_tokens: frozenset[str],
+    *,
+    non_entity: frozenset[str] | None = None,
 ) -> float:
     """Return how well a candidate covers query tokens that no entity contains.
 
@@ -293,7 +301,8 @@ def _non_entity_coverage(
     are typically politeness words, filler words, or action synonyms.  A
     candidate whose tokens cover more of these should be preferred.
     """
-    non_entity = query_tokens - positional_literal_tokens
+    if non_entity is None:
+        non_entity = query_tokens - positional_literal_tokens
     if not non_entity:
         return 1.0
     matched = len(non_entity & candidate_tokens)
@@ -351,6 +360,7 @@ def rank_candidates(
                 )
     query_tokens = frozenset(query_normalized.split())
     query_tokens_tuple = tuple(query_normalized.split())
+    query_token_count = len(query_tokens_tuple)
     intent_score_cache: dict[str, float] = {}
     if positional_literal_tokens is None:
         all_tokens: set[str] = set()
@@ -360,6 +370,10 @@ def rank_candidates(
                 for variant in literal_token_variants(literal_text):
                     all_tokens.update(variant)
         positional_literal_tokens = frozenset(all_tokens)
+    non_entity_tokens: frozenset[str] | None = None
+    if positional_literal_tokens:
+        non_entity_scratch = query_tokens - positional_literal_tokens
+        non_entity_tokens = non_entity_scratch if non_entity_scratch else None
 
     if reference_bm25_index is not None:
         bm25_scores = reference_bm25_index.score_custom_documents_tokens(
@@ -404,7 +418,9 @@ def rank_candidates(
         bm25_score = bm25_scores[idx]
         char_score = char_scores[idx]
         rapidfuzz_score = rapidfuzz_similarity_normalized(
-            query_normalized, candidate.normalized_text
+            query_normalized,
+            candidate.normalized_text,
+            query_token_count=query_token_count,
         )
         literal_text = candidate.metadata.get("literal_text")
         candidate_tokens = candidate.normalized_tokens_set
@@ -430,6 +446,7 @@ def rank_candidates(
                     query_tokens,
                     positional_literal_tokens,
                     candidate_tokens,
+                    non_entity=non_entity_tokens,
                 )
                 intent_score *= 1.0 - NON_ENTITY_PENALTY_BLEND + NON_ENTITY_PENALTY_BLEND * penalty
         combined = lexical_score(rapidfuzz_score, char_score, bm25_score, intent_score)

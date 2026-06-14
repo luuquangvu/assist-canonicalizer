@@ -181,7 +181,7 @@ def test_rank_candidates_prefilters_rapidfuzz_work(monkeypatch) -> None:
     ]
     calls = 0
 
-    def fake_rapidfuzz_similarity(query: str, candidate: str) -> float:
+    def fake_rapidfuzz_similarity(query: str, candidate: str, **kwargs: object) -> float:
         """Count expensive RapidFuzz calls."""
         nonlocal calls
         calls += 1

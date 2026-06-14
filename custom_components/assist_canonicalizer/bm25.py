@@ -186,9 +186,9 @@ class BM25Index:
 
         doc_token_counters: list[Counter[str]] = []
         doc_len_factors: list[float] = []
-        all_doc_tokens: set[str] = set()
+        temp_postings: dict[str, list[tuple[int, float]]] = {}
 
-        for doc in documents:
+        for doc_idx, doc in enumerate(documents):
             text: str
             tokens: tuple[str, ...] | None
             if isinstance(doc, str):
@@ -210,8 +210,12 @@ class BM25Index:
                 tokens, counter, length = cached
 
             doc_token_counters.append(counter)
-            doc_len_factors.append(use_k1 * (one_minus_b + b_over_avg * length))
-            all_doc_tokens.update(counter.keys())
+            len_factor = use_k1 * (one_minus_b + b_over_avg * length)
+            doc_len_factors.append(len_factor)
+            for token, frequency in counter.items():
+                temp_postings.setdefault(token, []).append(
+                    (doc_idx, frequency / (frequency + len_factor))
+                )
 
         raw_scores = [0.0] * len(documents)
         seen_tokens: set[str] = set()
@@ -219,19 +223,15 @@ class BM25Index:
             if token in seen_tokens:
                 continue
             seen_tokens.add(token)
+            postings = temp_postings.get(token)
+            if postings is None:
+                continue
             idf = self._inverse_document_frequencies.get(token)
             if idf is None:
-                if token not in all_doc_tokens:
-                    continue
                 idf = default_idf
-
             idf_k1_plus_1 = idf * use_k1_plus_1
-            for doc_idx, counter in enumerate(doc_token_counters):
-                frequency = counter.get(token, 0)
-                if frequency == 0:
-                    continue
-                denominator = frequency + doc_len_factors[doc_idx]
-                raw_scores[doc_idx] += (idf_k1_plus_1 * frequency) / denominator
+            for doc_idx, precomputed in postings:
+                raw_scores[doc_idx] += idf_k1_plus_1 * precomputed
 
         max_score = max(raw_scores, default=0.0)
         if max_score <= 0:
