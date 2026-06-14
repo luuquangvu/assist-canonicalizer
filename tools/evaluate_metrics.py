@@ -994,12 +994,185 @@ def _write_markdown_report(path: str, report: Mapping[str, Any]) -> None:
     tmp_path.replace(output_path)
 
 
+def _text_report(report: Mapping[str, Any]) -> str:
+    """Return a plain-text report matching the full console output."""
+    lines: list[str] = []
+    lines.append("=" * 120)
+    lines.append("ASSIST CANONICALIZER PERFORMANCE EVALUATION REPORT")
+    lines.append("=" * 120)
+    lines.append(f"Dataset Directory: {report.get('datasets_dir', 'tests/real_world')}/")
+    lines.append(f"Total Languages: {report.get('total_languages', 0)}")
+    lines.append(f"Failure Detail Limit: {report.get('failure_limit', 0)}")
+    lines.append("=" * 120)
+
+    for lang, payload in sorted(report.get("languages", {}).items()):
+        coverage = payload.get("coverage", {})
+        lines.append(f"\nLanguage: {lang.upper()} ({coverage.get('case_count', 0)} cases)")
+        lines.append(
+            f"Coverage: "
+            f"builtin_intents={len(coverage.get('builtin_intents', []))} | "
+            f"candidate_intents={len(coverage.get('candidate_intents', []))} | "
+            f"dataset_intents={len(coverage.get('dataset_intents', []))} | "
+            f"candidates={coverage.get('candidate_count', 0)} | "
+            f"build_latency={coverage.get('build_latency_ms', 0):.1f}ms"
+        )
+        _miss = coverage.get("missing_candidate_intents", [])
+        if _miss:
+            lines.append(f"Missing candidate intents: {len(_miss)} ({_short_names(list(_miss))})")
+        _untested = coverage.get("untested_candidate_intents", [])
+        if _untested:
+            lines.append(
+                f"Untested candidate intents: {len(_untested)} ({_short_names(list(_untested))})"
+            )
+        _missing_ds = coverage.get("dataset_intents_without_candidates", [])
+        if _missing_ds:
+            lines.append(
+                f"Dataset intents without candidates: "
+                f"{len(_missing_ds)} ({_short_names(list(_missing_ds))})"
+            )
+        lines.append(f"\nProcessing {lang.upper()} ...")
+
+        # Summary table
+        _summary_lines = _text_summary_table(f"Summary: {lang.upper()}", payload.get("summary", {}))
+        lines.extend(_summary_lines)
+
+        # Ablation table
+        if payload.get("ablations"):
+            _abl_lines = _text_ablation_table(
+                f"Ablation Top-1: {lang.upper()}", payload.get("ablations", {})
+            )
+            lines.extend(_abl_lines)
+
+        # Failure details
+        _failure_limit = report.get("failure_limit", 0)
+        _failures = payload.get("failures", [])
+        if _failure_limit > 0 and _failures:
+            _cnt = min(len(_failures), _failure_limit)
+            lines.append(f"\nFailure details (first {_cnt} of {len(_failures)}):")
+            for item in _failures[:_failure_limit]:
+                _fs = item.get("final_score")
+                _fs_str = "none" if _fs is None else f"{_fs:.3f}"
+                lines.append(
+                    f"- [{item.get('mode', '')}][{item.get('category', '')}] "
+                    f"{item.get('query', '')!r} "
+                    f"reason={item.get('reason', '')} final={_fs_str}"
+                )
+                lines.append(
+                    f"  expected={item.get('expected', '')!r} "
+                    f"({item.get('expected_intent', '')}, slots={item.get('expected_slots', {})})"
+                )
+                lines.append(
+                    f"  actual={item.get('actual', '')!r} "
+                    f"({item.get('actual_intent', '')}, slots={item.get('actual_slots', {})})"
+                )
+
+    # Global summary
+    overall = report.get("overall", {})
+    _global_summary = _text_summary_table("Summary: ALL LANGUAGES", overall.get("summary", {}))
+    lines.extend(_global_summary)
+    _global_ablation = _text_ablation_table(
+        "Ablation Top-1: ALL LANGUAGES", overall.get("ablations", {})
+    )
+    lines.extend(_global_ablation)
+
+    threshold_failures = overall.get("threshold_failures", [])
+    if threshold_failures:
+        lines.append("\nThreshold failures:")
+        for failure in threshold_failures:
+            lines.append(f"- {failure}")
+
+    lines.append("\nEvaluation Complete.")
+    return "\n".join(lines) + "\n"
+
+
+def _text_summary_table(title: str, payload: Mapping[str, Any]) -> list[str]:
+    """Return text lines for a summary table from serialized payload data."""
+    lines: list[str] = []
+    lines.append(f"\n{title}")
+    lines.append("-" * 166)
+    lines.append(
+        f"{'Category':<24} | {'Total':<5} | "
+        f"{'Hass Acc':<17} | {'Lex Acc':<17} | "
+        f"{'Hass Mis':<17} | {'Lex Mis':<17} | "
+        f"{'Hass Fall':<17} | {'Lex Fall':<17} | "
+        f"{'Lex ms':<8}"
+    )
+    lines.append("-" * 166)
+
+    hassil_data = payload.get("hassil", {})
+    lex_data = payload.get("lexical", {})
+    categories = sorted(
+        set(hassil_data.get("categories", {}).keys()) | set(lex_data.get("categories", {}).keys())
+    )
+    for cat in categories:
+        hass_cat = hassil_data.get("categories", {}).get(cat, {})
+        lex_cat = lex_data.get("categories", {}).get(cat, {})
+        lex_total = lex_cat.get("total", 0)
+        hass_acc = f"{hass_cat.get('intent_slot_accuracy', 0):.1f}%"
+        lex_acc = f"{lex_cat.get('intent_slot_accuracy', 0):.1f}%"
+        hass_mis = f"{hass_cat.get('mismatch_rate', 0):.1f}%"
+        lex_mis = f"{lex_cat.get('mismatch_rate', 0):.1f}%"
+        hass_fall = f"{hass_cat.get('fallback_rate', 0):.1f}%"
+        lex_fall = f"{lex_cat.get('fallback_rate', 0):.1f}%"
+        lex_ms = f"{lex_cat.get('average_latency_ms', 0):.1f}"
+        lines.append(
+            f"{cat:<24} | {lex_total:<5} | "
+            f"{hass_acc:<17} | {lex_acc:<17} | "
+            f"{hass_mis:<17} | {lex_mis:<17} | "
+            f"{hass_fall:<17} | {lex_fall:<17} | "
+            f"{lex_ms:<8}"
+        )
+
+    hass_overall = hassil_data.get("overall", {})
+    lex_overall = lex_data.get("overall", {})
+    lex_total = lex_overall.get("total", 0)
+    lines.append("-" * 166)
+    lines.append(
+        f"{'Overall':<24} | {lex_total:<5} | "
+        f"{hass_overall.get('intent_slot_accuracy', 0):.1f}%{'':<11} | "
+        f"{lex_overall.get('intent_slot_accuracy', 0):.1f}%{'':<11} | "
+        f"{hass_overall.get('mismatch_rate', 0):.1f}%{'':<11} | "
+        f"{lex_overall.get('mismatch_rate', 0):.1f}%{'':<11} | "
+        f"{hass_overall.get('fallback_rate', 0):.1f}%{'':<11} | "
+        f"{lex_overall.get('fallback_rate', 0):.1f}%{'':<11} | "
+        f"{lex_overall.get('average_latency_ms', 0):<8.1f}"
+    )
+    lines.append("-" * 166)
+    return lines
+
+
+def _text_ablation_table(title: str, payload: Mapping[str, Any]) -> list[str]:
+    """Return text lines for an ablation table from serialized payload data."""
+    lines: list[str] = []
+    lines.append(f"\n{title}")
+    lines.append("-" * 96)
+    lines.append(
+        f"{'Component':<16} | {'Total':<5} | {'Canonical':<16} | "
+        f"{'Intent/Slot':<19} | {'Fallback':<14}"
+    )
+    lines.append("-" * 96)
+    for comp in ABLATION_COMPONENTS:
+        comp_data = payload.get(comp, {})
+        overall = comp_data.get("overall", {})
+        total = overall.get("total", 0)
+        if total == 0:
+            continue
+        canonical = f"{overall.get('canonical_accuracy', 0):.1f}%"
+        intent_slot = f"{overall.get('intent_slot_accuracy', 0):.1f}%"
+        fallback = f"{overall.get('fallback_rate', 0):.1f}%"
+        lines.append(
+            f"{comp:<16} | {total:<5} | {canonical:<16} | {intent_slot:<19} | {fallback:<14}"
+        )
+    lines.append("-" * 96)
+    return lines
+
+
 def _write_text_report(path: str, report: Mapping[str, Any]) -> None:
     """Write the evaluation report as plain text using an atomic replacement."""
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
-    tmp_path.write_text(_markdown_report(report), encoding="utf-8")
+    tmp_path.write_text(_text_report(report), encoding="utf-8")
     tmp_path.replace(output_path)
 
 
@@ -1078,6 +1251,9 @@ async def run_evaluation(
     all_case_rows: list[dict[str, Any]] = []
     report: dict[str, Any] = {
         "languages": {},
+        "datasets_dir": datasets_dir,
+        "total_languages": len(datasets),
+        "failure_limit": failure_limit,
     }
 
     for lang, path in sorted(datasets.items()):
@@ -1105,13 +1281,14 @@ async def run_evaluation(
         build_latency_ms = (time.perf_counter() - start_build) * 1000
         index = build_index(lang, lang_candidates)
         candidate_intents = {candidate.intent_name for candidate in lang_candidates}
-        coverage = _coverage_payload(
+        coverage: dict[str, Any] = _coverage_payload(
             test_cases,
             sources,
             candidate_intents,
             len(lang_candidates),
             build_latency_ms,
         )
+        coverage["case_count"] = len(test_cases)
         _print_coverage(lang, test_cases, coverage)
 
         merged_intents = {}
