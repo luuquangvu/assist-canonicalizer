@@ -157,10 +157,15 @@ def _bootstrap_imports() -> None:
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-DEFAULT_ITERATIONS = 5
-DEFAULT_WARMUP = 1
+# Statistical defaults chosen for stable profiling:
+# - 10 iterations → reliable percentile (p95/p99) and stddev
+# - 3 warmup runs → page cache, __pycache__, and GC patterns stabilize
+# - 10 % regression threshold → catches meaningful regressions while
+#   tolerating typical run-to-run variance (2-5 % stddev)
+DEFAULT_ITERATIONS = 10
+DEFAULT_WARMUP = 3
 DEFAULT_GRANULARITY = "medium"
-DEFAULT_MAX_REGRESSION_PCT = 20.0
+DEFAULT_MAX_REGRESSION_PCT = 10.0
 BENCHMARK_DIR = "scratch/profile"
 BASELINE_DIR = "scratch/profile/baseline"
 
@@ -2024,7 +2029,7 @@ def main() -> None:
         "--cprofile",
         action="store_true",
         default=False,
-        help="Also run cProfile and dump stats to scratch/",
+        help="Also run cProfile and dump stats to the benchmark directory",
     )
 
     args = parser.parse_args()
@@ -2185,16 +2190,16 @@ def main() -> None:
                                 index.rank(case["query"])
 
             pr.disable()
-            scratch_dir = Path(_REPO_ROOT) / "scratch"
-            scratch_dir.mkdir(parents=True, exist_ok=True)
-            prof_dump = scratch_dir / "profile_metrics.prof"
+            profile_dir = Path(_REPO_ROOT) / BENCHMARK_DIR
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            prof_dump = profile_dir / "profile_metrics.prof"
             pr.dump_stats(str(prof_dump))
             print(f"cProfile dump saved to {prof_dump}")
 
             s = io.StringIO()
             ps = pstats.Stats(pr, stream=s).sort_stats("cumulative")
-            ps.print_stats(30)
-            print("\nTOP 30 FUNCTIONS BY CUMULATIVE TIME:")
+            ps.print_stats(50)
+            print("\nTOP 50 FUNCTIONS BY CUMULATIVE TIME:")
             print("-" * 80)
             print(s.getvalue())
 
