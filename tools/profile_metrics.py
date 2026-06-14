@@ -2149,45 +2149,34 @@ def main() -> None:
             pr = cProf.Profile()
             pr.enable()
 
-            if args.target == "evaluate":
-                asyncio.run(
-                    run_evaluation(
-                        datasets=datasets,
-                        failure_limit=0,
-                        output_json=None,
-                        output_md=None,
-                        min_intent_slot_accuracy=None,
-                        max_fallback_rate=None,
-                    )
-                )
-            else:
-                # For other targets, run a quick rank across all datasets
-                _bootstrap_imports()
-                for lang, path in sorted(datasets.items()):
-                    import orjson as _oj
+            # Always profile the rank hot path — the most critical code path
+            # that runs on every user utterance.
+            _bootstrap_imports()
+            for lang, path in sorted(datasets.items()):
+                import orjson as _oj
 
-                    with open(path, "rb") as f:
-                        data = _oj.loads(f.read())
-                    if not isinstance(data, dict):
-                        continue
-                    raw_slots = data.get("registry_slots")
-                    if raw_slots is not None and isinstance(raw_slots, dict):
-                        slots: dict[str, tuple[str, ...]] = {
-                            str(k): tuple(str(v) for v in vals) for k, vals in raw_slots.items()
-                        }
-                    else:
-                        slots = {
-                            str(key): tuple(values)
-                            for key, values in REGISTRY_SLOTS.get(lang, {}).items()
-                        }
-                    sources = load_language_intent_sources(lang)
-                    candidates = build_candidates_from_intent_sources(lang, sources, slots)
-                    index = build_index(lang, candidates)
-                    raw_cases = data.get("test_cases", [])
-                    if isinstance(raw_cases, list):
-                        for case in raw_cases:
-                            if isinstance(case, dict) and isinstance(case.get("query"), str):
-                                index.rank(case["query"])
+                with open(path, "rb") as f:
+                    data = _oj.loads(f.read())
+                if not isinstance(data, dict):
+                    continue
+                raw_slots = data.get("registry_slots")
+                if raw_slots is not None and isinstance(raw_slots, dict):
+                    slots: dict[str, tuple[str, ...]] = {
+                        str(k): tuple(str(v) for v in vals) for k, vals in raw_slots.items()
+                    }
+                else:
+                    slots = {
+                        str(key): tuple(values)
+                        for key, values in REGISTRY_SLOTS.get(lang, {}).items()
+                    }
+                sources = load_language_intent_sources(lang)
+                candidates = build_candidates_from_intent_sources(lang, sources, slots)
+                index = build_index(lang, candidates)
+                raw_cases = data.get("test_cases", [])
+                if isinstance(raw_cases, list):
+                    for case in raw_cases:
+                        if isinstance(case, dict) and isinstance(case.get("query"), str):
+                            index.rank(case["query"])
 
             pr.disable()
             profile_dir = Path(_REPO_ROOT) / BENCHMARK_DIR
