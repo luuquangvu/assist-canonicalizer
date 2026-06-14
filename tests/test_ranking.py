@@ -440,11 +440,11 @@ def test_ranking_helpers_and_validation_errors() -> None:
 
     # test CharNGramIndex with empty grams
     char_index = CharNGramIndex.from_grams(())
-    assert char_index.score(frozenset({"abc"})) == ()
+    assert char_index.score(frozenset({"abc"})) == []
 
     # test CharNGramIndex.score with empty query grams
     char_index_2 = CharNGramIndex.from_grams((frozenset({"abc"}),))
-    assert char_index_2.score(frozenset()) == (0.0,)
+    assert char_index_2.score(frozenset()) == [0.0]
 
     # test rank_candidates guard validations
     candidates = [Candidate(text="bật đèn", intent_name="HassTurnOn", language="vi")]

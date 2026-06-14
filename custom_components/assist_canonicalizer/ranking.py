@@ -82,10 +82,10 @@ class CharNGramIndex:
             postings={gram: tuple(indexes) for gram, indexes in postings.items()},
         )
 
-    def score(self, query_grams: frozenset[str]) -> tuple[float, ...]:
+    def score(self, query_grams: frozenset[str]) -> list[float]:
         """Return exact normalized Jaccard scores for all indexed candidates."""
         if not query_grams:
-            return tuple(0.0 for _ in self.gram_counts)
+            return [0.0] * len(self.gram_counts)
         intersections = [0] * len(self.gram_counts)
         for gram in query_grams:
             for index in self.postings.get(gram, ()):
@@ -97,7 +97,7 @@ class CharNGramIndex:
                 continue
             union_size = query_count + self.gram_counts[index] - intersection_size
             scores[index] = intersection_size / union_size if union_size else 0.0
-        return tuple(scores)
+        return scores
 
 
 def rapidfuzz_similarity_normalized(query: str, candidate: str) -> float:
@@ -349,8 +349,8 @@ def rank_candidates(
                     RankedCandidate(candidate=c, scores=_PERFECT_SCORE)
                     for c in no_diac_matches[:max_candidates]
                 )
-    query_grams = char_ngrams_normalized(query_normalized)
     query_tokens = frozenset(query_normalized.split())
+    query_tokens_tuple = tuple(query_normalized.split())
     intent_score_cache: dict[str, float] = {}
     if positional_literal_tokens is None:
         all_tokens: set[str] = set()
@@ -362,18 +362,21 @@ def rank_candidates(
         positional_literal_tokens = frozenset(all_tokens)
 
     if reference_bm25_index is not None:
-        bm25_scores = reference_bm25_index.score_custom_documents(query_normalized, candidates)
+        bm25_scores = reference_bm25_index.score_custom_documents_tokens(
+            query_tokens_tuple, candidates
+        )
     elif bm25_index is None:
         bm25_index = BM25Index.from_normalized_texts(
             tuple(candidate.normalized_text for candidate in candidates)
         )
-        bm25_scores = bm25_index.score(query_normalized)
+        bm25_scores = bm25_index.score_tokens(query_tokens_tuple)
     else:
-        bm25_scores = bm25_index.score(query_normalized)
+        bm25_scores = bm25_index.score_tokens(query_tokens_tuple)
     if candidate_char_index is None:
         candidate_char_index = CharNGramIndex.from_grams(
             tuple(char_ngrams_normalized(candidate.normalized_text) for candidate in candidates)
         )
+    query_grams = char_ngrams_normalized(query_normalized)
     char_scores = candidate_char_index.score(query_grams)
 
     prefilter_keys = [

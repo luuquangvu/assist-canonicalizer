@@ -78,7 +78,10 @@ class BM25Index:
 
     def score(self, query: str) -> tuple[float, ...]:
         """Return normalized BM25 scores for every indexed document."""
-        query_tokens = tokenize_text(query)
+        return self.score_tokens(tokenize_text(query))
+
+    def score_tokens(self, query_tokens: tuple[str, ...]) -> tuple[float, ...]:
+        """Return normalized BM25 scores for pre-tokenized query tokens."""
         doc_count = len(self._documents)
         if not query_tokens or not doc_count:
             return (0.0,) * doc_count
@@ -122,10 +125,10 @@ class BM25Index:
                 postings.setdefault(token, []).append((document_index, precomputed))
         return {token: tuple(values) for token, values in postings.items()}
 
-    def _score_documents(self, query_tokens: tuple[str, ...]) -> tuple[float, ...]:
+    def _score_documents(self, query_tokens: tuple[str, ...]) -> list[float]:
         """Return unnormalized BM25 scores using precomputed posting contributions."""
         if self._average_length == 0:
-            return tuple(0.0 for _ in self._documents)
+            return [0.0] * len(self._documents)
         raw_scores = [0.0] * len(self._documents)
         seen_tokens: set[str] = set()
         for token in query_tokens:
@@ -137,7 +140,7 @@ class BM25Index:
                 continue
             for document_index, precomputed_score in postings:
                 raw_scores[document_index] += precomputed_score
-        return tuple(raw_scores)
+        return raw_scores
 
     def score_custom_documents(
         self,
@@ -151,7 +154,16 @@ class BM25Index:
         Accepts either strings or Candidate-like objects. Caches tokenized tokens,
         Counters, and lengths to avoid repeated work in hot paths.
         """
-        query_tokens = tokenize_text(query)
+        return self.score_custom_documents_tokens(tokenize_text(query), documents, k1=k1, b=b)
+
+    def score_custom_documents_tokens(
+        self,
+        query_tokens: tuple[str, ...],
+        documents: Sequence[str | Any],
+        k1: float | None = None,
+        b: float | None = None,
+    ) -> tuple[float, ...]:
+        """Score custom documents using pre-tokenized query tokens."""
         if not query_tokens or not documents:
             return tuple(0.0 for _ in documents)
 
@@ -174,6 +186,7 @@ class BM25Index:
 
         doc_token_counters: list[Counter[str]] = []
         doc_len_factors: list[float] = []
+        all_doc_tokens: set[str] = set()
 
         for doc in documents:
             text: str
@@ -198,6 +211,7 @@ class BM25Index:
 
             doc_token_counters.append(counter)
             doc_len_factors.append(use_k1 * (one_minus_b + b_over_avg * length))
+            all_doc_tokens.update(counter.keys())
 
         raw_scores = [0.0] * len(documents)
         seen_tokens: set[str] = set()
@@ -207,7 +221,7 @@ class BM25Index:
             seen_tokens.add(token)
             idf = self._inverse_document_frequencies.get(token)
             if idf is None:
-                if not any(token in counter for counter in doc_token_counters):
+                if token not in all_doc_tokens:
                     continue
                 idf = default_idf
 
