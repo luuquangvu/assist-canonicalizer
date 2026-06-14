@@ -34,7 +34,6 @@ _BOOTSTRAPPED = False
 
 
 DEFAULT_MIN_CONFIDENCE: float = 0.0
-DEFAULT_MIN_MARGIN: float = 0.0
 CanonicalizerRuntime: Any = None
 build_candidates_from_intent_sources: Any = None
 build_index: Any = None
@@ -93,7 +92,7 @@ def sanitize_path_required(root: str, label: str, path: str) -> str:
 def _bootstrap_project_imports() -> None:
     """Import project modules after adding the repository root to sys.path."""
     global _BOOTSTRAPPED
-    global DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_MARGIN
+    global DEFAULT_MIN_CONFIDENCE
     global CanonicalizerRuntime
     global _accepted_candidate
     global build_candidates_from_intent_sources, build_index, load_language_intent_sources
@@ -134,7 +133,6 @@ def _bootstrap_project_imports() -> None:
     )
 
     DEFAULT_MIN_CONFIDENCE = const_module.DEFAULT_MIN_CONFIDENCE
-    DEFAULT_MIN_MARGIN = const_module.DEFAULT_MIN_MARGIN
     CanonicalizerRuntime = ImportedCanonicalizerRuntime
     build_candidates_from_intent_sources = imported_build_candidates_from_intent_sources
     build_index = imported_build_index

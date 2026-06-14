@@ -35,17 +35,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-# ---------------------------------------------------------------------------
-# sys.path bootstrap — add repository root so project imports resolve
-# ---------------------------------------------------------------------------
 _REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-# Lazy imports — resolved once by _bootstrap_imports()
+from tools.evaluate_metrics import (  # noqa: E402
+    REGISTRY_SLOTS,
+    align_table,
+    atomic_write,
+    discover_datasets,
+    run_evaluation,
+    sanitize_path_required,
+)
+
 _BOOTSTRAPPED = False
-align_table: Any = None
-CanonicalizerRuntime: Any = None
 build_candidates_from_intent_sources: Any = None
 build_index: Any = None
 load_language_intent_sources: Any = None
@@ -54,29 +58,20 @@ normalize_text_no_diacritics: Any = None
 char_ngrams_normalized: Any = None
 RankedCandidate: Any = None
 ScoreBreakdown: Any = None
-Candidate: Any = None
-rank_candidates: Any = None
 BM25Index: Any = None
 CharNGramIndex: Any = None
 rapidfuzz_similarity_normalized: Any = None
 lexical_score: Any = None
-REGISTRY_SLOTS: Any = None
-run_evaluation: Any = None
-sanitize_path_required: Any = None
-atomic_write: Any = None
-discover_datasets: Any = None
 
 
 def _bootstrap_imports() -> None:
     """Import project modules after adding the repository root to sys.path."""
     global _BOOTSTRAPPED
-    global align_table
-    global CanonicalizerRuntime, build_candidates_from_intent_sources, build_index
+    global build_candidates_from_intent_sources, build_index
     global load_language_intent_sources, normalize_text, normalize_text_no_diacritics
-    global char_ngrams_normalized, RankedCandidate, ScoreBreakdown, Candidate
-    global rank_candidates, BM25Index, CharNGramIndex
-    global rapidfuzz_similarity_normalized, lexical_score, REGISTRY_SLOTS, run_evaluation
-    global sanitize_path_required, atomic_write, discover_datasets
+    global char_ngrams_normalized, RankedCandidate, ScoreBreakdown
+    global BM25Index, CharNGramIndex
+    global rapidfuzz_similarity_normalized, lexical_score
 
     if _BOOTSTRAPPED:
         return
@@ -85,7 +80,6 @@ def _bootstrap_imports() -> None:
     from custom_components.assist_canonicalizer.builtin_intents import (
         load_language_intent_sources as _load_src,
     )
-    from custom_components.assist_canonicalizer.candidate import Candidate as _Candidate
     from custom_components.assist_canonicalizer.grammar_loader import (
         build_candidates_from_intent_sources as _build_cands,
     )
@@ -114,24 +108,11 @@ def _bootstrap_imports() -> None:
         lexical_score as _lexical_score,
     )
     from custom_components.assist_canonicalizer.ranking import (
-        rank_candidates as _rank_candidates,
-    )
-    from custom_components.assist_canonicalizer.ranking import (
         rapidfuzz_similarity_normalized as _rf_sim,
     )
-    from custom_components.assist_canonicalizer.runtime import (
-        CanonicalizerRuntime as _CanonicalizerRuntime,
-    )
-    from tools.evaluate_metrics import REGISTRY_SLOTS as _REGISTRY_SLOTS
-    from tools.evaluate_metrics import align_table as _align_table
-    from tools.evaluate_metrics import atomic_write as _aw
-    from tools.evaluate_metrics import discover_datasets as _discover
-    from tools.evaluate_metrics import run_evaluation as _run_eval
-    from tools.evaluate_metrics import sanitize_path_required as _sanitize_req
 
     BM25Index = _BM25Index
     load_language_intent_sources = _load_src
-    Candidate = _Candidate
     build_candidates_from_intent_sources = _build_cands
     build_index = _build_idx
     char_ngrams_normalized = _char_ngrams
@@ -141,15 +122,7 @@ def _bootstrap_imports() -> None:
     RankedCandidate = _RankedCandidate
     ScoreBreakdown = _ScoreBreakdown
     lexical_score = _lexical_score
-    rank_candidates = _rank_candidates
     rapidfuzz_similarity_normalized = _rf_sim
-    CanonicalizerRuntime = _CanonicalizerRuntime
-    REGISTRY_SLOTS = _REGISTRY_SLOTS
-    atomic_write = _aw
-    align_table = _align_table
-    discover_datasets = _discover
-    run_evaluation = _run_eval
-    sanitize_path_required = _sanitize_req
 
     _BOOTSTRAPPED = True
 
@@ -1108,86 +1081,6 @@ def _md_stat_table(title: str, stats: dict[str, Any]) -> list[str]:
     return lines
 
 
-# ---------------------------------------------------------------------------
-# Profiling targets
-# ---------------------------------------------------------------------------
-
-# -- Import bootstrap helpers for evaluate_metrics compatibility ----------
-
-_EVAL_BOOTSTRAPPED = False
-_EVAL_BUILD_CANDIDATES = None
-_EVAL_BUILD_INDEX = None
-_EVAL_LOAD_INTENT_SOURCES = None
-_EVAL_NORMALIZE_TEXT = None
-_EVAL_RANKED_CANDIDATE = None
-_EVAL_SCORE_BREAKDOWN = None
-_EVAL_CANDIDATE = None
-_EVAL_FALLBACK_REASON = None
-_EVAL_RUNTIME = None
-_EVAL_DEFAULT_MIN_CONFIDENCE = 0.5
-_EVAL_DEFAULT_MIN_MARGIN = 0.04
-
-# Internal symbols from evaluate_metrics needed for component profiling
-_EM_RUN_HASSIL_ALL = None
-_EM_SLOTS_FROM = None
-_EM_VALUES_EQUAL = None
-_EM_SLOTS_MATCH = None
-_EM_MAKE_HASSIL_LISTS = None
-_EM_SELECT_ACCEPTED = None
-_EM_RECORD_CASE = None
-_EM_COMPONENT_SCORE = None
-_EM_SELECT_ABLATION = None
-
-
-def _bootstrap_eval_imports() -> None:
-    """Import the symbols from ``tools.evaluate_metrics`` needed for the evaluate target."""
-    global _EVAL_BOOTSTRAPPED
-    global _EVAL_BUILD_CANDIDATES, _EVAL_BUILD_INDEX, _EVAL_LOAD_INTENT_SOURCES
-    global _EVAL_NORMALIZE_TEXT, _EVAL_RANKED_CANDIDATE, _EVAL_SCORE_BREAKDOWN
-    global _EVAL_CANDIDATE, _EVAL_FALLBACK_REASON, _EVAL_RUNTIME
-    global _EVAL_DEFAULT_MIN_CONFIDENCE, _EVAL_DEFAULT_MIN_MARGIN
-    global _EM_RUN_HASSIL_ALL, _EM_SLOTS_FROM, _EM_VALUES_EQUAL, _EM_SLOTS_MATCH
-    global _EM_MAKE_HASSIL_LISTS, _EM_SELECT_ACCEPTED, _EM_RECORD_CASE
-    global _EM_COMPONENT_SCORE, _EM_SELECT_ABLATION
-
-    if _EVAL_BOOTSTRAPPED:
-        return
-
-    import tools.evaluate_metrics as _emod
-
-    # Wrapped bootstrap
-    _emod._bootstrap_project_imports()
-
-    _EVAL_BUILD_CANDIDATES = _emod.build_candidates_from_intent_sources
-    _EVAL_BUILD_INDEX = _emod.build_index
-    _EVAL_LOAD_INTENT_SOURCES = _emod.load_language_intent_sources
-    _EVAL_NORMALIZE_TEXT = _emod.normalize_text
-    _EVAL_RANKED_CANDIDATE = _emod._RankedCandidate
-    _EVAL_SCORE_BREAKDOWN = _emod._ScoreBreakdown
-    _EVAL_CANDIDATE = _emod.Candidate
-    _EVAL_FALLBACK_REASON = _emod.FallbackReason
-    _EVAL_RUNTIME = _emod.CanonicalizerRuntime
-    _EVAL_DEFAULT_MIN_CONFIDENCE = _emod.DEFAULT_MIN_CONFIDENCE
-    _EVAL_DEFAULT_MIN_MARGIN = _emod.DEFAULT_MIN_MARGIN
-
-    _EM_RUN_HASSIL_ALL = _emod.run_hassil_recognize_all
-    _EM_SLOTS_FROM = _emod._slots_from_candidate
-    _EM_VALUES_EQUAL = _emod._values_equal
-    _EM_SLOTS_MATCH = _emod._slots_match
-    _EM_MAKE_HASSIL_LISTS = _emod.make_hassil_slot_lists
-    _EM_SELECT_ACCEPTED = _emod._select_accepted_with_gate
-    _EM_RECORD_CASE = _emod._record_case_result
-    _EM_COMPONENT_SCORE = _emod._component_score
-    _EM_SELECT_ABLATION = _emod._select_ablation_candidate
-
-    _EVAL_BOOTSTRAPPED = True
-
-
-# ---------------------------------------------------------------------------
-# _profile_evaluate
-# ---------------------------------------------------------------------------
-
-
 def _profile_evaluate(
     datasets: dict[str, str],
     iterations: int,
@@ -1200,8 +1093,6 @@ def _profile_evaluate(
 
     Returns per-language and aggregate phase timing.
     """
-    _bootstrap_eval_imports()
-
     output_dir = Path(_REPO_ROOT) / BENCHMARK_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
 
