@@ -34,6 +34,8 @@ from .normalization import (
     normalize_text_no_diacritics,
 )
 
+_LiteralVariantAnalysis = list[tuple[int, int, list[frozenset[str]]]]
+
 
 @dataclass(frozen=True, slots=True)
 class ScoreBreakdown:
@@ -250,6 +252,43 @@ def _build_positional_lookup(
     return lookup
 
 
+def _precompute_literal_analysis(
+    literal_text: str,
+    query_tokens: frozenset[str],
+    positional_lookup: dict[str, frozenset[str]],
+) -> _LiteralVariantAnalysis:
+    """Precompute positional match data for *literal_text* against *query_tokens*.
+
+    Returns a list with one entry per variant of *literal_text*::
+
+        (total_token_count, exact_match_count, positional_hit_frozensets)
+
+    *exact_match_count* counts how many literal tokens appear verbatim in
+    *query_tokens*.  *positional_hit_frozensets* lists the query-token
+    frozensets that positionally match each remaining literal token (only
+    entries where ``positional_lookup`` has a hit are stored).
+
+    This data is computed once per unique ``literal_text`` per
+    ``rank_candidates`` invocation; the per-candidate scoring step then only
+    needs to check whether each frozenset is a subset of the candidate entity
+    — an O(variants * positional_hits) operation instead of the previous
+    O(variants * all_tokens) loop with repeated dict lookups.
+    """
+    result: _LiteralVariantAnalysis = []
+    for literal_tokens in literal_token_variants(literal_text):
+        exact_count = 0
+        positional_hits: list[frozenset[str]] = []
+        for token in literal_tokens:
+            if token in query_tokens:
+                exact_count += 1
+            else:
+                matching = positional_lookup.get(token)
+                if matching is not None:
+                    positional_hits.append(matching)
+        result.append((len(literal_tokens), exact_count, positional_hits))
+    return result
+
+
 def _positional_intent_score_from_lookup(
     literal_text: str,
     query_tokens: frozenset[str],
@@ -398,20 +437,18 @@ def rank_candidates(
         for cs, bs in zip(char_scores, bm25_scores, strict=True)
     ]
     prefilter_limit = min(len(candidates), rapidfuzz_prefilter_candidates)
+
     top_indices = nsmallest(
-        prefilter_limit, range(len(prefilter_keys)), key=lambda i: prefilter_keys[i]
+        prefilter_limit, range(len(prefilter_keys)), key=prefilter_keys.__getitem__
     )
-    prefiltered_literal_tokens = set()
-    for idx in top_indices:
-        literal_text = candidates[idx].metadata.get("literal_text")
-        if literal_text:
-            for variant in literal_token_variants(literal_text):
-                prefiltered_literal_tokens.update(variant)
+
     positional_lookup = (
-        _build_positional_lookup(frozenset(prefiltered_literal_tokens), query_tokens)
-        if prefiltered_literal_tokens
+        _build_positional_lookup(positional_literal_tokens, query_tokens)
+        if positional_literal_tokens
         else {}
     )
+
+    literal_analysis_cache: dict[str, _LiteralVariantAnalysis] = {}
     ranked: list[RankedCandidate] = []
     for idx in top_indices:
         candidate = candidates[idx]
@@ -437,10 +474,25 @@ def rank_candidates(
                 if total_unique >= 2:
                     matched_q = len(query_tokens & candidate_tokens)
                     intent_score = matched_q / len(query_tokens) if query_tokens else 1.0
+            elif query_tokens.issubset(candidate_tokens):
+                intent_score = exact
             else:
-                intent_score = _positional_intent_score_from_lookup(
-                    literal_text, query_tokens, positional_lookup, candidate_tokens
-                )
+                analysis = literal_analysis_cache.get(literal_text)
+                if analysis is None:
+                    analysis = _precompute_literal_analysis(
+                        literal_text, query_tokens, positional_lookup
+                    )
+                    literal_analysis_cache[literal_text] = analysis
+                best = 0.0
+                for total_len, exact_count, positional_hits in analysis:
+                    matched = float(exact_count)
+                    for hits in positional_hits:
+                        if not hits.issubset(candidate_tokens):
+                            matched += POSITIONAL_SIMILARITY_PARTIAL_CREDIT
+                    score = matched / total_len if total_len else 0.0
+                    if score > best:
+                        best = score
+                intent_score = best
             if positional_literal_tokens:
                 penalty = _non_entity_coverage(
                     query_tokens,

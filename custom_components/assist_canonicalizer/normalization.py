@@ -11,6 +11,17 @@ from .const import GENERIC_LATIN_REPLACEMENTS, LANGUAGE_SPECIFIC_OVERRIDES
 _PUNCTUATION_RE = re.compile(r"[^\w\s]", re.UNICODE)
 _WHITESPACE_RE = re.compile(r"\s+")
 
+# Precomputed BMP translation table that deletes all Unicode combining marks.
+# Built once at import — covers all diacritics used by DE, EN, FR, NL, VI and
+# avoids per-character Python overhead in normalize_text_no_diacritics.
+_COMBINING_TABLE: dict[int, None] = {
+    cp: None for cp in range(0x10000) if unicodedata.combining(chr(cp))
+}
+
+# Frozenset of source characters in GENERIC_LATIN_REPLACEMENTS for fast
+# membership testing via frozenset.isdisjoint (C-level, single-pass).
+_GENERIC_LATIN_CHARS: frozenset[str] = frozenset(GENERIC_LATIN_REPLACEMENTS)
+
 
 def normalize_text(text: str) -> str:
     """Normalize text without applying language-specific rules."""
@@ -40,12 +51,12 @@ def normalize_text_no_diacritics(text: str, language: str | None = None) -> str:
             for source, target in LANGUAGE_SPECIFIC_OVERRIDES[lang_code].items():
                 normalized = normalized.replace(source, target)
 
-    if any(c in normalized for c in GENERIC_LATIN_REPLACEMENTS):
+    if not _GENERIC_LATIN_CHARS.isdisjoint(normalized):
         for source, target in GENERIC_LATIN_REPLACEMENTS.items():
             normalized = normalized.replace(source, target)
 
     nfd_form = unicodedata.normalize("NFD", normalized)
-    return "".join(c for c in nfd_form if not unicodedata.combining(c))
+    return nfd_form.translate(_COMBINING_TABLE)
 
 
 def tokenize_text(text: str) -> tuple[str, ...]:

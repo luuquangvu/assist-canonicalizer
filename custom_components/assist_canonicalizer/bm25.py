@@ -90,7 +90,7 @@ class BM25Index:
         if max_score <= 0:
             return (0.0,) * doc_count
         inv_max = 1.0 / max_score
-        return tuple(score * inv_max for score in raw_scores)
+        return tuple([score * inv_max for score in raw_scores])
 
     def _build_document_frequencies(self) -> dict[str, int]:
         """Build document frequency counts for indexed tokens."""
