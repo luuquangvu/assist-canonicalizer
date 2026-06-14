@@ -45,6 +45,7 @@ if _REPO_ROOT not in sys.path:
 
 # Lazy imports — resolved once by _bootstrap_imports()
 _BOOTSTRAPPED = False
+align_table: Any = None
 CanonicalizerRuntime: Any = None
 build_candidates_from_intent_sources: Any = None
 build_index: Any = None
@@ -67,6 +68,7 @@ run_evaluation: Any = None
 def _bootstrap_imports() -> None:
     """Import project modules after adding the repository root to sys.path."""
     global _BOOTSTRAPPED
+    global align_table
     global CanonicalizerRuntime, build_candidates_from_intent_sources, build_index
     global load_language_intent_sources, normalize_text, normalize_text_no_diacritics
     global char_ngrams_normalized, RankedCandidate, ScoreBreakdown, Candidate
@@ -118,6 +120,7 @@ def _bootstrap_imports() -> None:
         CanonicalizerRuntime as _CanonicalizerRuntime,
     )
     from tools.evaluate_metrics import REGISTRY_SLOTS as _REGISTRY_SLOTS
+    from tools.evaluate_metrics import align_table as _align_table
     from tools.evaluate_metrics import run_evaluation as _run_eval
 
     BM25Index = _BM25Index
@@ -136,6 +139,7 @@ def _bootstrap_imports() -> None:
     rapidfuzz_similarity_normalized = _rf_sim
     CanonicalizerRuntime = _CanonicalizerRuntime
     REGISTRY_SLOTS = _REGISTRY_SLOTS
+    align_table = _align_table
     run_evaluation = _run_eval
 
     _BOOTSTRAPPED = True
@@ -778,7 +782,7 @@ class ReportGenerator:
 
     @staticmethod
     def text_report(report: dict[str, Any], path: str) -> None:
-        """Write the profiling report as plain text."""
+        """Write the profiling report as plain text with dynamically aligned tables."""
         lines: list[str] = [
             "ALGORITHMIC PERFORMANCE PROFILING REPORT",
             "=" * 80,
@@ -789,25 +793,157 @@ class ReportGenerator:
             "-" * 80,
         ]
 
+        _headers_agg = (
+            "Metric",
+            "Mean",
+            "Median",
+            "p95",
+            "p99",
+            "StdDev",
+            "Min",
+            "Max",
+            "CoV%",
+        )
+        _headers_ph = (
+            "Phase",
+            "Mean(ms)",
+            "Median(ms)",
+            "p95(ms)",
+            "p99(ms)",
+            "Std(ms)",
+            "MemΔ(MB)",
+        )
+
+        # -- Aggregate -------------------------------------------------------
         agg = report.get("aggregate", {})
         if agg:
-            lines.append("Aggregate Performance:")
-            for name, stats in agg.items():
-                if isinstance(stats, dict):
-                    lines.append(
-                        f"  {name}: mean={stats.get('mean', 0):.4f} "
-                        f"median={stats.get('median', 0):.4f} "
-                        f"p95={stats.get('p95', 0):.4f} "
-                        f"p99={stats.get('p99', 0):.4f}"
+            _rows_agg: list[tuple[str, ...]] = []
+            for name, s in agg.items():
+                if isinstance(s, dict):
+                    _rows_agg.append(
+                        (
+                            name,
+                            f"{s.get('mean', 0):.4f}",
+                            f"{s.get('median', 0):.4f}",
+                            f"{s.get('p95', 0):.4f}",
+                            f"{s.get('p99', 0):.4f}",
+                            f"{s.get('stddev', 0):.4f}",
+                            f"{s.get('min', 0):.4f}",
+                            f"{s.get('max', 0):.4f}",
+                            f"{s.get('cov_pct', 0):.1f}%",
+                        )
                     )
-            lines.append("")
+            if _rows_agg:
+                hdr, sep, data = align_table(_headers_agg, _rows_agg, alignments="<>>>>>>>")
+                lines.append("\nAggregate Performance:")
+                lines.append(hdr)
+                lines.append(sep)
+                lines.extend(data)
 
+        # -- Phases ----------------------------------------------------------
+        phases = report.get("phases", {})
+        if phases:
+            _rows_ph: list[tuple[str, ...]] = []
+            for name, phase_data in phases.items():
+                e = phase_data.get("elapsed", {})
+                m = phase_data.get("memory_delta_mb", {})
+                _rows_ph.append(
+                    (
+                        name,
+                        f"{e.get('mean', 0) * 1000:.3f}",
+                        f"{e.get('median', 0) * 1000:.3f}",
+                        f"{e.get('p95', 0) * 1000:.3f}",
+                        f"{e.get('p99', 0) * 1000:.3f}",
+                        f"{e.get('stddev', 0) * 1000:.3f}",
+                        f"{m.get('mean', 0):.3f}",
+                    )
+                )
+            if _rows_ph:
+                hdr, sep, data = align_table(_headers_ph, _rows_ph, alignments="<>>>>>>")
+                lines.extend(["", "Phase Timing Breakdown:", hdr, sep, *data])
+
+        # -- Components ------------------------------------------------------
+        components = report.get("components", {})
+        if components:
+            _headers_cp = ("Component", "Mean(μs)", "Median(μs)", "p95(μs)", "p99(μs)", "CoV%")
+            _rows_cp: list[tuple[str, ...]] = []
+            for name, comp_data in components.items():
+                e = comp_data.get("elapsed", {})
+                _rows_cp.append(
+                    (
+                        name,
+                        f"{e.get('mean', 0) * 1_000_000:.1f}",
+                        f"{e.get('median', 0) * 1_000_000:.1f}",
+                        f"{e.get('p95', 0) * 1_000_000:.1f}",
+                        f"{e.get('p99', 0) * 1_000_000:.1f}",
+                        f"{e.get('cov_pct', 0):.1f}",
+                    )
+                )
+            if _rows_cp:
+                hdr, sep, data = align_table(_headers_cp, _rows_cp, alignments="<>>>>>")
+                lines.extend(["", "Scoring Component Micro-Profile:", hdr, sep, *data])
+
+        # -- Per-language ----------------------------------------------------
+        per_lang = report.get("per_language", {})
+        for lang_key in sorted(per_lang):
+            lang_data = per_lang[lang_key]
+            lines.extend(["", "─" * 80, f"Language: {lang_key.upper()}"])
+            lang_agg = lang_data.get("aggregate", {})
+            if lang_agg:
+                _la_rows: list[tuple[str, ...]] = []
+                for name, s in lang_agg.items():
+                    if isinstance(s, dict):
+                        _la_rows.append(
+                            (
+                                name,
+                                f"{s.get('mean', 0):.4f}",
+                                f"{s.get('median', 0):.4f}",
+                                f"{s.get('p95', 0):.4f}",
+                                f"{s.get('p99', 0):.4f}",
+                                f"{s.get('stddev', 0):.4f}",
+                                f"{s.get('min', 0):.4f}",
+                                f"{s.get('max', 0):.4f}",
+                                f"{s.get('cov_pct', 0):.1f}%",
+                            )
+                        )
+                if _la_rows:
+                    hdr, sep, data = align_table(_headers_agg, _la_rows, alignments="<>>>>>>>")
+                    lines.extend(["  Aggregate:", "  " + hdr, "  " + sep])
+                    lines.extend("  " + d for d in data)
+
+            lang_phases = lang_data.get("phases", {})
+            if lang_phases:
+                _lp_rows: list[tuple[str, ...]] = []
+                for name, phase_data in lang_phases.items():
+                    e = phase_data.get("elapsed", {})
+                    m = phase_data.get("memory_delta_mb", {})
+                    _lp_rows.append(
+                        (
+                            name,
+                            f"{e.get('mean', 0) * 1000:.3f}",
+                            f"{e.get('median', 0) * 1000:.3f}",
+                            f"{e.get('p95', 0) * 1000:.3f}",
+                            f"{e.get('p99', 0) * 1000:.3f}",
+                            f"{e.get('stddev', 0) * 1000:.3f}",
+                            f"{m.get('mean', 0):.3f}",
+                        )
+                    )
+                if _lp_rows:
+                    hdr, sep, data = align_table(_headers_ph, _lp_rows, alignments="<>>>>>>")
+                    lines.extend(["  Phase Timing:", "  " + hdr, "  " + sep])
+                    lines.extend("  " + d for d in data)
+
+        # -- Regressions -----------------------------------------------------
         regressions = report.get("regressions", [])
         if regressions:
-            lines.append("REGRESSION DETECTIONS:")
+            lines.append("\nREGRESSION DETECTIONS:")
             for r in regressions:
                 lines.append(f"  {r}")
-            lines.append("")
+
+        lines.append("")
+        lines.append("=" * 80)
+        lines.append("PROFILE_OK")
+        lines.append("=" * 80)
 
         out = Path(path)
         tmp = out.with_suffix(out.suffix + ".tmp")
@@ -817,32 +953,42 @@ class ReportGenerator:
 
 
 # ---------------------------------------------------------------------------
+# Dynamic table alignment helper (shared with evaluate_metrics pattern)
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
 # Terminal formatting helpers
 # ---------------------------------------------------------------------------
 
 
 def _print_stat_block(title: str, stats: dict[str, Any]) -> None:
-    """Print a block of statistical metrics to the terminal."""
+    """Print a block of statistical metrics with dynamically aligned columns."""
     print(f"\n{title}:")
-    header = (
-        f"{'Metric':<24} {'Mean':>10} {'Median':>10} {'p95':>10} "
-        f"{'p99':>10} {'StdDev':>10} {'Min':>10} {'Max':>10} {'CoV%':>8}"
-    )
-    print(header)
-    print("-" * 100)
+
+    _headers = ("Metric", "Mean", "Median", "p95", "p99", "StdDev", "Min", "Max", "CoV%")
+    _rows: list[tuple[str, ...]] = []
     for name, s in stats.items():
         if isinstance(s, dict):
-            print(
-                f"{name:<24} "
-                f"{s.get('mean', 0):>10.4f} "
-                f"{s.get('median', 0):>10.4f} "
-                f"{s.get('p95', 0):>10.4f} "
-                f"{s.get('p99', 0):>10.4f} "
-                f"{s.get('stddev', 0):>10.4f} "
-                f"{s.get('min', 0):>10.4f} "
-                f"{s.get('max', 0):>10.4f} "
-                f"{s.get('cov_pct', 0):>7.1f}%"
+            _rows.append(
+                (
+                    name,
+                    f"{s.get('mean', 0):.4f}",
+                    f"{s.get('median', 0):.4f}",
+                    f"{s.get('p95', 0):.4f}",
+                    f"{s.get('p99', 0):.4f}",
+                    f"{s.get('stddev', 0):.4f}",
+                    f"{s.get('min', 0):.4f}",
+                    f"{s.get('max', 0):.4f}",
+                    f"{s.get('cov_pct', 0):.1f}%",
+                )
             )
+
+    hdr, sep, data = align_table(_headers, _rows, alignments="<>>>>>>>")
+    print(hdr)
+    print(sep)
+    for line in data:
+        print(line)
 
 
 def _print_resource_block(title: str, stats: dict[str, float]) -> None:
@@ -853,25 +999,31 @@ def _print_resource_block(title: str, stats: dict[str, float]) -> None:
 
 
 def _print_phase_table(title: str, phases: dict[str, Any]) -> None:
-    """Print a phase timing table to the terminal."""
+    """Print a phase timing table with dynamically aligned columns."""
     print(f"\n{title}:")
-    print(
-        f"{'Phase':<32} {'Mean(ms)':>10} {'Median(ms)':>10} "
-        f"{'p95(ms)':>10} {'p99(ms)':>10} {'Std(ms)':>10} {'MemΔ(MB)':>10}"
-    )
-    print("-" * 92)
+
+    _headers = ("Phase", "Mean(ms)", "Median(ms)", "p95(ms)", "p99(ms)", "Std(ms)", "MemΔ(MB)")
+    _rows: list[tuple[str, ...]] = []
     for name, phase_data in phases.items():
         e = phase_data.get("elapsed", {})
         m = phase_data.get("memory_delta_mb", {})
-        print(
-            f"{name:<32} "
-            f"{e.get('mean', 0) * 1000:>10.3f} "
-            f"{e.get('median', 0) * 1000:>10.3f} "
-            f"{e.get('p95', 0) * 1000:>10.3f} "
-            f"{e.get('p99', 0) * 1000:>10.3f} "
-            f"{e.get('stddev', 0) * 1000:>10.3f} "
-            f"{m.get('mean', 0):>10.3f}"
+        _rows.append(
+            (
+                name,
+                f"{e.get('mean', 0) * 1000:.3f}",
+                f"{e.get('median', 0) * 1000:.3f}",
+                f"{e.get('p95', 0) * 1000:.3f}",
+                f"{e.get('p99', 0) * 1000:.3f}",
+                f"{e.get('stddev', 0) * 1000:.3f}",
+                f"{m.get('mean', 0):.3f}",
+            )
         )
+
+    hdr, sep, data = align_table(_headers, _rows, alignments="<>>>>>>")
+    print(hdr)
+    print(sep)
+    for line in data:
+        print(line)
 
 
 def _md_stat_table(title: str, stats: dict[str, Any]) -> list[str]:

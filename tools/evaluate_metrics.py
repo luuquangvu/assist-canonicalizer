@@ -361,9 +361,15 @@ class CategoryStats:
         self.latency_ms_total += other.latency_ms_total
 
     def as_dict(self) -> dict[str, Any]:
-        """Return serializable stats values."""
+        """Return serializable stats values including raw counts for text rendering."""
         return {
             "total": self.total,
+            "correct": self.correct,
+            "intent_correct": self.intent_correct,
+            "slots_correct": self.slots_correct,
+            "intent_slots_correct": self.intent_slots_correct,
+            "fallback": self.fallback,
+            "mismatch": self.mismatch,
             "canonical_accuracy": self.canonical_accuracy,
             "intent_accuracy": self.intent_accuracy,
             "slots_accuracy": self.slots_accuracy,
@@ -925,7 +931,91 @@ def _markdown_metric(stats: Mapping[str, Any]) -> str:
 
 
 def _markdown_report(report: Mapping[str, Any]) -> str:
-    """Return a human-readable Markdown report."""
+    """Return a human-readable Markdown report with dynamically aligned columns."""
+    # -- Phase 1: collect all data rows to compute maximum column widths ----
+    _headers = ("Mode", "Total", "Intent/Slot", "Canonical", "Mismatch", "Fallback", "Avg ms")
+    _col_widths: list[int] = [len(h) for h in _headers]  # start with header widths
+
+    class _Row:
+        """Pre-formatted string columns for one summary data row."""
+
+        __slots__ = (
+            "avg_ms_s",
+            "backticked_mode",
+            "canonical_s",
+            "fallback_s",
+            "intent_slot_s",
+            "lang",
+            "mismatch_s",
+            "total_s",
+        )
+
+        def __init__(self, lang: str, mode_name: str, stats: Mapping[str, Any]) -> None:
+            """Populate pre-formatted string columns from aggregated stats."""
+            self.lang = lang
+            self.backticked_mode = f"`{mode_name}` "
+            self.total_s = str(int(stats.get("total", 0)))
+            self.intent_slot_s = f"{stats.get('intent_slot_accuracy', 0):.1f}%"
+            self.canonical_s = f"{stats.get('canonical_accuracy', 0):.1f}%"
+            self.mismatch_s = f"{stats.get('mismatch_rate', 0):.1f}%"
+            self.fallback_s = f"{stats.get('fallback_rate', 0):.1f}%"
+            self.avg_ms_s = f"{stats.get('average_latency_ms', 0):.1f}"
+
+    _all_rows: list[_Row] = []
+    for lang, payload in sorted(report.get("languages", {}).items()):
+        for mode_name, summary in payload.get("summary", {}).items():
+            stats = summary.get("overall", {})
+            if not stats.get("total"):
+                continue
+            row = _Row(lang, mode_name, stats)
+            _all_rows.append(row)
+            # update max widths
+            cols = (
+                row.backticked_mode,
+                row.total_s,
+                row.intent_slot_s,
+                row.canonical_s,
+                row.mismatch_s,
+                row.fallback_s,
+                row.avg_ms_s,
+            )
+            for i, s in enumerate(cols):
+                _col_widths[i] = max(_col_widths[i], len(s))
+
+    # guarantee at least 3 dash chars for separators
+    _col_widths = [max(w, 3) for w in _col_widths]
+
+    def _md_sep_line() -> str:
+        """Render a Markdown separator line with dashes matching column widths."""
+        parts: list[str] = []
+        for _i, w in enumerate(_col_widths):
+            sep = "-" * w
+            parts.append(sep)
+        return "|" + "|".join(parts) + "|"
+
+    def _md_header_line() -> str:
+        """Render the aligned Markdown table header row."""
+        parts: list[str] = []
+        for i, h in enumerate(_headers):
+            w = _col_widths[i]
+            align = "<" if i == 0 else ">"
+            parts.append(f"{h:{align}{w}}")
+        return "|" + "|".join(parts) + "|"
+
+    def _md_data_row(row: _Row) -> str:
+        """Render a single aligned Markdown table data row."""
+        cols = (
+            f"{row.backticked_mode:<{_col_widths[0]}}",
+            f"{row.total_s:>{_col_widths[1]}}",
+            f"{row.intent_slot_s:>{_col_widths[2]}}",
+            f"{row.canonical_s:>{_col_widths[3]}}",
+            f"{row.mismatch_s:>{_col_widths[4]}}",
+            f"{row.fallback_s:>{_col_widths[5]}}",
+            f"{row.avg_ms_s:>{_col_widths[6]}}",
+        )
+        return "|" + "|".join(cols) + "|"
+
+    # -- Phase 2: render report ----------------------------------------------
     lines = [
         "# Assist Canonicalizer Evaluation",
         "",
@@ -936,37 +1026,32 @@ def _markdown_report(report: Mapping[str, Any]) -> str:
         total = payload["overall"]["total"]
         if total:
             lines.append(f"- `{mode_name}`: {_markdown_metric(payload['overall'])}")
-    for lang, payload in sorted(report["languages"].items()):
-        coverage = payload["coverage"]
-        lines.extend(
-            [
-                "",
-                f"## {lang.upper()}",
-                "",
-                f"- Builtin intents: {len(coverage['builtin_intents'])}",
-                f"- Candidate intents: {len(coverage['candidate_intents'])}",
-                f"- Dataset intents: {len(coverage['dataset_intents'])}",
-                f"- Candidates: {coverage['candidate_count']} "
-                f"(build latency: {coverage['build_latency_ms']:.1f}ms)",
-                f"- Missing candidate intents: {len(coverage['missing_candidate_intents'])}",
-                f"- Untested candidate intents: {len(coverage['untested_candidate_intents'])}",
-                "",
-                "| Mode | Total | Intent/Slot | Canonical | Mismatch | Fallback | Avg ms |",
-                "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
-            ]
-        )
-        for mode_name, summary in payload["summary"].items():
-            stats = summary["overall"]
-            if not stats["total"]:
-                continue
-            lines.append(
-                f"| `{mode_name}` | {stats['total']} | "
-                f"{stats['intent_slot_accuracy']:.1f}% | "
-                f"{stats['canonical_accuracy']:.1f}% | "
-                f"{stats['mismatch_rate']:.1f}% | "
-                f"{stats['fallback_rate']:.1f}% | "
-                f"{stats['average_latency_ms']:.1f} |"
+
+    last_lang: str | None = None
+    for row in _all_rows:
+        if row.lang != last_lang:
+            last_lang = row.lang
+            payload = report["languages"][row.lang]
+            coverage = payload["coverage"]
+            lines.extend(
+                [
+                    "",
+                    f"## {row.lang.upper()}",
+                    "",
+                    f"- Builtin intents: {len(coverage['builtin_intents'])}",
+                    f"- Candidate intents: {len(coverage['candidate_intents'])}",
+                    f"- Dataset intents: {len(coverage['dataset_intents'])}",
+                    f"- Candidates: {coverage['candidate_count']} "
+                    f"(build latency: {coverage['build_latency_ms']:.1f}ms)",
+                    f"- Missing candidate intents: {len(coverage['missing_candidate_intents'])}",
+                    f"- Untested candidate intents: {len(coverage['untested_candidate_intents'])}",
+                    "",
+                    _md_header_line(),
+                    _md_sep_line(),
+                ]
             )
+        lines.append(_md_data_row(row))
+
     threshold_failures = report["overall"].get("threshold_failures", [])
     if threshold_failures:
         lines.extend(["", "## Threshold Failures", ""])
@@ -1085,85 +1170,147 @@ def _text_report(report: Mapping[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def align_table(
+    headers: tuple[str, ...],
+    rows: list[tuple[str, ...]],
+    *,
+    alignments: str = "<",
+    padding: int = 1,
+    sep: str = " | ",
+) -> tuple[str, str, list[str]]:
+    """Return dynamically-aligned table lines: ``(header, separator, data_lines)``.
+
+    Column widths are computed from the maximum of header and data cell lengths
+    plus *padding*.
+
+    Args:
+        headers: Per-column header strings.
+        rows: Data rows; each tuple must have the same length as *headers*.
+        alignments: Single ``'<'`` or ``'>'`` for all columns, or one char per
+            column (e.g. ``'<>>>>'``).
+        padding: Extra characters appended to each column width.
+        sep: Column separator inserted between cells.
+
+    Returns:
+        A 3-tuple of ``(header_line, separator_line, list_of_data_lines)``.
+    """
+    if not headers:
+        return "", "", []
+    ncols = len(headers)
+    widths = [len(h) for h in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(cell))
+    widths = [w + padding for w in widths]
+
+    aligns = list(alignments * ncols) if len(alignments) == 1 else list(alignments)
+    aligns = aligns[:ncols]
+
+    hdr_parts = [f"{h:{a}{w}}" for h, a, w in zip(headers, aligns, widths, strict=True)]
+    header_line = sep.join(hdr_parts)
+    sep_line = sep.join("-" * w for w in widths)
+
+    data_lines: list[str] = []
+    for row in rows:
+        parts = [f"{c:{a}{w}}" for c, a, w in zip(row, aligns, widths, strict=True)]
+        data_lines.append(sep.join(parts))
+    return header_line, sep_line, data_lines
+
+
 def _text_summary_table(title: str, payload: Mapping[str, Any]) -> list[str]:
-    """Return text lines for a summary table from serialized payload data."""
-    lines: list[str] = []
-    lines.append(f"\n{title}")
-    lines.append("-" * 166)
-    lines.append(
-        f"{'Category':<24} | {'Total':<5} | "
-        f"{'Hass Acc':<17} | {'Lex Acc':<17} | "
-        f"{'Hass Mis':<17} | {'Lex Mis':<17} | "
-        f"{'Hass Fall':<17} | {'Lex Fall':<17} | "
-        f"{'Lex ms':<8}"
+    """Return text lines for a summary table with dynamically aligned columns."""
+    lines: list[str] = [f"\n{title}"]
+
+    _headers = (
+        "Category",
+        "Total",
+        "Hass Acc",
+        "Lex Acc",
+        "Hass Mis",
+        "Lex Mis",
+        "Hass Fall",
+        "Lex Fall",
+        "Lex ms",
     )
-    lines.append("-" * 166)
 
     hassil_data = payload.get("hassil", {})
     lex_data = payload.get("lexical", {})
-    categories = sorted(
-        set(hassil_data.get("categories", {}).keys()) | set(lex_data.get("categories", {}).keys())
-    )
-    for cat in categories:
+    cat_keys = hassil_data.get("categories", {}).keys() | lex_data.get("categories", {}).keys()
+
+    cat_rows: list[tuple[str, ...]] = []
+    for cat in sorted(cat_keys):
         hass_cat = hassil_data.get("categories", {}).get(cat, {})
         lex_cat = lex_data.get("categories", {}).get(cat, {})
         lex_total = lex_cat.get("total", 0)
-        hass_acc = f"{hass_cat.get('intent_slot_accuracy', 0):.1f}%"
-        lex_acc = f"{lex_cat.get('intent_slot_accuracy', 0):.1f}%"
-        hass_mis = f"{hass_cat.get('mismatch_rate', 0):.1f}%"
-        lex_mis = f"{lex_cat.get('mismatch_rate', 0):.1f}%"
-        hass_fall = f"{hass_cat.get('fallback_rate', 0):.1f}%"
-        lex_fall = f"{lex_cat.get('fallback_rate', 0):.1f}%"
-        lex_ms = f"{lex_cat.get('average_latency_ms', 0):.1f}"
-        lines.append(
-            f"{cat:<24} | {lex_total:<5} | "
-            f"{hass_acc:<17} | {lex_acc:<17} | "
-            f"{hass_mis:<17} | {lex_mis:<17} | "
-            f"{hass_fall:<17} | {lex_fall:<17} | "
-            f"{lex_ms:<8}"
+        cat_rows.append(
+            (
+                cat,
+                str(lex_total),
+                _metric_str(hass_cat.get("intent_slots_correct", 0), hass_cat.get("total", 0)),
+                _metric_str(lex_cat.get("intent_slots_correct", 0), lex_cat.get("total", 0)),
+                _metric_str(hass_cat.get("mismatch", 0), hass_cat.get("total", 0)),
+                _metric_str(lex_cat.get("mismatch", 0), lex_cat.get("total", 0)),
+                _metric_str(hass_cat.get("fallback", 0), hass_cat.get("total", 0)),
+                _metric_str(lex_cat.get("fallback", 0), lex_cat.get("total", 0)),
+                f"{lex_cat.get('average_latency_ms', 0):.1f}",
+            )
         )
 
     hass_overall = hassil_data.get("overall", {})
     lex_overall = lex_data.get("overall", {})
-    lex_total = lex_overall.get("total", 0)
-    lines.append("-" * 166)
-    lines.append(
-        f"{'Overall':<24} | {lex_total:<5} | "
-        f"{hass_overall.get('intent_slot_accuracy', 0):.1f}%{'':<11} | "
-        f"{lex_overall.get('intent_slot_accuracy', 0):.1f}%{'':<11} | "
-        f"{hass_overall.get('mismatch_rate', 0):.1f}%{'':<11} | "
-        f"{lex_overall.get('mismatch_rate', 0):.1f}%{'':<11} | "
-        f"{hass_overall.get('fallback_rate', 0):.1f}%{'':<11} | "
-        f"{lex_overall.get('fallback_rate', 0):.1f}%{'':<11} | "
-        f"{lex_overall.get('average_latency_ms', 0):<8.1f}"
+    overall_row: tuple[str, ...] = (
+        "Overall",
+        str(lex_overall.get("total", 0)),
+        _metric_str(hass_overall.get("intent_slots_correct", 0), hass_overall.get("total", 0)),
+        _metric_str(lex_overall.get("intent_slots_correct", 0), lex_overall.get("total", 0)),
+        _metric_str(hass_overall.get("mismatch", 0), hass_overall.get("total", 0)),
+        _metric_str(lex_overall.get("mismatch", 0), lex_overall.get("total", 0)),
+        _metric_str(hass_overall.get("fallback", 0), hass_overall.get("total", 0)),
+        _metric_str(lex_overall.get("fallback", 0), lex_overall.get("total", 0)),
+        f"{lex_overall.get('average_latency_ms', 0):.1f}",
     )
-    lines.append("-" * 166)
+
+    hdr, sep, data = align_table(_headers, cat_rows, alignments="<")
+    lines.append(sep)
+    lines.append(hdr)
+    lines.append(sep)
+    lines.extend(data)
+    lines.append(sep)
+
+    _, _, ov = align_table(_headers, [overall_row], alignments="<")
+    lines.extend(ov)
+    lines.append(sep)
     return lines
 
 
 def _text_ablation_table(title: str, payload: Mapping[str, Any]) -> list[str]:
-    """Return text lines for an ablation table from serialized payload data."""
-    lines: list[str] = []
-    lines.append(f"\n{title}")
-    lines.append("-" * 96)
-    lines.append(
-        f"{'Component':<16} | {'Total':<5} | {'Canonical':<16} | "
-        f"{'Intent/Slot':<19} | {'Fallback':<14}"
-    )
-    lines.append("-" * 96)
+    """Return text lines for an ablation table with dynamically aligned columns."""
+    lines: list[str] = [f"\n{title}"]
+
+    _headers = ("Component", "Total", "Canonical", "Intent/Slot", "Fallback")
+    ab_rows: list[tuple[str, ...]] = []
     for comp in ABLATION_COMPONENTS:
         comp_data = payload.get(comp, {})
         overall = comp_data.get("overall", {})
         total = overall.get("total", 0)
         if total == 0:
             continue
-        canonical = f"{overall.get('canonical_accuracy', 0):.1f}%"
-        intent_slot = f"{overall.get('intent_slot_accuracy', 0):.1f}%"
-        fallback = f"{overall.get('fallback_rate', 0):.1f}%"
-        lines.append(
-            f"{comp:<16} | {total:<5} | {canonical:<16} | {intent_slot:<19} | {fallback:<14}"
+        ab_rows.append(
+            (
+                comp,
+                str(total),
+                _metric_str(overall.get("correct", 0), overall.get("total", 0)),
+                _metric_str(overall.get("intent_slots_correct", 0), overall.get("total", 0)),
+                _metric_str(overall.get("fallback", 0), overall.get("total", 0)),
+            )
         )
-    lines.append("-" * 96)
+
+    hdr, sep, data = align_table(_headers, ab_rows, alignments="<")
+    lines.append(sep)
+    lines.append(hdr)
+    lines.append(sep)
+    lines.extend(data)
+    lines.append(sep)
     return lines
 
 
