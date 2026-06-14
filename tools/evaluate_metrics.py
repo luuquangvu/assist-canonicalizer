@@ -931,9 +931,13 @@ def _markdown_metric(stats: Mapping[str, Any]) -> str:
 
 
 def _markdown_report(report: Mapping[str, Any]) -> str:
-    """Return a human-readable Markdown report with dynamically aligned columns."""
+    """Return a human-readable Markdown report with dynamically aligned columns.
+
+    Output is compatible with Prettier Markdown formatting.
+    """
     # -- Phase 1: collect all data rows to compute maximum column widths ----
     _headers = ("Mode", "Total", "Intent/Slot", "Canonical", "Mismatch", "Fallback", "Avg ms")
+    _col_aligns = ("<", ">", ">", ">", ">", ">", ">")
     _col_widths: list[int] = [len(h) for h in _headers]  # start with header widths
 
     class _Row:
@@ -953,7 +957,7 @@ def _markdown_report(report: Mapping[str, Any]) -> str:
         def __init__(self, lang: str, mode_name: str, stats: Mapping[str, Any]) -> None:
             """Populate pre-formatted string columns from aggregated stats."""
             self.lang = lang
-            self.backticked_mode = f"`{mode_name}` "
+            self.backticked_mode = f"`{mode_name}`"
             self.total_s = str(int(stats.get("total", 0)))
             self.intent_slot_s = f"{stats.get('intent_slot_accuracy', 0):.1f}%"
             self.canonical_s = f"{stats.get('canonical_accuracy', 0):.1f}%"
@@ -986,32 +990,34 @@ def _markdown_report(report: Mapping[str, Any]) -> str:
     _col_widths = [max(w, 3) for w in _col_widths]
 
     def _md_sep_line() -> str:
-        """Render a Markdown separator line with dashes matching column widths."""
+        """Render a Prettier-compatible Markdown separator line."""
         parts: list[str] = []
-        for _i, w in enumerate(_col_widths):
-            sep = "-" * w
-            parts.append(sep)
+        for i, w in enumerate(_col_widths):
+            dashes = w - 1  # colon occupies 1 char
+            if _col_aligns[i] == ">":
+                parts.append(" " + "-" * dashes + ": ")
+            else:
+                parts.append(" :" + "-" * dashes + " ")
         return "|" + "|".join(parts) + "|"
 
     def _md_header_line() -> str:
-        """Render the aligned Markdown table header row."""
+        """Render a Prettier-compatible aligned Markdown table header row."""
         parts: list[str] = []
         for i, h in enumerate(_headers):
             w = _col_widths[i]
-            align = "<" if i == 0 else ">"
-            parts.append(f"{h:{align}{w}}")
+            parts.append(f" {h:<{w}} ")
         return "|" + "|".join(parts) + "|"
 
     def _md_data_row(row: _Row) -> str:
-        """Render a single aligned Markdown table data row."""
+        """Render a single Prettier-compatible aligned Markdown table data row."""
         cols = (
-            f"{row.backticked_mode:<{_col_widths[0]}}",
-            f"{row.total_s:>{_col_widths[1]}}",
-            f"{row.intent_slot_s:>{_col_widths[2]}}",
-            f"{row.canonical_s:>{_col_widths[3]}}",
-            f"{row.mismatch_s:>{_col_widths[4]}}",
-            f"{row.fallback_s:>{_col_widths[5]}}",
-            f"{row.avg_ms_s:>{_col_widths[6]}}",
+            f" {row.backticked_mode:<{_col_widths[0]}} ",
+            f" {row.total_s:>{_col_widths[1]}} ",
+            f" {row.intent_slot_s:>{_col_widths[2]}} ",
+            f" {row.canonical_s:>{_col_widths[3]}} ",
+            f" {row.mismatch_s:>{_col_widths[4]}} ",
+            f" {row.fallback_s:>{_col_widths[5]}} ",
+            f" {row.avg_ms_s:>{_col_widths[6]}} ",
         )
         return "|" + "|".join(cols) + "|"
 
