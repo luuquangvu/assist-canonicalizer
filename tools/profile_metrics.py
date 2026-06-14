@@ -40,16 +40,13 @@ _REPO_ROOT = str(Path(__file__).resolve().parent.parent)
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from tools.evaluate_metrics import (  # noqa: E402
-    REGISTRY_SLOTS,
-    align_table,
-    atomic_write,
-    discover_datasets,
-    run_evaluation,
-    sanitize_path_required,
-)
-
 _BOOTSTRAPPED = False
+REGISTRY_SLOTS: Any = None
+align_table: Any = None
+atomic_write: Any = None
+discover_datasets: Any = None
+run_evaluation: Any = None
+sanitize_path_required: Any = None
 build_candidates_from_intent_sources: Any = None
 build_index: Any = None
 load_language_intent_sources: Any = None
@@ -67,6 +64,8 @@ lexical_score: Any = None
 def _bootstrap_imports() -> None:
     """Import project modules after adding the repository root to sys.path."""
     global _BOOTSTRAPPED
+    global REGISTRY_SLOTS, align_table, atomic_write, discover_datasets
+    global run_evaluation, sanitize_path_required
     global build_candidates_from_intent_sources, build_index
     global load_language_intent_sources, normalize_text, normalize_text_no_diacritics
     global char_ngrams_normalized, RankedCandidate, ScoreBreakdown
@@ -110,6 +109,31 @@ def _bootstrap_imports() -> None:
     from custom_components.assist_canonicalizer.ranking import (
         rapidfuzz_similarity_normalized as _rf_sim,
     )
+    from tools.evaluate_metrics import (
+        REGISTRY_SLOTS as _REGISTRY_SLOTS,
+    )
+    from tools.evaluate_metrics import (
+        align_table as _align_table,
+    )
+    from tools.evaluate_metrics import (
+        atomic_write as _atomic_write,
+    )
+    from tools.evaluate_metrics import (
+        discover_datasets as _discover_datasets,
+    )
+    from tools.evaluate_metrics import (
+        run_evaluation as _run_evaluation,
+    )
+    from tools.evaluate_metrics import (
+        sanitize_path_required as _sanitize_path_required,
+    )
+
+    REGISTRY_SLOTS = _REGISTRY_SLOTS
+    align_table = _align_table
+    atomic_write = _atomic_write
+    discover_datasets = _discover_datasets
+    run_evaluation = _run_evaluation
+    sanitize_path_required = _sanitize_path_required
 
     BM25Index = _BM25Index
     load_language_intent_sources = _load_src
@@ -1925,6 +1949,10 @@ def main() -> None:
 
     args = parser.parse_args()
     _bootstrap_imports()
+
+    if args.target not in PROFILING_TARGETS:
+        print(f"Error: Invalid target {args.target}", file=sys.stderr)
+        sys.exit(1)
 
     if args.iterations < 1:
         print("Error: --iterations must be positive", file=sys.stderr)
