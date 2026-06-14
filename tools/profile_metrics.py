@@ -161,8 +161,8 @@ DEFAULT_ITERATIONS = 5
 DEFAULT_WARMUP = 1
 DEFAULT_GRANULARITY = "medium"
 DEFAULT_MAX_REGRESSION_PCT = 20.0
-BENCHMARK_DIR = "scratch"
-BASELINE_DIR = "scratch/baseline"
+BENCHMARK_DIR = "scratch/profile"
+BASELINE_DIR = "scratch/profile/baseline"
 
 
 PROFILING_TARGETS = ("evaluate", "build_index", "rank", "components", "all")
