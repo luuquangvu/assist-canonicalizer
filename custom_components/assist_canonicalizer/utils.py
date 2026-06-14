@@ -33,7 +33,9 @@ def resolve_entry_thresholds(entry: Any) -> tuple[float, float]:
 @lru_cache(maxsize=128)
 def normalize_language(language: str) -> str:
     """Return the Home Assistant language variant as a canonical cache key."""
-    requested = str(language).strip()
+    if not isinstance(language, str):
+        raise ValueError("Language must be a non-empty string")
+    requested = language.strip()
     if not requested:
         raise ValueError("Language must not be empty")
     language_variant = language_variant_for(requested)

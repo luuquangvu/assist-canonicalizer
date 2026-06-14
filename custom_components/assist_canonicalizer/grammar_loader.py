@@ -18,8 +18,11 @@ from .const import (
     DEFAULT_MAX_DYNAMIC_SLOT_VALUES,
     DEFAULT_MAX_TOTAL_CANDIDATES_PER_LANGUAGE,
 )
-from .normalization import normalize_text, normalize_text_no_diacritics
-from .ranking import _literal_token_variants
+from .normalization import (
+    literal_token_variants,
+    normalize_text,
+    normalize_text_no_diacritics,
+)
 from .registry import AREA_SLOT_NAMES, ENTITY_SLOT_NAMES, merge_slot_values
 
 _TEMPLATE_MARKERS = frozenset("{}[]<>|()")
@@ -845,7 +848,7 @@ def _cached_template_literal_token_variants(
     if not literal_text:
         return ()
 
-    return _literal_token_variants(literal_text)
+    return literal_token_variants(literal_text)
 
 
 class _HassilNode:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from functools import lru_cache
 
 from .const import GENERIC_LATIN_REPLACEMENTS, LANGUAGE_SPECIFIC_OVERRIDES
 
@@ -72,3 +73,16 @@ def char_ngrams_normalized(text: str, size: int = 3) -> frozenset[str]:
     if len(compact) <= size:
         return frozenset({compact})
     return frozenset(compact[index : index + size] for index in range(len(compact) - size + 1))
+
+
+@lru_cache(maxsize=8192)
+def literal_token_variants(literal_text: str) -> tuple[frozenset[str], ...]:
+    """Return normalized literal token variants for intent action scoring."""
+    variants = []
+    for variant in literal_text.split("|"):
+        if not variant.strip():
+            continue
+        literal_tokens = frozenset(normalize_text(variant).split())
+        if literal_tokens:
+            variants.append(literal_tokens)
+    return tuple(variants)

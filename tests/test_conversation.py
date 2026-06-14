@@ -123,7 +123,9 @@ async def test_conversation_entity_properties_and_reload() -> None:
 
     assert entity.supported_languages == "*"
 
-    runtime.set_index(MagicMock())
+    mock_index = MagicMock()
+    mock_index.language = "en"
+    runtime.set_index(mock_index)
     runtime.indexes["en"] = MagicMock()
     assert "en" in runtime.indexes
     with patch.object(

@@ -461,3 +461,113 @@ def test_ranking_helpers_and_validation_errors() -> None:
 
     # test rank_candidates empty candidates
     assert rank_candidates("bật đèn", []) == ()
+
+
+def test_apply_intent_disambiguation_promotes_higher_intent_score_within_margin() -> None:
+    """Top-2 have different intents, close final_score, second has higher intent_score."""
+    margin = ranking.TIEBREAKER_INTENT_MARGIN
+
+    first = RankedCandidate(
+        candidate=Candidate(text="turn on kitchen light", intent_name="HassTurnOn", language="en"),
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.9,
+            char_ngram_score=0.9,
+            bm25_score=0.9,
+            intent_score=0.5,
+            final_score=1.0,
+        ),
+    )
+    second = RankedCandidate(
+        candidate=Candidate(
+            text="turn off bedroom light", intent_name="HassTurnOff", language="en"
+        ),
+        # final_score is slightly lower than the first but still within the tiebreaker margin
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.9,
+            char_ngram_score=0.9,
+            bm25_score=0.9,
+            intent_score=0.9,
+            final_score=1.0 - margin / 2.0,
+        ),
+    )
+
+    ranked = [first, second]
+
+    ranking._apply_intent_disambiguation(ranked)
+
+    # The higher intent_score candidate with a different intent should be promoted to rank 0
+    assert ranked[0] is second
+    assert ranked[1] is first
+
+
+def test_apply_intent_disambiguation_does_not_reorder_when_gap_exceeds_margin() -> None:
+    """Top-2 gap exceeds margin: no reordering even if second has higher intent_score."""
+    margin = ranking.TIEBREAKER_INTENT_MARGIN
+
+    first = RankedCandidate(
+        candidate=Candidate(text="turn on kitchen light", intent_name="HassTurnOn", language="en"),
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.9,
+            char_ngram_score=0.9,
+            bm25_score=0.9,
+            intent_score=0.5,
+            final_score=1.0,
+        ),
+    )
+    second = RankedCandidate(
+        candidate=Candidate(
+            text="turn off bedroom light", intent_name="HassTurnOff", language="en"
+        ),
+        # final_score gap exceeds the tiebreaker margin
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.9,
+            char_ngram_score=0.9,
+            bm25_score=0.9,
+            intent_score=0.9,
+            final_score=1.0 - (margin * 2.0),
+        ),
+    )
+
+    ranked = [first, second]
+
+    ranking._apply_intent_disambiguation(ranked)
+
+    # Because the final_score gap exceeds the margin, the ordering should not change
+    assert ranked[0] is first
+    assert ranked[1] is second
+
+
+def test_apply_intent_disambiguation_keeps_order_for_same_intent() -> None:
+    """Top-2 share the same intent: order is unchanged even within the margin."""
+    margin = ranking.TIEBREAKER_INTENT_MARGIN
+
+    first = RankedCandidate(
+        candidate=Candidate(text="turn on kitchen light", intent_name="HassTurnOn", language="en"),
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.9,
+            char_ngram_score=0.9,
+            bm25_score=0.9,
+            intent_score=0.5,
+            final_score=1.0,
+        ),
+    )
+    second = RankedCandidate(
+        candidate=Candidate(
+            text="turn on kitchen lamp", intent_name="HassTurnOn", language="en"
+        ),  # same intent as the first candidate
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.9,
+            char_ngram_score=0.9,
+            bm25_score=0.9,
+            intent_score=0.9,
+            final_score=1.0 - margin / 2.0,
+        ),
+    )
+
+    ranked = [first, second]
+
+    ranking._apply_intent_disambiguation(ranked)
+
+    # Because the intents are identical, the original ordering should be preserved
+    assert ranked[0] is first
+    assert ranked[1] is second

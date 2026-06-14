@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from functools import lru_cache
 from heapq import nsmallest
 
 from rapidfuzz import fuzz
@@ -30,6 +29,7 @@ from .const import (
 )
 from .normalization import (
     char_ngrams_normalized,
+    literal_token_variants,
     normalize_text,
     normalize_text_no_diacritics,
 )
@@ -174,7 +174,7 @@ def _exact_intent_score(
     query_tokens: frozenset[str],
 ) -> float:
     """Return how well query tokens cover localized template literal words."""
-    variants = _literal_token_variants(literal_text)
+    variants = literal_token_variants(literal_text)
     if not variants:
         return 1.0
     max_score = 0.0
@@ -258,7 +258,7 @@ def _positional_intent_score_from_lookup(
     the search space, preventing e.g. ``tắt`` (turn off) from
     accidentally matching ``tắm`` (bath) in a ``bật quạt phòng tắm`` query.
     """
-    variants = _literal_token_variants(literal_text)
+    variants = literal_token_variants(literal_text)
     if not variants:
         return 1.0
     if candidate_entity is not None and query_tokens.issubset(candidate_entity):
@@ -299,19 +299,6 @@ def _non_entity_coverage(
     matched = len(non_entity & candidate_tokens)
     coverage = matched / len(non_entity)
     return coverage * coverage
-
-
-@lru_cache(maxsize=8192)
-def _literal_token_variants(literal_text: str) -> tuple[frozenset[str], ...]:
-    """Return normalized literal token variants for intent action scoring."""
-    variants = []
-    for variant in literal_text.split("|"):
-        if not variant.strip():
-            continue
-        literal_tokens = frozenset(normalize_text(variant).split())
-        if literal_tokens:
-            variants.append(literal_tokens)
-    return tuple(variants)
 
 
 def rank_candidates(
@@ -370,14 +357,12 @@ def rank_candidates(
         for candidate in candidates:
             literal_text = candidate.metadata.get("literal_text")
             if literal_text:
-                for variant in _literal_token_variants(literal_text):
+                for variant in literal_token_variants(literal_text):
                     all_tokens.update(variant)
         positional_literal_tokens = frozenset(all_tokens)
 
     if reference_bm25_index is not None:
-        bm25_scores = reference_bm25_index.score_custom_documents(
-            query_normalized, tuple(candidate.normalized_text for candidate in candidates)
-        )
+        bm25_scores = reference_bm25_index.score_custom_documents(query_normalized, candidates)
     elif bm25_index is None:
         bm25_index = BM25Index.from_normalized_texts(
             tuple(candidate.normalized_text for candidate in candidates)
@@ -403,7 +388,7 @@ def rank_candidates(
     for idx in top_indices:
         literal_text = candidates[idx].metadata.get("literal_text")
         if literal_text:
-            for variant in _literal_token_variants(literal_text):
+            for variant in literal_token_variants(literal_text):
                 prefiltered_literal_tokens.update(variant)
     positional_lookup = (
         _build_positional_lookup(frozenset(prefiltered_literal_tokens), query_tokens)
@@ -428,12 +413,11 @@ def rank_candidates(
                 exact = _exact_intent_score(literal_text, query_tokens)
                 intent_score_cache[literal_text] = exact
             if exact >= 1.0:
-                variants = _literal_token_variants(literal_text)
+                variants = literal_token_variants(literal_text)
                 total_unique = len({tok for var in variants for tok in var})
                 if total_unique >= 2:
-                    matched_q = sum(1 for t in query_tokens if t in candidate_tokens)
-                    unsq = matched_q / len(query_tokens) if query_tokens else 1.0
-                    intent_score = max(coverage, unsq)
+                    matched_q = len(query_tokens & candidate_tokens)
+                    intent_score = matched_q / len(query_tokens) if query_tokens else 1.0
             else:
                 intent_score = _positional_intent_score_from_lookup(
                     literal_text, query_tokens, positional_lookup, candidate_tokens

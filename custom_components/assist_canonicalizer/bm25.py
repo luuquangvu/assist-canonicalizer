@@ -6,6 +6,7 @@ from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from math import log
+from typing import Any
 
 from .normalization import tokenize_normalized, tokenize_text
 
@@ -50,6 +51,7 @@ class BM25Index:
             for token, idf in self._inverse_document_frequencies.items()
         }
         self._postings = self._build_postings()
+        self._custom_cache: dict[str, tuple[tuple[str, ...], Counter[str], int]] = {}
 
     @classmethod
     def from_texts(cls, texts: Sequence[str], k1: float = 1.5, b: float = 0.75) -> BM25Index:
@@ -140,16 +142,18 @@ class BM25Index:
     def score_custom_documents(
         self,
         query: str,
-        documents: Sequence[str],
+        documents: Sequence[str | Any],
         k1: float | None = None,
         b: float | None = None,
     ) -> tuple[float, ...]:
-        """Score custom normalized documents using this index for IDF/avg_length."""
+        """Score custom normalized documents using this index for IDF/avg_length.
+
+        Accepts either strings or Candidate-like objects. Caches tokenized tokens,
+        Counters, and lengths to avoid repeated work in hot paths.
+        """
         query_tokens = tokenize_text(query)
         if not query_tokens or not documents:
             return tuple(0.0 for _ in documents)
-
-        tokenized_docs = [tokenize_normalized(doc) for doc in documents]
 
         avg_len = self._average_length
         if avg_len == 0:
@@ -160,15 +164,40 @@ class BM25Index:
 
         use_k1 = k1 if k1 is not None else self._k1
         use_b = b if b is not None else self._b
+        if use_k1 <= 0:
+            raise ValueError("k1 must be positive")
+        if not 0 <= use_b <= 1:
+            raise ValueError("b must be between 0 and 1")
         use_k1_plus_1 = use_k1 + 1
         one_minus_b = 1.0 - use_b
         b_over_avg = use_b / avg_len
 
         doc_token_counters: list[Counter[str]] = []
         doc_len_factors: list[float] = []
-        for tokens in tokenized_docs:
-            doc_token_counters.append(Counter(tokens))
-            doc_len_factors.append(use_k1 * (one_minus_b + b_over_avg * len(tokens)))
+
+        for doc in documents:
+            text: str
+            tokens: tuple[str, ...] | None
+            if isinstance(doc, str):
+                text = doc
+                tokens = None
+            else:
+                text = doc.normalized_text
+                tokens = doc.normalized_tokens
+
+            cached = self._custom_cache.get(text)
+            if cached is None:
+                if tokens is None:
+                    tokens = tokenize_normalized(text)
+                counter = Counter(tokens)
+                length = len(tokens)
+                cached = (tokens, counter, length)
+                self._custom_cache[text] = cached
+            else:
+                tokens, counter, length = cached
+
+            doc_token_counters.append(counter)
+            doc_len_factors.append(use_k1 * (one_minus_b + b_over_avg * length))
 
         raw_scores = [0.0] * len(documents)
         seen_tokens: set[str] = set()
