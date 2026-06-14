@@ -47,7 +47,7 @@ Candidate: Any = None
 FallbackReason: Any = None
 
 
-def _sanitize_path(root_path: str, user_path: str) -> str:
+def sanitize_path(root_path: str, user_path: str) -> str:
     """Validate, sanitize and contain a user-supplied file path.
 
     1. Reconstructs every character from the static _PATH_ALLOWED_CHARS
@@ -78,13 +78,13 @@ def _sanitize_path(root_path: str, user_path: str) -> str:
     return fullpath
 
 
-def _sanitize_path_required(root: str, label: str, path: str) -> str:
+def sanitize_path_required(root: str, label: str, path: str) -> str:
     """Sanitize *path* under *root* or print error to stderr and exit(1).
 
     *label* is used in the error message (e.g. 'datasets_dir').
     """
     try:
-        return _sanitize_path(root, path)
+        return sanitize_path(root, path)
     except ValueError as err:
         print(f"Error: {label} must be inside {root}: {path} — {err}", file=sys.stderr)
         sys.exit(1)
@@ -1059,24 +1059,56 @@ def _markdown_report(report: Mapping[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def atomic_write(path: str, content: str) -> None:
+    """Atomically write *content* to *path* via a temporary file."""
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
+    tmp_path.write_text(content, encoding="utf-8")
+    tmp_path.replace(output_path)
+
+
+def discover_datasets(datasets_dir: str, languages: list[str] | None = None) -> dict[str, str]:
+    """Discover real-world JSON datasets ordered by language code.
+
+    Args:
+        datasets_dir: Path to the datasets directory (pre-sanitized).
+        languages: Optional list of language codes to filter by.
+
+    Returns:
+        Mapping of language codes to absolute file paths.
+    """
+    results: dict[str, str] = {}
+    safe_dir_real = os.path.realpath(datasets_dir)
+    if not os.path.isdir(safe_dir_real):
+        return results
+    for entry in sorted(os.listdir(safe_dir_real)):
+        if not entry.endswith(".json"):
+            continue
+        full_path = os.path.join(safe_dir_real, entry)
+        real_path = os.path.realpath(full_path)
+        if not os.path.isfile(real_path):
+            continue
+        if not real_path.startswith(safe_dir_real + os.sep):
+            continue
+        lang_code = entry[:-5]
+        if languages is not None and lang_code not in languages:
+            continue
+        results[lang_code] = real_path
+    return results
+
+
 def _write_json_report(path: str, report: Mapping[str, Any]) -> None:
     """Write the evaluation report as JSON using an atomic replacement."""
-    safe_report = _stringify_keys(report)
-    output_path = Path(path)
-    tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
-    tmp_path.write_text(
-        orjson.dumps(safe_report, option=orjson.OPT_INDENT_2).decode("utf-8") + "\n",
-        encoding="utf-8",
+    atomic_write(
+        path,
+        orjson.dumps(_stringify_keys(report), option=orjson.OPT_INDENT_2).decode("utf-8") + "\n",
     )
-    tmp_path.replace(output_path)
 
 
 def _write_markdown_report(path: str, report: Mapping[str, Any]) -> None:
     """Write the evaluation report as Markdown using an atomic replacement."""
-    output_path = Path(path)
-    tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
-    tmp_path.write_text(_markdown_report(report), encoding="utf-8")
-    tmp_path.replace(output_path)
+    atomic_write(path, _markdown_report(report))
 
 
 def _text_report(report: Mapping[str, Any]) -> str:
@@ -1270,15 +1302,14 @@ def _text_summary_table(title: str, payload: Mapping[str, Any]) -> list[str]:
         f"{lex_overall.get('average_latency_ms', 0):.1f}",
     )
 
+    cat_rows.append(overall_row)
     hdr, sep, data = align_table(_headers, cat_rows, alignments="<")
     lines.append(sep)
     lines.append(hdr)
     lines.append(sep)
-    lines.extend(data)
+    lines.extend(data[:-1])  # all category rows
     lines.append(sep)
-
-    _, _, ov = align_table(_headers, [overall_row], alignments="<")
-    lines.extend(ov)
+    lines.append(data[-1])  # overall row
     lines.append(sep)
     return lines
 
@@ -1316,11 +1347,7 @@ def _text_ablation_table(title: str, payload: Mapping[str, Any]) -> list[str]:
 
 def _write_text_report(path: str, report: Mapping[str, Any]) -> None:
     """Write the evaluation report as plain text using an atomic replacement."""
-    output_path = Path(path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
-    tmp_path.write_text(_text_report(report), encoding="utf-8")
-    tmp_path.replace(output_path)
+    atomic_write(path, _text_report(report))
 
 
 def _threshold_failures(
@@ -1654,37 +1681,23 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    safe_datasets_dir = _sanitize_path_required(_REPO_ROOT, "datasets_dir", args.datasets_dir)
+    safe_datasets_dir = sanitize_path_required(_REPO_ROOT, "datasets_dir", args.datasets_dir)
     safe_output_json: str | None = None
     safe_output_md: str | None = None
     safe_output_txt: str | None = None
     if args.output_json is not None:
-        safe_output_json = _sanitize_path_required(_REPO_ROOT, "output_json", args.output_json)
+        safe_output_json = sanitize_path_required(_REPO_ROOT, "output_json", args.output_json)
     if args.output_md is not None:
-        safe_output_md = _sanitize_path_required(_REPO_ROOT, "output_md", args.output_md)
+        safe_output_md = sanitize_path_required(_REPO_ROOT, "output_md", args.output_md)
     if args.output_txt is not None:
-        safe_output_txt = _sanitize_path_required(_REPO_ROOT, "output_txt", args.output_txt)
+        safe_output_txt = sanitize_path_required(_REPO_ROOT, "output_txt", args.output_txt)
 
     # Parse language filter list
     language_filter: list[str] | None = None
     if args.languages:
         language_filter = [lang.strip() for lang in args.languages.split(",") if lang.strip()]
 
-    datasets = {}
-    if os.path.exists(safe_datasets_dir):
-        _safe_dir_real = os.path.realpath(safe_datasets_dir)
-        for filename in sorted(os.listdir(safe_datasets_dir)):
-            if filename.endswith(".json"):
-                file_path = os.path.join(safe_datasets_dir, filename)
-                real_path = os.path.realpath(file_path)
-                if not os.path.isfile(real_path):
-                    continue
-                if not real_path.startswith(_safe_dir_real + os.sep):
-                    continue
-                lang = filename[:-5]
-                if language_filter is not None and lang not in language_filter:
-                    continue
-                datasets[lang] = real_path
+    datasets = discover_datasets(safe_datasets_dir, language_filter)
 
     success = asyncio.run(
         run_evaluation(

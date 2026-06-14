@@ -43,7 +43,7 @@ def _discover_languages() -> tuple[str, ...]:
     if _LANGUAGES is not None:
         return _LANGUAGES
     repo_root = str(Path(__file__).resolve().parent.parent)
-    safe_dir = evaluate_metrics._sanitize_path(repo_root, str(DATASET_DIR))
+    safe_dir = evaluate_metrics.sanitize_path(repo_root, str(DATASET_DIR))
     languages: list[str] = []
     safe_dir_real = os.path.realpath(safe_dir)
     for filename in sorted(os.listdir(safe_dir)):

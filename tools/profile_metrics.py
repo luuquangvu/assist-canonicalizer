@@ -33,7 +33,6 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from string import ascii_letters, digits
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -63,6 +62,9 @@ rapidfuzz_similarity_normalized: Any = None
 lexical_score: Any = None
 REGISTRY_SLOTS: Any = None
 run_evaluation: Any = None
+sanitize_path_required: Any = None
+atomic_write: Any = None
+discover_datasets: Any = None
 
 
 def _bootstrap_imports() -> None:
@@ -74,6 +76,7 @@ def _bootstrap_imports() -> None:
     global char_ngrams_normalized, RankedCandidate, ScoreBreakdown, Candidate
     global rank_candidates, BM25Index, CharNGramIndex
     global rapidfuzz_similarity_normalized, lexical_score, REGISTRY_SLOTS, run_evaluation
+    global sanitize_path_required, atomic_write, discover_datasets
 
     if _BOOTSTRAPPED:
         return
@@ -121,7 +124,10 @@ def _bootstrap_imports() -> None:
     )
     from tools.evaluate_metrics import REGISTRY_SLOTS as _REGISTRY_SLOTS
     from tools.evaluate_metrics import align_table as _align_table
+    from tools.evaluate_metrics import atomic_write as _aw
+    from tools.evaluate_metrics import discover_datasets as _discover
     from tools.evaluate_metrics import run_evaluation as _run_eval
+    from tools.evaluate_metrics import sanitize_path_required as _sanitize_req
 
     BM25Index = _BM25Index
     load_language_intent_sources = _load_src
@@ -139,8 +145,11 @@ def _bootstrap_imports() -> None:
     rapidfuzz_similarity_normalized = _rf_sim
     CanonicalizerRuntime = _CanonicalizerRuntime
     REGISTRY_SLOTS = _REGISTRY_SLOTS
+    atomic_write = _aw
     align_table = _align_table
+    discover_datasets = _discover
     run_evaluation = _run_eval
+    sanitize_path_required = _sanitize_req
 
     _BOOTSTRAPPED = True
 
@@ -154,54 +163,6 @@ DEFAULT_GRANULARITY = "medium"
 DEFAULT_MAX_REGRESSION_PCT = 20.0
 BENCHMARK_DIR = "benchmark"
 BASELINE_DIR = "benchmark/baseline"
-
-_PATH_ALLOWED_CHARS = ascii_letters + digits + "/._-"
-
-
-def _sanitize_path(root_path: str, user_path: str) -> str:
-    """Validate, sanitize and contain a user-supplied file path.
-
-    1. Reconstructs every character from the static _PATH_ALLOWED_CHARS
-       whitelist via integer-index lookup — the ONLY pattern CodeQL
-       recognizes to completely sever a path-injection taint chain.
-    2. Resolves the root via os.path.realpath (symlink-safe), joins
-       with the cleaned path, normalizes via os.path.normpath, and
-       verifies containment via startswith.
-
-    Returns the safe absolute path or raises ValueError.
-    """
-    if not isinstance(user_path, str):
-        raise ValueError(f"Invalid path value {user_path!r}; expected a string.")
-
-    safe_chars: list[str] = []
-    for char in user_path:
-        idx = _PATH_ALLOWED_CHARS.find(char)
-        if idx == -1:
-            raise ValueError(f"Invalid path {user_path!r}; character {char!r} is not allowed.")
-        safe_chars.append(_PATH_ALLOWED_CHARS[idx])
-    clean = "".join(safe_chars)
-
-    root = os.path.realpath(root_path)
-    fullpath = os.path.realpath(os.path.normpath(os.path.join(root, clean)))
-
-    if fullpath != root and not fullpath.startswith(root + os.sep):
-        raise ValueError(f"Resolved path {fullpath!r} escapes allowed root {root!r}.")
-    return fullpath
-
-
-def _sanitize_path_required(root: str, label: str, path: str) -> str:
-    """Sanitize *path* under *root* or print error to stderr and exit(1).
-
-    *label* is used in the error message (e.g. 'datasets_dir').
-    """
-    try:
-        return _sanitize_path(root, path)
-    except ValueError as err:
-        print(
-            f"Error: {label} must be inside {root}: {path} — {err}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
 
 
 PROFILING_TARGETS = ("evaluate", "build_index", "rank", "components", "all")
@@ -567,9 +528,7 @@ class BaselineManager:
         """Save *data* as the new baseline for *target*."""
         self._baseline_dir.mkdir(parents=True, exist_ok=True)
         path = self._baseline_dir / f"{target}_baseline.json"
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-        tmp.replace(path)
+        atomic_write(str(path), json.dumps(data, indent=2) + "\n")
         print(f"Baseline saved to {path}")
 
     def compare(
@@ -700,12 +659,7 @@ class ReportGenerator:
             return obj
 
         serializable = _serialize(report)
-        tmp = out.with_suffix(out.suffix + ".tmp")
-        tmp.write_text(
-            json.dumps(serializable, indent=2, default=str) + "\n",
-            encoding="utf-8",
-        )
-        tmp.replace(out)
+        atomic_write(str(out), json.dumps(serializable, indent=2, default=str) + "\n")
         print(f"JSON report saved to {out}")
 
     @staticmethod
@@ -774,11 +728,8 @@ class ReportGenerator:
                 lines.append(f"- {r}")
             lines.append("")
 
-        out = Path(path)
-        tmp = out.with_suffix(out.suffix + ".tmp")
-        tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        tmp.replace(out)
-        print(f"Markdown report saved to {out}")
+        atomic_write(path, "\n".join(lines) + "\n")
+        print(f"Markdown report saved to {Path(path)}")
 
     @staticmethod
     def text_report(report: dict[str, Any], path: str) -> None:
@@ -945,11 +896,8 @@ class ReportGenerator:
         lines.append("PROFILE_OK")
         lines.append("=" * 80)
 
-        out = Path(path)
-        tmp = out.with_suffix(out.suffix + ".tmp")
-        tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        tmp.replace(out)
-        print(f"Text report saved to {out}")
+        atomic_write(path, "\n".join(lines) + "\n")
+        print(f"Text report saved to {Path(path)}")
 
 
 # ---------------------------------------------------------------------------
@@ -1046,41 +994,6 @@ def _md_stat_table(title: str, stats: dict[str, Any]) -> list[str]:
             )
     lines.append("")
     return lines
-
-
-# ---------------------------------------------------------------------------
-# Dataset discovery
-# ---------------------------------------------------------------------------
-
-
-def _discover_datasets(datasets_dir: str, languages: list[str] | None = None) -> dict[str, str]:
-    """Discover real-world JSON datasets ordered by language code.
-
-    Args:
-        datasets_dir: Path to the datasets directory (pre-sanitized).
-        languages: Optional list of language codes to filter by.
-
-    Returns:
-        Mapping of language codes to absolute file paths.
-    """
-    results: dict[str, str] = {}
-    safe_dir_real = os.path.realpath(datasets_dir)
-    if not os.path.isdir(safe_dir_real):
-        return results
-    for entry in sorted(os.listdir(safe_dir_real)):
-        if not entry.endswith(".json"):
-            continue
-        full_path = os.path.join(safe_dir_real, entry)
-        real_path = os.path.realpath(full_path)
-        if not os.path.isfile(real_path):
-            continue
-        if not real_path.startswith(safe_dir_real + os.sep):
-            continue
-        lang_code = entry[:-5]
-        if languages is not None and lang_code not in languages:
-            continue
-        results[lang_code] = real_path
-    return results
 
 
 # ---------------------------------------------------------------------------
@@ -1996,6 +1909,7 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+    _bootstrap_imports()
 
     if args.iterations < 1:
         print("Error: --iterations must be positive", file=sys.stderr)
@@ -2005,19 +1919,19 @@ def main() -> None:
         sys.exit(1)
 
     # Sanitize all user-supplied paths (CodeQL path-injection hardening)
-    safe_datasets_dir = _sanitize_path_required(_REPO_ROOT, "datasets_dir", args.datasets_dir)
+    safe_datasets_dir = sanitize_path_required(_REPO_ROOT, "datasets_dir", args.datasets_dir)
     safe_output_json: str | None = None
     safe_output_md: str | None = None
     safe_output_txt: str | None = None
     if args.output_json is not None:
-        safe_output_json = _sanitize_path_required(_REPO_ROOT, "output_json", args.output_json)
+        safe_output_json = sanitize_path_required(_REPO_ROOT, "output_json", args.output_json)
     if args.output_md is not None:
-        safe_output_md = _sanitize_path_required(_REPO_ROOT, "output_md", args.output_md)
+        safe_output_md = sanitize_path_required(_REPO_ROOT, "output_md", args.output_md)
     if args.output_txt is not None:
-        safe_output_txt = _sanitize_path_required(_REPO_ROOT, "output_txt", args.output_txt)
+        safe_output_txt = sanitize_path_required(_REPO_ROOT, "output_txt", args.output_txt)
 
     # Discover datasets
-    datasets = _discover_datasets(safe_datasets_dir, args.languages)
+    datasets = discover_datasets(safe_datasets_dir, args.languages)
     if not datasets:
         print(f"Error: No datasets found in {safe_datasets_dir}", file=sys.stderr)
         sys.exit(1)
@@ -2027,7 +1941,7 @@ def main() -> None:
 
     # If --baseline specified, load from that path instead
     if args.baseline:
-        safe_baseline = _sanitize_path_required(_REPO_ROOT, "baseline", args.baseline)
+        safe_baseline = sanitize_path_required(_REPO_ROOT, "baseline", args.baseline)
         baseline_mgr = BaselineManager(
             str(Path(safe_baseline).parent.parent) if BASELINE_DIR in safe_baseline else _REPO_ROOT
         )
@@ -2080,9 +1994,7 @@ def main() -> None:
                 "target": "all",
                 "targets": all_reports,
             }
-            tmp = agg_path.with_suffix(agg_path.suffix + ".tmp")
-            tmp.write_text(json.dumps(agg_json, indent=2, default=str) + "\n", encoding="utf-8")
-            tmp.replace(agg_path)
+            atomic_write(str(agg_path), json.dumps(agg_json, indent=2, default=str) + "\n")
             print(f"\nAggregate all-targets report saved to {agg_path}")
         else:
             _run_profiling(
