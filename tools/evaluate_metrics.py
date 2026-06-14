@@ -517,23 +517,32 @@ def _component_score(item: RankedCandidate, component: str) -> float | None:
     raise ValueError(f"Unknown ablation component: {component}")
 
 
+def _deduce_rejection_reason(
+    ranked: tuple[RankedCandidate, ...],
+) -> str:
+    """Return the rejection reason for a top candidate rejected by gates.
+
+    Order matches :func:`accepted_candidate`: empty index → low confidence → low margin.
+    """
+    if not ranked:
+        return FallbackReason.EMPTY_INDEX.value
+    if ranked[0].scores.final_score < DEFAULT_MIN_CONFIDENCE:
+        return FallbackReason.LOW_CONFIDENCE.value
+    return FallbackReason.LOW_MARGIN.value
+
+
 def _select_accepted_with_gate(
     ranked: tuple[RankedCandidate, ...],
 ) -> tuple[RankedCandidate | None, dict[str, Any]]:
     """Return the accepted candidate with acceptance gate diagnostics.
 
     Delegates to :func:`accepted_candidate` and wraps the result
-    with diagnostic metadata so there is no duplicated gate logic.
+    with diagnostic metadata.  The rejection reason is derived by
+    :func:`_deduce_rejection_reason` so the gate priority order
+    lives in exactly one place.
     """
     result = _accepted_candidate(ranked)
-    if result is not None:
-        reason = "accepted"
-    elif not ranked:
-        reason = FallbackReason.EMPTY_INDEX.value
-    elif ranked[0].scores.final_score < DEFAULT_MIN_CONFIDENCE:
-        reason = FallbackReason.LOW_CONFIDENCE.value
-    else:
-        reason = FallbackReason.LOW_MARGIN.value
+    reason = "accepted" if result is not None else _deduce_rejection_reason(ranked)
 
     top_score = ranked[0].scores.final_score if ranked else None
     competing_candidate = (
@@ -591,11 +600,12 @@ def _record_case_result(
     expected_canonical: str,
     expected_intent: str,
     expected_slots: Mapping[str, Any],
-    latency_ms: float,
+    latency_ms: float | None = 0.0,
 ) -> tuple[bool, str, dict[str, Any]]:
     """Record one evaluated case and return whether it matched completely."""
     stats.total += 1
-    stats.latency_ms_total += latency_ms
+    if latency_ms is not None:
+        stats.latency_ms_total += latency_ms
     actual_slots = _slots_from_candidate(selected)
     if selected is None:
         stats.fallback += 1
@@ -638,6 +648,19 @@ def _case_row(
     canonical_ok = actual_text == case["expected_canonical"]
     intent_ok = actual_intent == case["expected_intent"]
     slots_ok = _slots_match(actual_slots, expected_slots)
+    # HassIL mode uses synthetic candidates; component scores are not meaningful
+    if mode_name == "hassil":
+        final_score = None
+        top_score = None
+        competing_score = None
+        margin = None
+        acceptance_reason = None
+    else:
+        final_score = _score_value(selected, "final_score")
+        top_score = gate.get("top_score")
+        competing_score = gate.get("competing_score")
+        margin = gate.get("margin")
+        acceptance_reason = gate.get("reason")
     return {
         "language": lang,
         "mode": mode_name,
@@ -655,11 +678,11 @@ def _case_row(
         "intent_slots_ok": intent_ok and slots_ok,
         "fallback": selected is None,
         "reason": reason,
-        "final_score": _score_value(selected, "final_score"),
-        "top_score": gate.get("top_score"),
-        "competing_score": gate.get("competing_score"),
-        "margin": gate.get("margin"),
-        "acceptance_reason": gate.get("reason"),
+        "final_score": final_score,
+        "top_score": top_score,
+        "competing_score": competing_score,
+        "margin": margin,
+        "acceptance_reason": acceptance_reason,
         "latency_ms": latency_ms,
     }
 
@@ -887,7 +910,7 @@ def _record_ablations(
             case["expected_canonical"],
             case["expected_intent"],
             case.get("expected_slots", {}),
-            0.0,
+            latency_ms=None,
         )
 
 
@@ -971,6 +994,15 @@ def _write_markdown_report(path: str, report: Mapping[str, Any]) -> None:
     tmp_path.replace(output_path)
 
 
+def _write_text_report(path: str, report: Mapping[str, Any]) -> None:
+    """Write the evaluation report as plain text using an atomic replacement."""
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
+    tmp_path.write_text(_markdown_report(report), encoding="utf-8")
+    tmp_path.replace(output_path)
+
+
 def _threshold_failures(
     stats: CategoryStats,
     min_intent_slot_accuracy: float | None,
@@ -1000,11 +1032,15 @@ async def run_evaluation(
     output_md: str | None,
     min_intent_slot_accuracy: float | None,
     max_fallback_rate: float | None,
+    datasets_dir: str = "tests/real_world",
+    skip_hassil: bool = False,
+    skip_ablations: bool = False,
+    output_txt: str | None = None,
 ) -> bool:
     """Run evaluation on the datasets and print the summary report."""
     _bootstrap_project_imports()
     if not datasets:
-        print("Error: No datasets found in tests/real_world/")
+        print(f"Error: No datasets found in {datasets_dir}/")
         return False
     if failure_limit < 0:
         print("Error: --failure-limit must be zero or positive")
@@ -1017,7 +1053,7 @@ async def run_evaluation(
     print(
         "======================================================================================================================"
     )
-    print("Dataset Directory: tests/real_world/")
+    print(f"Dataset Directory: {datasets_dir}/")
     print(f"Total Languages: {len(datasets)}")
     print(f"Failure Detail Limit: {failure_limit}")
     if output_json:
@@ -1084,16 +1120,24 @@ async def run_evaluation(
         hassil_intents = hassil.intents.Intents.from_dict(merged_intents)
         hassil_slot_lists = make_hassil_slot_lists(slots)
 
+        print(f"Processing {lang.upper()} ({len(test_cases)} cases) ...", flush=True)
+
         results = _new_results()
         ablations = _new_ablation_results()
         failures: list[dict[str, Any]] = []
         language_rows: list[dict[str, Any]] = []
 
-        for mode_name in ("hassil", "lexical"):
-            runtime = CanonicalizerRuntime()
-            runtime.set_index(index)
-            runtime.update_registry_slot_values(slots)
+        # Hoist runtime once per language; only lexical mode uses it
+        runtime = CanonicalizerRuntime()
+        runtime.set_index(index)
+        runtime.update_registry_slot_values(slots)
 
+        modes: list[str] = []
+        if not skip_hassil:
+            modes.append("hassil")
+        modes.append("lexical")
+
+        for mode_name in modes:
             for case in test_cases:
                 category = case["category"]
                 query = case["query"]
@@ -1164,7 +1208,7 @@ async def run_evaluation(
                 )
                 language_rows.append(row)
                 all_case_rows.append(row)
-                if mode_name == "lexical":
+                if mode_name == "lexical" and not skip_ablations:
                     _record_ablations(ablations, ranked, case)
                 if not is_ok:
                     failures.append(
@@ -1179,7 +1223,8 @@ async def run_evaluation(
                     )
 
         _print_summary_table(f"Summary: {lang.upper()}", results)
-        _print_ablation_table(f"Ablation Top-1: {lang.upper()}", ablations)
+        if not skip_ablations:
+            _print_ablation_table(f"Ablation Top-1: {lang.upper()}", ablations)
         _print_failure_details(failures, failure_limit)
         _merge_results(global_results, results)
         _merge_results(global_ablations, ablations)
@@ -1214,6 +1259,8 @@ async def run_evaluation(
         _write_json_report(output_json, report)
     if output_md:
         _write_markdown_report(output_md, report)
+    if output_txt:
+        _write_text_report(output_txt, report)
     print("\nEvaluation Complete.")
     return overall_success
 
@@ -1228,10 +1275,28 @@ def main() -> None:
         help="Directory containing the JSON dataset files",
     )
     parser.add_argument(
+        "--languages",
+        type=str,
+        default=None,
+        help="Optional comma-separated language codes to evaluate (e.g. 'en,vi')",
+    )
+    parser.add_argument(
         "--failure-limit",
         type=int,
         default=0,
         help="Maximum number of detailed failures to print per language",
+    )
+    parser.add_argument(
+        "--skip-hassil",
+        action="store_true",
+        default=False,
+        help="Skip HassIL baseline evaluation (lexical mode only)",
+    )
+    parser.add_argument(
+        "--skip-ablations",
+        action="store_true",
+        default=False,
+        help="Skip per-component ablation analysis",
     )
     parser.add_argument(
         "--output-json",
@@ -1244,6 +1309,12 @@ def main() -> None:
         type=str,
         default=None,
         help="Optional Markdown report output path",
+    )
+    parser.add_argument(
+        "--output-txt",
+        type=str,
+        default=None,
+        help="Optional plain-text report output path",
     )
     parser.add_argument(
         "--min-intent-slot-accuracy",
@@ -1262,15 +1333,23 @@ def main() -> None:
     safe_datasets_dir = _sanitize_path_required(_REPO_ROOT, "datasets_dir", args.datasets_dir)
     safe_output_json: str | None = None
     safe_output_md: str | None = None
+    safe_output_txt: str | None = None
     if args.output_json is not None:
         safe_output_json = _sanitize_path_required(_REPO_ROOT, "output_json", args.output_json)
     if args.output_md is not None:
         safe_output_md = _sanitize_path_required(_REPO_ROOT, "output_md", args.output_md)
+    if args.output_txt is not None:
+        safe_output_txt = _sanitize_path_required(_REPO_ROOT, "output_txt", args.output_txt)
+
+    # Parse language filter list
+    language_filter: list[str] | None = None
+    if args.languages:
+        language_filter = [lang.strip() for lang in args.languages.split(",") if lang.strip()]
 
     datasets = {}
     if os.path.exists(safe_datasets_dir):
         _safe_dir_real = os.path.realpath(safe_datasets_dir)
-        for filename in os.listdir(safe_datasets_dir):
+        for filename in sorted(os.listdir(safe_datasets_dir)):
             if filename.endswith(".json"):
                 file_path = os.path.join(safe_datasets_dir, filename)
                 real_path = os.path.realpath(file_path)
@@ -1279,6 +1358,8 @@ def main() -> None:
                 if not real_path.startswith(_safe_dir_real + os.sep):
                     continue
                 lang = filename[:-5]
+                if language_filter is not None and lang not in language_filter:
+                    continue
                 datasets[lang] = real_path
 
     success = asyncio.run(
@@ -1287,10 +1368,15 @@ def main() -> None:
             failure_limit=args.failure_limit,
             output_json=safe_output_json,
             output_md=safe_output_md,
+            output_txt=safe_output_txt,
             min_intent_slot_accuracy=args.min_intent_slot_accuracy,
             max_fallback_rate=args.max_fallback_rate,
+            datasets_dir=str(Path(safe_datasets_dir).relative_to(_REPO_ROOT)),
+            skip_hassil=args.skip_hassil,
+            skip_ablations=args.skip_ablations,
         )
     )
+
     if not success:
         sys.exit(1)
     sys.exit(0)
