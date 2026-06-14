@@ -35,6 +35,9 @@ def _render_md_table(
 ) -> str:
     """Build a Markdown table with dynamically computed column widths.
 
+    Produces output compatible with Prettier's Markdown table formatting
+    (single space between pipe and content on each side).
+
     Args:
         headers: Column header strings.
         rows: Data rows; each tuple must match *headers* length.
@@ -45,32 +48,31 @@ def _render_md_table(
         Markdown table string with properly aligned columns.
     """
     ncols = len(headers)
-    padding = 1
 
     # Compute maximum column widths from headers and all data cells
     widths = [len(h) for h in headers]
     for row in rows:
         for i, cell in enumerate(row):
             widths[i] = max(widths[i], len(cell))
-    widths = [w + padding for w in widths]
 
     # Expand alignment specifier
     aligns = [alignments] * ncols if len(alignments) == 1 else list(alignments)[:ncols]
 
     def _fmt(row: tuple[str, ...]) -> str:
-        parts = [f"{c:{a}{w}}" for c, a, w in zip(row, aligns, widths, strict=True)]
-        return "| " + " | ".join(parts) + " |"
+        parts = [f" {c:{a}{w}} " for c, a, w in zip(row, aligns, widths, strict=True)]
+        return "|" + "|".join(parts) + "|"
 
     hdr = _fmt(headers)
 
-    # Markdown separator: right-aligned columns get a trailing colon
+    # Markdown separator with alignment colons (colon uses 1 char of width)
     sep_parts: list[str] = []
     for a, w in zip(aligns, widths, strict=True):
+        dashes = w - 1
         if a == ">":
-            sep_parts.append("-" * (w - 1) + ":")
+            sep_parts.append(f" {'-' * dashes}: ")
         else:
-            sep_parts.append(":" + "-" * (w - 1))
-    sep = "| " + " | ".join(sep_parts) + " |"
+            sep_parts.append(f" :{'-' * dashes} ")
+    sep = "|" + "|".join(sep_parts) + "|"
 
     data = [_fmt(row) for row in rows]
     return "\n".join([hdr, sep, *data])
