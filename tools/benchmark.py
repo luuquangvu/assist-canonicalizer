@@ -2131,7 +2131,7 @@ class ReportGenerator:
 
         regressions = report.get("regressions", [])
         if regressions:
-            lines.append("## ⚠️ Regression Detections")
+            lines.append("## Regression Detections")
             lines.append("")
             for r in regressions:
                 lines.append(f"- {r}")
@@ -3020,6 +3020,221 @@ def _run_profiling(
     return report
 
 
+def _write_profile_all_markdown(all_reports: dict[str, Any], path: str) -> None:
+    """Generate and write a consolidated Markdown report for all profiling targets."""
+    lines: list[str] = [
+        "# Assist Canonicalizer — Consolidated Performance Profile (All Targets)",
+        "",
+        ("This report aggregates performance statistics across all measured profiling targets."),
+        "",
+    ]
+
+    for target, report in all_reports.items():
+        lines.append(f"## Target: `{target}`")
+        lines.append("")
+
+        # Aggregate Performance
+        agg = report.get("aggregate", {})
+        if agg:
+            lines.extend(_md_stat_table(f"### Aggregate Performance ({target})", agg))
+
+        # Resource Utilization
+        res = report.get("resource", {})
+        if res:
+            lines.append(f"### Resource Utilization ({target})")
+            lines.append("")
+            lines.append("| Metric | Value |")
+            lines.append("| :--- | :--- |")
+            for k, v in sorted(res.items()):
+                lines.append(f"| {k} | {v:.2f} |")
+            lines.append("")
+
+        # Phase Timing
+        phases = report.get("phases", {})
+        if phases:
+            lines.append(f"### Phase Timing ({target})")
+            lines.append("")
+            ph_headers = (
+                "Phase",
+                "Mean (ms)",
+                "Median (ms)",
+                "p95 (ms)",
+                "p99 (ms)",
+                "StdDev (ms)",
+                "Memory Δ (MB)",
+            )
+            ph_rows: list[tuple[str, ...]] = []
+            for name, phase_data in phases.items():
+                e = phase_data.get("elapsed", {})
+                m = phase_data.get("memory_delta_mb", {})
+                ph_rows.append(
+                    (
+                        name,
+                        f"{e.get('mean', 0) * 1000:.2f}",
+                        f"{e.get('median', 0) * 1000:.2f}",
+                        f"{e.get('p95', 0) * 1000:.2f}",
+                        f"{e.get('p99', 0) * 1000:.2f}",
+                        f"{e.get('stddev', 0) * 1000:.2f}",
+                        f"{m.get('mean', 0):.2f}",
+                    )
+                )
+            lines.extend(_md_aligned_table(ph_headers, "<>", ph_rows))
+            lines.append("")
+
+        # Micro-profile components (if present)
+        components = report.get("components", {})
+        if components:
+            lines.append(f"### Scoring Component Micro-Profile ({target})")
+            lines.append("")
+            cp_headers = ("Component", "Mean (μs)", "Median (μs)", "p95 (μs)", "p99 (μs)", "CoV%")
+            cp_rows: list[tuple[str, ...]] = []
+            for name, comp_data in components.items():
+                e = comp_data.get("elapsed", {})
+                cp_rows.append(
+                    (
+                        name,
+                        f"{e.get('mean', 0) * 1_000_000:.1f}",
+                        f"{e.get('median', 0) * 1_000_000:.1f}",
+                        f"{e.get('p95', 0) * 1_000_000:.1f}",
+                        f"{e.get('p99', 0) * 1_000_000:.1f}",
+                        f"{e.get('cov_pct', 0):.1f}",
+                    )
+                )
+            lines.extend(_md_aligned_table(cp_headers, "<>", cp_rows))
+            lines.append("")
+
+        # Regressions
+        regressions = report.get("regressions", [])
+        if regressions:
+            lines.append(f"### Regression Detections ({target})")
+            lines.append("")
+            for r in regressions:
+                lines.append(f"- {r}")
+            lines.append("")
+
+        lines.append("---")
+        lines.append("")
+
+    while lines and lines[-1] == "":
+        lines.pop()
+    atomic_write(path, "\n".join(lines) + "\n")
+
+
+def _write_profile_all_text(all_reports: dict[str, Any], path: str) -> None:
+    """Generate and write a consolidated plain text report for all profiling targets."""
+    lines: list[str] = [
+        "ALGORITHMIC PERFORMANCE PROFILING REPORT (ALL TARGETS)",
+        "=" * 90,
+        "",
+    ]
+    for target, report in all_reports.items():
+        lines.append(f"Target: {target}")
+        lines.append("-" * 90)
+
+        agg = report.get("aggregate", {})
+        if agg:
+            lines.append("Aggregate Performance:")
+            _headers = ("Metric", "Mean", "Median", "p95", "p99", "StdDev", "Min", "Max", "CoV%")
+            _rows: list[tuple[str, ...]] = []
+            for name, s in agg.items():
+                if isinstance(s, dict):
+                    _rows.append(
+                        (
+                            name,
+                            f"{s.get('mean', 0):.4f}",
+                            f"{s.get('median', 0):.4f}",
+                            f"{s.get('p95', 0):.4f}",
+                            f"{s.get('p99', 0):.4f}",
+                            f"{s.get('stddev', 0):.4f}",
+                            f"{s.get('min', 0):.4f}",
+                            f"{s.get('max', 0):.4f}",
+                            f"{s.get('cov_pct', 0):.1f}%",
+                        )
+                    )
+            hdr, sep, data = align_table(_headers, _rows, alignments="<>")
+            lines.append(hdr)
+            lines.append(sep)
+            lines.extend(data)
+            lines.append("")
+
+        res = report.get("resource", {})
+        if res:
+            lines.append("Resource Utilization:")
+            for k, v in sorted(res.items()):
+                lines.append(f"  {k}: {v:.2f}")
+            lines.append("")
+
+        phases = report.get("phases", {})
+        if phases:
+            lines.append("Phase Timing:")
+            _headers_ph = (
+                "Phase",
+                "Mean(ms)",
+                "Median(ms)",
+                "p95(ms)",
+                "p99(ms)",
+                "Std(ms)",
+                "MemΔ(MB)",
+            )
+            _rows_ph: list[tuple[str, ...]] = []
+            for name, phase_data in phases.items():
+                e = phase_data.get("elapsed", {})
+                m = phase_data.get("memory_delta_mb", {})
+                _rows_ph.append(
+                    (
+                        name,
+                        f"{e.get('mean', 0) * 1000:.3f}",
+                        f"{e.get('median', 0) * 1000:.3f}",
+                        f"{e.get('p95', 0) * 1000:.3f}",
+                        f"{e.get('p99', 0) * 1000:.3f}",
+                        f"{e.get('stddev', 0) * 1000:.3f}",
+                        f"{m.get('mean', 0):.3f}",
+                    )
+                )
+            hdr, sep, data = align_table(_headers_ph, _rows_ph, alignments="<>")
+            lines.append(hdr)
+            lines.append(sep)
+            lines.extend(data)
+            lines.append("")
+
+        components = report.get("components", {})
+        if components:
+            lines.append("Scoring Component Micro-Profile:")
+            _headers_cp = ("Component", "Mean(μs)", "Median(μs)", "p95(μs)", "p99(μs)", "CoV%")
+            _rows_cp: list[tuple[str, ...]] = []
+            for name, comp_data in components.items():
+                e = comp_data.get("elapsed", {})
+                _rows_cp.append(
+                    (
+                        name,
+                        f"{e.get('mean', 0) * 1_000_000:.1f}",
+                        f"{e.get('median', 0) * 1_000_000:.1f}",
+                        f"{e.get('p95', 0) * 1_000_000:.1f}",
+                        f"{e.get('p99', 0) * 1_000_000:.1f}",
+                        f"{e.get('cov_pct', 0):.1f}",
+                    )
+                )
+            hdr, sep, data = align_table(_headers_cp, _rows_cp, alignments="<>")
+            lines.append(hdr)
+            lines.append(sep)
+            lines.extend(data)
+            lines.append("")
+
+        regressions = report.get("regressions", [])
+        if regressions:
+            lines.append("Regression Detections:")
+            for r in regressions:
+                lines.append(f"  {r}")
+            lines.append("")
+
+        lines.append("=" * 90)
+        lines.append("")
+
+    while lines and lines[-1] == "":
+        lines.pop()
+    atomic_write(path, "\n".join(lines) + "\n")
+
+
 # ---------------------------------------------------------------------------
 # CLI Main Entry Point
 # ---------------------------------------------------------------------------
@@ -3332,10 +3547,34 @@ def main() -> None:
 
                 output_dir = Path(_REPO_ROOT) / BENCHMARK_DIR
                 output_dir.mkdir(parents=True, exist_ok=True)
-                agg_path = output_dir / "profile_all.json"
+
+                # Save JSON
+                agg_path = (
+                    Path(safe_output_json)
+                    if safe_output_json is not None
+                    else output_dir / "profile_all.json"
+                )
                 agg_json = {"target": "all", "targets": all_reports}
                 atomic_write(str(agg_path), json.dumps(agg_json, indent=2, default=str) + "\n")
-                print(f"\nAggregate all-targets report saved to {agg_path}")
+                print(f"\nAggregate all-targets JSON report saved to {agg_path}")
+
+                # Save MD
+                agg_md_path = (
+                    Path(safe_output_md)
+                    if safe_output_md is not None
+                    else output_dir / "profile_all.md"
+                )
+                _write_profile_all_markdown(all_reports, str(agg_md_path))
+                print(f"Aggregate all-targets Markdown report saved to {agg_md_path}")
+
+                # Save TXT
+                agg_txt_path = (
+                    Path(safe_output_txt)
+                    if safe_output_txt is not None
+                    else output_dir / "profile_all.txt"
+                )
+                _write_profile_all_text(all_reports, str(agg_txt_path))
+                print(f"Aggregate all-targets Text report saved to {agg_txt_path}")
             else:
                 _run_profiling(
                     safe_target,
