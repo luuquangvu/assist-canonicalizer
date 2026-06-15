@@ -202,23 +202,36 @@ REGISTRY_SLOTS: dict[str, dict[str, tuple[str, ...]]] = {
 }
 
 
-def sanitize_chars(value: str, allowed: str) -> str:
-    """Validate and sanitize a string using allowed characters to break taint."""
+def sanitize_path_chars(value: str) -> str:
+    """Validate and sanitize a path string using PATH_ALLOWED_CHARS to break taint."""
     if not isinstance(value, str):
         raise ValueError("Expected a string.")
     safe_chars: list[str] = []
     for char in value:
-        idx = allowed.find(char)
+        idx = _PATH_ALLOWED_CHARS.find(char)
         if idx == -1:
             raise ValueError(f"character {char!r} is not allowed.")
-        safe_chars.append(allowed[idx])
+        safe_chars.append(_PATH_ALLOWED_CHARS[idx])
+    return "".join(safe_chars)
+
+
+def sanitize_target_chars(value: str) -> str:
+    """Validate and sanitize target string using TARGET_ALLOWED_CHARS to break taint."""
+    if not isinstance(value, str):
+        raise ValueError("Expected a string.")
+    safe_chars: list[str] = []
+    for char in value:
+        idx = _TARGET_ALLOWED_CHARS.find(char)
+        if idx == -1:
+            raise ValueError(f"character {char!r} is not allowed.")
+        safe_chars.append(_TARGET_ALLOWED_CHARS[idx])
     return "".join(safe_chars)
 
 
 def sanitize_path(root_path: str, user_path: str) -> str:
     """Validate, sanitize and contain a user-supplied file path."""
     try:
-        clean = sanitize_chars(user_path, _PATH_ALLOWED_CHARS)
+        clean = sanitize_path_chars(user_path)
     except ValueError as err:
         raise ValueError(f"Invalid path {user_path!r}; {err}") from err
 
@@ -3396,6 +3409,12 @@ def main() -> None:
     if target is None:
         target = "evaluate" if args.mode == MODE_ACCURACY else "rank"
 
+    try:
+        target = sanitize_target_chars(target)
+    except ValueError as err:
+        print(f"Error: Target contains invalid characters: {err}", file=sys.stderr)
+        sys.exit(1)
+
     # Validate target explicitly against the allow list
     if target not in PROFILING_TARGETS:
         print(f"Error: Target {target!r} is not a valid benchmark target.", file=sys.stderr)
@@ -3408,12 +3427,6 @@ def main() -> None:
             "Only 'evaluate' is supported.",
             file=sys.stderr,
         )
-        sys.exit(1)
-
-    try:
-        target = sanitize_chars(target, _TARGET_ALLOWED_CHARS)
-    except ValueError as err:
-        print(f"Error: Target contains invalid characters: {err}", file=sys.stderr)
         sys.exit(1)
 
     safe_target = target
