@@ -3416,8 +3416,6 @@ def main() -> None:
         print(f"Error: Target contains invalid characters: {err}", file=sys.stderr)
         sys.exit(1)
 
-    safe_target = target
-
     # Validate numeric/threshold inputs
     if args.failure_limit < 0:
         print("Error: --failure-limit must be zero or positive", file=sys.stderr)
@@ -3523,7 +3521,7 @@ def main() -> None:
 
         print("PROFILE_START", flush=True)
         try:
-            if safe_target == "all":
+            if target == "all":
                 all_reports = {}
                 for tgt in ("build_index", "rank", "components", "evaluate"):
                     out_json = (
@@ -3591,7 +3589,7 @@ def main() -> None:
                 print(f"Aggregate all-targets Text report saved to {agg_txt_path}")
             else:
                 _run_profiling(
-                    safe_target,
+                    target,
                     datasets,
                     args.iterations,
                     args.warmup,
