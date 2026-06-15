@@ -3411,7 +3411,7 @@ def main() -> None:
         sys.exit(1)
 
     try:
-        target = sanitize_chars(target, _TARGET_ALLOWED_CHARS)
+        safe_target = sanitize_chars(target, _TARGET_ALLOWED_CHARS)
     except ValueError as err:
         print(f"Error: Target contains invalid characters: {err}", file=sys.stderr)
         sys.exit(1)
@@ -3521,7 +3521,7 @@ def main() -> None:
 
         print("PROFILE_START", flush=True)
         try:
-            if target == "all":
+            if safe_target == "all":
                 all_reports = {}
                 for tgt in ("build_index", "rank", "components", "evaluate"):
                     out_json = (
@@ -3589,7 +3589,7 @@ def main() -> None:
                 print(f"Aggregate all-targets Text report saved to {agg_txt_path}")
             else:
                 _run_profiling(
-                    target,
+                    safe_target,
                     datasets,
                     args.iterations,
                     args.warmup,
