@@ -7,13 +7,12 @@ import hashlib
 from collections.abc import Callable, Mapping, Sequence, Set
 from dataclasses import dataclass, field
 from enum import Enum
-from functools import lru_cache
 from typing import Any, cast
 from uuid import uuid4
 
 import orjson
 
-from .builtin_intents import language_variant_for, load_language_intent_sources
+from .builtin_intents import load_language_intent_sources
 from .candidate import Candidate, CandidateSource
 from .const import DEFAULT_MAX_CANDIDATES, DOMAIN, FallbackReason
 from .diagnostics import CanonicalizerDiagnostics
@@ -28,6 +27,7 @@ from .grammar_loader import (
 from .indexer import CanonicalIndex, build_index
 from .normalization import char_ngrams_normalized
 from .ranking import CharNGramIndex, RankedCandidate, rank_candidates
+from .utils import normalize_language
 
 storage: Any = cast(Any, None)
 
@@ -78,7 +78,7 @@ class CanonicalizerRuntime:
     language_intent_sources: dict[str, dict[str, Mapping[str, Any]]] = field(default_factory=dict)
     config_path: Callable[..., str] | None = None
     registry_slot_values: dict[str, tuple[str, ...]] = field(default_factory=dict)
-    registry_slot_index: RegistrySlotIndex = field(default_factory=dict)
+    registry_slot_index: RegistrySlotIndex = field(default_factory=lambda: RegistrySlotIndex({}))
     dynamic_registry_intents: dict[str, tuple[DynamicRegistryIntent, ...]] = field(
         default_factory=dict
     )
@@ -100,15 +100,6 @@ class CanonicalizerRuntime:
             candidate_count=index.candidate_count,
             index_version=index.version,
         )
-
-    def rebuild_index(self, language: str) -> CanonicalIndex:
-        """Rebuild and store one language index from automatic candidate sources."""
-        language = normalize_language(language)
-        snapshot = self._create_build_snapshot(language)
-        index = _build_index_from_snapshot(snapshot)
-        self.language_intent_sources[language] = snapshot.intent_sources
-        self.set_index(index)
-        return index
 
     async def async_rebuild_index(self, hass: Any, language: str) -> CanonicalIndex:
         """Rebuild one language index once while concurrent callers await it."""
@@ -287,10 +278,6 @@ class CanonicalizerRuntime:
             for persisted_language in persisted_languages:
                 await _index_store(hass, persisted_language).async_remove()
 
-    def _build_index(self, language: str) -> CanonicalIndex:
-        """Build one language index without mutating runtime cache."""
-        return _build_index_from_snapshot(self._create_build_snapshot(language))
-
     def rank_with_dynamic_candidates(
         self,
         language: str,
@@ -317,6 +304,7 @@ class CanonicalizerRuntime:
             query,
             dynamic_candidates,
             max_candidates=max_candidates,
+            reference_bm25_index=index._bm25_index,
             candidate_char_index=CharNGramIndex.from_grams(
                 tuple(
                     char_ngrams_normalized(candidate.normalized_text)
@@ -398,7 +386,9 @@ class CanonicalizerRuntime:
         cached = self.dynamic_registry_intents.get(language)
         if cached is not None:
             return cached
-        compiled = compile_dynamic_registry_intents(self._intent_sources_for_query(language))
+        compiled = compile_dynamic_registry_intents(
+            self._intent_sources_for_query(language), language
+        )
         self.dynamic_registry_intents[language] = compiled
         return compiled
 
@@ -422,13 +412,6 @@ class CanonicalizerRuntime:
             self.config_path,
             dict(self.intent_sources),
             {key: tuple(values) for key, values in self.registry_slot_values.items()},
-        )
-
-    def _create_build_snapshot(self, language: str) -> IndexBuildSnapshot:
-        """Load and fingerprint the current inputs for one language."""
-        return _create_build_snapshot(
-            normalize_language(language),
-            *self._capture_build_inputs(),
         )
 
     def _invalidate_source_dependent_indexes(self, *, clear_sources: bool) -> None:
@@ -484,17 +467,6 @@ class CanonicalizerRuntime:
                 "languages": sorted(languages),
             }
         )
-
-    async def _async_remove_persisted_language(self, hass: Any, language: str) -> None:
-        """Remove one invalid language store and its manifest entry."""
-        async with self._storage_lock:
-            await _index_store(hass, language).async_remove()
-            manifest = await self._async_load_store_manifest(hass)
-            if manifest is None:
-                return
-            cache_epoch, persisted_languages = manifest
-            persisted_languages.discard(language)
-            await self._async_save_store_manifest(hass, cache_epoch, persisted_languages)
 
     def add_cleanup_callback(self, callback: Callable[[], None]) -> None:
         """Remember a cleanup callback for unload."""
@@ -714,10 +686,13 @@ def _merge_ranked_candidates(
     dynamic: tuple[RankedCandidate, ...],
     max_candidates: int,
 ) -> tuple[RankedCandidate, ...]:
-    """Merge ranked candidates while keeping the strongest score per text."""
-    selected: dict[str, RankedCandidate] = {}
+    """Merge ranked candidates while keeping the strongest score per text and intent."""
+    selected: dict[tuple[str, str], RankedCandidate] = {}
     for ranked_candidate in (*primary, *dynamic):
-        key = ranked_candidate.candidate.normalized_text
+        key = (
+            ranked_candidate.candidate.normalized_text,
+            ranked_candidate.candidate.intent_name,
+        )
         existing = selected.get(key)
         if existing is None or _ranked_candidate_sort_key(
             ranked_candidate
@@ -737,18 +712,6 @@ def _ranked_candidate_sort_key(ranked_candidate: RankedCandidate) -> tuple[float
         ranked_candidate.scores.final_score,
         -ranked_candidate.candidate.source_priority,
     )
-
-
-@lru_cache(maxsize=128)
-def normalize_language(language: str) -> str:
-    """Return the Home Assistant language variant as a canonical cache key."""
-    requested = str(language).strip()
-    if not requested:
-        raise ValueError("Language must not be empty")
-    language_variant = language_variant_for(requested)
-    if language_variant is not None:
-        return language_variant
-    return requested.replace("_", "-").lower()
 
 
 def _updated_optional_text(current: str | None, value: str | None, *, clear: bool) -> str | None:

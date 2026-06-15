@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import time
 from importlib import import_module
-from time import monotonic
 from typing import Any
 
 import voluptuous as vol
@@ -21,13 +21,9 @@ from .const import (
     ATTR_SOURCE,
     ATTR_TEXT,
     ATTR_TOP_CANDIDATES,
-    CONF_MIN_CONFIDENCE,
-    CONF_MIN_MARGIN,
     DATA_RUNTIME,
     DEFAULT_MAX_DYNAMIC_CANDIDATES,
     DEFAULT_MAX_DYNAMIC_SLOT_VALUES,
-    DEFAULT_MIN_CONFIDENCE,
-    DEFAULT_MIN_MARGIN,
     DOMAIN,
     SERVICE_CLEAR_INDEX,
     SERVICE_DIAGNOSTICS,
@@ -38,7 +34,8 @@ from .const import (
 from .indexer import CanonicalIndex
 from .normalization import normalize_text
 from .ranking import RankedCandidate, accepted_candidate
-from .runtime import CanonicalizerRuntime, normalize_language
+from .runtime import CanonicalizerRuntime
+from .utils import elapsed_ms, normalize_language, resolve_entry_thresholds
 
 ATTR_REBUILD = "rebuild"
 
@@ -169,19 +166,9 @@ async def _handle_test_match(hass: Any, call: ServiceCall) -> dict[str, Any]:
             entry = entry_data.get("entry")
             break
 
-    min_confidence = DEFAULT_MIN_CONFIDENCE
-    min_margin = DEFAULT_MIN_MARGIN
-    if entry is not None:
-        options = getattr(entry, "options", {}) or {}
-        data = getattr(entry, "data", {}) or {}
-        min_confidence = options.get(
-            CONF_MIN_CONFIDENCE,
-            data.get(CONF_MIN_CONFIDENCE, DEFAULT_MIN_CONFIDENCE),
-        )
-        min_margin = options.get(
-            CONF_MIN_MARGIN,
-            data.get(CONF_MIN_MARGIN, DEFAULT_MIN_MARGIN),
-        )
+    min_confidence, min_margin = (
+        resolve_entry_thresholds(entry) if entry else resolve_entry_thresholds(None)
+    )
 
     selected = accepted_candidate(
         ranked,
@@ -204,12 +191,12 @@ async def _handle_rebuild_index(hass: Any, call: ServiceCall) -> dict[str, Any]:
     """Rebuild one language index from automatic candidate sources."""
     runtime = _runtime_from_hass(hass)
     language = _service_language(hass, call)
-    started_at = monotonic()
+    started_at = time.monotonic()
     index = await _rebuild_index(hass, runtime, language)
     return {
         ATTR_LANGUAGE: language,
         ATTR_CANDIDATE_COUNT: index.candidate_count,
-        "rebuild_latency_ms": _elapsed_ms(started_at),
+        "rebuild_latency_ms": elapsed_ms(started_at),
         "index_cached": True,
     }
 
@@ -254,7 +241,7 @@ async def _handle_dump_candidates(hass: Any, call: ServiceCall) -> dict[str, Any
     runtime = _runtime_from_hass(hass)
     language = _service_language(hass, call)
     should_rebuild = bool(call.data.get(ATTR_REBUILD, False))
-    started_at = monotonic()
+    started_at = time.monotonic()
     index = await _index_for_language(
         hass,
         runtime,
@@ -285,7 +272,7 @@ async def _handle_dump_candidates(hass: Any, call: ServiceCall) -> dict[str, Any
         ATTR_LANGUAGE: language,
         ATTR_CANDIDATE_COUNT: index.candidate_count,
         "index_cached": True,
-        "rebuild_latency_ms": _elapsed_ms(started_at) if should_rebuild else None,
+        "rebuild_latency_ms": elapsed_ms(started_at) if should_rebuild else None,
         "intent_source_counts": intent_source_counts,
         "candidate_source_counts": source_counts,
         "intent_counts": dict(sorted(intent_counts.items())),
@@ -369,8 +356,3 @@ def _ranked_candidate_response(ranked: RankedCandidate) -> dict[str, Any]:
             "final": ranked.scores.final_score,
         },
     }
-
-
-def _elapsed_ms(started_at: float) -> float:
-    """Return elapsed milliseconds from a monotonic timestamp."""
-    return round((monotonic() - started_at) * 1000, 3)

@@ -164,7 +164,6 @@ def _fallback_agent_choices(
     choices.update(_available_fallback_agents(hass, exclude_agent_id))
     if (
         current_agent_id
-        and current_agent_id != ""
         and current_agent_id != exclude_agent_id
         and current_agent_id not in choices
     ):

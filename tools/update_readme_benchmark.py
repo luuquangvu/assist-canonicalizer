@@ -27,6 +27,64 @@ LANGS_PATTERN: Final[re.Pattern[str]] = re.compile(
 )
 
 
+def _render_md_table(
+    headers: tuple[str, ...],
+    rows: list[tuple[str, ...]],
+    *,
+    alignments: str = "<",
+) -> str:
+    """Build a Markdown table with dynamically computed column widths.
+
+    Produces output compatible with Prettier's Markdown table formatting
+    (single space between pipe and content on each side).
+
+    Args:
+        headers: Column header strings.
+        rows: Data rows; each tuple must match *headers* length.
+        alignments: Single char for all columns, or one char per column
+            (``'<'`` left, ``'>'`` right).
+
+    Returns:
+        Markdown table string with properly aligned columns.
+    """
+    ncols = len(headers)
+
+    # Compute maximum column widths from headers and all data cells
+    widths = [len(h) for h in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(cell))
+
+    # Expand alignment specifier
+    if len(alignments) == 1:
+        aligns = [alignments] * ncols
+    else:
+        aligns = list(alignments)
+        if len(aligns) < ncols:
+            # Pad with last alignment character to match column count
+            aligns.extend([aligns[-1]] * (ncols - len(aligns)))
+        aligns = aligns[:ncols]
+
+    def _fmt(row: tuple[str, ...]) -> str:
+        parts = [f" {c:{a}{w}} " for c, a, w in zip(row, aligns, widths, strict=True)]
+        return "|" + "|".join(parts) + "|"
+
+    hdr = _fmt(headers)
+
+    # Markdown separator with alignment colons (colon uses 1 char of width)
+    sep_parts: list[str] = []
+    for a, w in zip(aligns, widths, strict=True):
+        dashes = w - 1
+        if a == ">":
+            sep_parts.append(f" {'-' * dashes}: ")
+        else:
+            sep_parts.append(f" :{'-' * dashes} ")
+    sep = "|" + "|".join(sep_parts) + "|"
+
+    data = [_fmt(row) for row in rows]
+    return "\n".join([hdr, sep, *data])
+
+
 def _load_report(report_path: Path) -> dict[str, Any]:
     """Load and parse the JSON benchmark performance report.
 
@@ -129,23 +187,14 @@ def _generate_overall_section(report: dict[str, Any], is_vi: bool) -> str:
     hass_err = hass_mis + hass_fall
     lex_err = lex_mis + lex_fall
 
+    # Common data rows — cell values identical for both languages
+    data_rows: list[tuple[str, ...]] = [
+        ("`hassil`", f"{hass_acc:.1f}%", f"{hass_mis:.1f}%", f"{hass_fall:.1f}%"),
+        ("`lexical`", f"**{lex_acc:.1f}%**", f"**{lex_mis:.1f}%**", f"**{lex_fall:.1f}%**"),
+    ]
+
     if is_vi:
-        table_headers = (
-            "| Chế độ    | Đúng Intent/Slot | "
-            "Nhận diện sai (Mismatch) | Dự phòng (Fallback) |\n"
-            "| --------- | ---------------: | "
-            "-----------------------: | ------------------: |"
-        )
-        hass_row = (
-            f"| `hassil`  |            {hass_acc:.1f}% | "
-            f"                    {hass_mis:.1f}% | "
-            f"              {hass_fall:.1f}% |"
-        )
-        lex_row = (
-            f"| `lexical` |        **{lex_acc:.1f}%** | "
-            f"                **{lex_mis:.1f}%** | "
-            f"          **{lex_fall:.1f}%** |"
-        )
+        headers = ("Chế độ", "Đúng Intent/Slot", "Nhận diện sai (Mismatch)", "Dự phòng (Fallback)")
         summary_sentence = (
             f"> Độ chính xác nhận diện Intent/Slot tăng từ "
             f"**{hass_acc:.1f}% lên {lex_acc:.1f}%**. "
@@ -153,14 +202,7 @@ def _generate_overall_section(report: dict[str, Any], is_vi: bool) -> str:
             f"giảm mạnh từ **{hass_err:.1f}% xuống còn {lex_err:.1f}%**."
         )
     else:
-        table_headers = (
-            "| Mode      | Intent/Slot | Mismatch |  Fallback |\n"
-            "| --------- | ----------: | -------: | --------: |"
-        )
-        hass_row = (
-            f"| `hassil`  |       {hass_acc:.1f}% |     {hass_mis:.1f}% |     {hass_fall:.1f}% |"
-        )
-        lex_row = f"| `lexical` |   **{lex_acc:.1f}%** | **{lex_mis:.1f}%** | **{lex_fall:.1f}%** |"
+        headers = ("Mode", "Intent/Slot", "Mismatch", "Fallback")
         summary_sentence = (
             f"> Intent/slot accuracy jumped from "
             f"**{hass_acc:.1f}% to {lex_acc:.1f}%**. "
@@ -168,7 +210,8 @@ def _generate_overall_section(report: dict[str, Any], is_vi: bool) -> str:
             f"dropped from **{hass_err:.1f}% to {lex_err:.1f}%**."
         )
 
-    return f"\n\n{table_headers}\n{hass_row}\n{lex_row}\n\n{summary_sentence}\n\n"
+    table = _render_md_table(headers, data_rows, alignments="<>")
+    return f"\n\n{table}\n\n{summary_sentence}\n\n"
 
 
 def _generate_langs_section(report: dict[str, Any], is_vi: bool) -> str:
@@ -182,19 +225,17 @@ def _generate_langs_section(report: dict[str, Any], is_vi: bool) -> str:
         The formatted markdown snippet for the per-language breakdown.
     """
     if is_vi:
-        table_headers = (
-            "| Ngôn ngữ | Chế độ    | Đúng Intent/Slot | "
-            "Nhận diện sai (Mismatch) | Dự phòng (Fallback) |\n"
-            "| -------- | --------- | ---------------: | "
-            "-----------------------: | ------------------: |"
+        headers = (
+            "Ngôn ngữ",
+            "Chế độ",
+            "Đúng Intent/Slot",
+            "Nhận diện sai (Mismatch)",
+            "Dự phòng (Fallback)",
         )
     else:
-        table_headers = (
-            "| Language | Mode      | Intent/Slot |  Mismatch |  Fallback |\n"
-            "| -------- | --------- | ----------: | --------: | --------: |"
-        )
+        headers = ("Language", "Mode", "Intent/Slot", "Mismatch", "Fallback")
 
-    rows: list[str] = [table_headers]
+    data_rows: list[tuple[str, ...]] = []
 
     languages = _get_languages(report)
     for lang in languages:
@@ -214,28 +255,21 @@ def _generate_langs_section(report: dict[str, Any], is_vi: bool) -> str:
 
         lang_upper = lang.upper()
 
-        if is_vi:
-            rows.append(
-                f"| {lang_upper:<8} | `hassil`  |            {hass_acc:.1f}% | "
-                f"                   {hass_mis:.1f}% | "
-                f"              {hass_fall:.1f}% |"
+        data_rows.append(
+            (lang_upper, "`hassil`", f"{hass_acc:.1f}%", f"{hass_mis:.1f}%", f"{hass_fall:.1f}%")
+        )
+        data_rows.append(
+            (
+                lang_upper,
+                "`lexical`",
+                f"**{lex_acc:.1f}%**",
+                f"**{lex_mis:.1f}%**",
+                f"**{lex_fall:.1f}%**",
             )
-            rows.append(
-                f"| {lang_upper:<8} | `lexical` |        **{lex_acc:.1f}%** | "
-                f"                **{lex_mis:.1f}%** | "
-                f"            **{lex_fall:.1f}%** |"
-            )
-        else:
-            rows.append(
-                f"| {lang_upper:<8} | `hassil`  |       {hass_acc:.1f}% | "
-                f"    {hass_mis:.1f}% |     {hass_fall:.1f}% |"
-            )
-            rows.append(
-                f"| {lang_upper:<8} | `lexical` |   **{lex_acc:.1f}%** | "
-                f"  **{lex_mis:.1f}%** |  **{lex_fall:.1f}%** |"
-            )
+        )
 
-    return "\n\n" + "\n".join(rows) + "\n\n"
+    table = _render_md_table(headers, data_rows, alignments="<<>")
+    return "\n\n" + table + "\n\n"
 
 
 def _update_file(file_path: Path, overall_content: str, langs_content: str) -> None:

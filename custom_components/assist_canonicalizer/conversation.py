@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from time import monotonic
+import time
 from typing import TYPE_CHECKING, Any, Literal
 
 from homeassistant.components import conversation
@@ -25,19 +25,16 @@ else:
 
 from .const import (
     CONF_FALLBACK_AGENT_ID,
-    CONF_MIN_CONFIDENCE,
-    CONF_MIN_MARGIN,
     DATA_RUNTIME,
     DEFAULT_MAX_CANDIDATES,
-    DEFAULT_MIN_CONFIDENCE,
-    DEFAULT_MIN_MARGIN,
     DEFAULT_VALIDATION_CANDIDATES,
     DOMAIN,
     NAME,
     FallbackReason,
 )
 from .ranking import accepted_candidate
-from .runtime import CanonicalizerRuntime, normalize_language
+from .runtime import CanonicalizerRuntime
+from .utils import elapsed_ms, normalize_language, resolve_entry_thresholds
 
 
 async def async_setup_entry(
@@ -87,7 +84,7 @@ class AssistCanonicalizerConversationEntity(
 
     async def async_process(self, user_input: ConversationInput) -> ConversationResult:
         """Process a conversation request."""
-        started_at = monotonic()
+        started_at = time.monotonic()
         self._runtime.update_diagnostics(
             clear_last_fallback_reason=True,
             clear_last_error=True,
@@ -96,12 +93,12 @@ class AssistCanonicalizerConversationEntity(
             result = await self._async_process_with_runtime(user_input)
         except Exception as err:
             self._runtime.update_diagnostics(
-                last_query_latency_ms=self._elapsed_ms(started_at),
+                last_query_latency_ms=elapsed_ms(started_at),
                 last_fallback_reason=FallbackReason.UNEXPECTED_EXCEPTION,
                 last_error=str(err),
             )
             return self._error_result(user_input, str(err))
-        self._runtime.update_diagnostics(last_query_latency_ms=self._elapsed_ms(started_at))
+        self._runtime.update_diagnostics(last_query_latency_ms=elapsed_ms(started_at))
         return result
 
     async def async_prepare(self, language: str | None = None) -> None:
@@ -149,16 +146,7 @@ class AssistCanonicalizerConversationEntity(
                 user_input.text,
                 DEFAULT_MAX_CANDIDATES,
             )
-            options = self._entry.options or {}
-            data = self._entry.data or {}
-            min_confidence = options.get(
-                CONF_MIN_CONFIDENCE,
-                data.get(CONF_MIN_CONFIDENCE, DEFAULT_MIN_CONFIDENCE),
-            )
-            min_margin = options.get(
-                CONF_MIN_MARGIN,
-                data.get(CONF_MIN_MARGIN, DEFAULT_MIN_MARGIN),
-            )
+            min_confidence, min_margin = resolve_entry_thresholds(self._entry)
             selected = accepted_candidate(
                 ranked,
                 min_confidence=min_confidence,
@@ -239,11 +227,6 @@ class AssistCanonicalizerConversationEntity(
         """Return whether a conversation result contains an intent error."""
         response = getattr(result, "response", None)
         return getattr(response, "error_code", None) is not None
-
-    @staticmethod
-    def _elapsed_ms(started_at: float) -> float:
-        """Return elapsed milliseconds from a monotonic timestamp."""
-        return round((monotonic() - started_at) * 1000, 3)
 
     @staticmethod
     def _error_result(user_input: ConversationInput, message: str) -> ConversationResult:

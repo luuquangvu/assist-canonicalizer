@@ -44,8 +44,27 @@ CHAR_NGRAM_WEIGHT = 0.32
 BM25_WEIGHT = 0.20
 INTENT_ACTION_WEIGHT: float = 1 - (RAPIDFUZZ_WEIGHT + CHAR_NGRAM_WEIGHT + BM25_WEIGHT)
 
-POSITIONAL_SIMILARITY_THRESHOLD = 0.65
+# Adaptive positional similarity thresholds by min(len(a),len(b)).
+# Shorter tokens are more susceptible to false-positive positional matches, so
+# they need stricter (higher) thresholds.
+POSITIONAL_SIMILARITY_VERY_SHORT_THRESHOLD = 0.75  # per-pair min_len <= 2
+POSITIONAL_SIMILARITY_SHORT_3_THRESHOLD = 0.66  # per-pair min_len <= 3
+POSITIONAL_SIMILARITY_MEDIUM_THRESHOLD = 0.60  # per-pair min_len <= 5
+POSITIONAL_SIMILARITY_BASE_THRESHOLD = 0.50  # per-pair min_len >= 6
+
+# Partial credit awarded when a literal token positionally matches a query token.
 POSITIONAL_SIMILARITY_PARTIAL_CREDIT = 0.50
+
+# Tiebreaker: minimum score margin between top candidates of different intents
+# to skip the two-pass disambiguation.  If the top two candidates belong to
+# different intents and their score gap is less than this margin, they are
+# evaluated in a second pass where the competitor is promoted if its intent_score
+# is higher.
+TIEBREAKER_INTENT_MARGIN = 0.05
+
+# Non-entity penalty blend: fraction of the intent score that can be reduced
+# when a candidate fails to cover non-entity query tokens (politeness/filler).
+NON_ENTITY_PENALTY_BLEND = 0.05
 
 
 class FallbackReason(StrEnum):

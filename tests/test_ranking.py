@@ -4,13 +4,22 @@ import pytest
 
 from custom_components.assist_canonicalizer import ranking
 from custom_components.assist_canonicalizer.candidate import Candidate, CandidateSource
-from custom_components.assist_canonicalizer.const import DEFAULT_RAPIDFUZZ_PREFILTER_CANDIDATES
+from custom_components.assist_canonicalizer.const import (
+    DEFAULT_MIN_CONFIDENCE,
+    DEFAULT_MIN_MARGIN,
+    DEFAULT_RAPIDFUZZ_PREFILTER_CANDIDATES,
+)
 from custom_components.assist_canonicalizer.indexer import build_index
+from custom_components.assist_canonicalizer.normalization import normalize_text
 from custom_components.assist_canonicalizer.ranking import (
+    CharNGramIndex,
+    RankedCandidate,
+    ScoreBreakdown,
     _query_token_coverage,
     accepted_candidate,
-    intent_action_score,
+    rank_candidates,
     rapidfuzz_similarity_normalized,
+    token_count_ratio,
 )
 
 
@@ -57,7 +66,14 @@ def test_accepted_candidate_enforces_margin_for_competing_intents() -> None:
     )
     ranked = index.rank("turn kitchen")
 
-    assert accepted_candidate(ranked, min_confidence=0.1, min_margin=0.99) is None
+    assert (
+        accepted_candidate(
+            ranked,
+            min_confidence=DEFAULT_MIN_CONFIDENCE / 5.0,
+            min_margin=DEFAULT_MIN_MARGIN + 0.95,
+        )
+        is None
+    )
 
 
 def test_accepted_candidate_allows_exact_top_against_fuzzy_competing_intent() -> None:
@@ -71,7 +87,14 @@ def test_accepted_candidate_allows_exact_top_against_fuzzy_competing_intent() ->
     )
     ranked = index.rank("turn on kitchen light")
 
-    assert accepted_candidate(ranked, min_confidence=0.1, min_margin=0.99) is ranked[0]
+    assert (
+        accepted_candidate(
+            ranked,
+            min_confidence=DEFAULT_MIN_CONFIDENCE / 5.0,
+            min_margin=DEFAULT_MIN_MARGIN + 0.95,
+        )
+        is ranked[0]
+    )
 
 
 def test_accepted_candidate_allows_close_candidates_with_same_intent() -> None:
@@ -84,7 +107,49 @@ def test_accepted_candidate_allows_close_candidates_with_same_intent() -> None:
         ],
     )
     ranked = index.rank("turn on kitchen")
-    assert accepted_candidate(ranked, min_confidence=0.1, min_margin=0.99) is not None
+    assert (
+        accepted_candidate(
+            ranked,
+            min_confidence=DEFAULT_MIN_CONFIDENCE / 5.0,
+            min_margin=DEFAULT_MIN_MARGIN + 0.95,
+        )
+        is not None
+    )
+
+
+def test_accepted_candidate_allows_identical_text_with_different_intent() -> None:
+    """Accept candidate when competing intent has identical text."""
+    score = DEFAULT_MIN_CONFIDENCE + 0.1
+    top = RankedCandidate(
+        candidate=Candidate(text="turn on kitchen light", intent_name="HassTurnOn", language="en"),
+        scores=ScoreBreakdown(
+            rapidfuzz_score=score,
+            char_ngram_score=score,
+            bm25_score=score,
+            intent_score=score,
+            final_score=score,
+        ),
+    )
+    competitor = RankedCandidate(
+        candidate=Candidate(text="turn on kitchen light", intent_name="HassTurnOff", language="en"),
+        scores=ScoreBreakdown(
+            rapidfuzz_score=score,
+            char_ngram_score=score,
+            bm25_score=score,
+            intent_score=score,
+            final_score=score,
+        ),
+    )
+
+    ranked = (top, competitor)
+    assert (
+        accepted_candidate(
+            ranked,
+            min_confidence=DEFAULT_MIN_CONFIDENCE,
+            min_margin=DEFAULT_MIN_MARGIN,
+        )
+        is top
+    )
 
 
 def test_index_rank_reuses_prebuilt_lexical_index(monkeypatch) -> None:
@@ -116,7 +181,7 @@ def test_rank_candidates_prefilters_rapidfuzz_work(monkeypatch) -> None:
     ]
     calls = 0
 
-    def fake_rapidfuzz_similarity(query: str, candidate: str) -> float:
+    def fake_rapidfuzz_similarity(query: str, candidate: str, **kwargs: object) -> float:
         """Count expensive RapidFuzz calls."""
         nonlocal calls
         calls += 1
@@ -200,18 +265,16 @@ def test_rank_candidates_uses_english_builtin_action_alignment() -> None:
     assert ranked[0].candidate.intent_name == "HassTurnOn"
 
 
-def test_intent_action_score_supports_alternatives() -> None:
-    """Verify that intent_action_score handles multiple options separated by pipe."""
-    candidate = Candidate(
-        text="bật quạt",
-        intent_name="HassTurnOn",
-        language="vi",
-        metadata={"literal_text": "bật|mở|bật lên"},
-    )
-    assert ranking.intent_action_score("bật quạt", candidate) == 1.0
-    assert ranking.intent_action_score("mở quạt", candidate) == 1.0
-    assert ranking.intent_action_score("bật lên quạt", candidate) == 1.0
-    assert ranking.intent_action_score("tắt quạt", candidate) == 0.0
+def test_exact_intent_score_supports_alternatives() -> None:
+    """Verify that exact intent action scoring handles multiple options separated by pipe."""
+    query_tokens_bat = frozenset(normalize_text("bật quạt").split())
+    query_tokens_mo = frozenset(normalize_text("mở quạt").split())
+    query_tokens_len = frozenset(normalize_text("bật lên quạt").split())
+    query_tokens_tat = frozenset(normalize_text("tắt quạt").split())
+    assert ranking._exact_intent_score("bật|mở|bật lên", query_tokens_bat) == 1.0
+    assert ranking._exact_intent_score("bật|mở|bật lên", query_tokens_mo) == 1.0
+    assert ranking._exact_intent_score("bật|mở|bật lên", query_tokens_len) == 1.0
+    assert ranking._exact_intent_score("bật|mở|bật lên", query_tokens_tat) == 0.0
 
 
 def test_build_index_validation_errors() -> None:
@@ -268,12 +331,8 @@ def test_query_token_coverage_empty_candidate() -> None:
 
 def test_intent_action_score_fallback_uses_1_0_when_no_literal_text() -> None:
     """Return 1.0 as fallback when candidate has no literal_text metadata."""
-    candidate = Candidate(
-        text="đèn phòng khách",
-        intent_name="HassTurnOn",
-        language="vi",
-    )
-    score = intent_action_score("tắt đèn phòng khách", candidate)
+    query_tokens = frozenset(normalize_text("tắt đèn phòng khách").split())
+    score = ranking._exact_intent_score("", query_tokens)
     assert score == 1.0
 
 
@@ -362,3 +421,153 @@ def test_rank_candidates_no_diacritics_collision_falls_back_to_fuzzy() -> None:
     # It will go through BM25 / char ngrams / rapidfuzz, and result in both candidates being ranked
     assert len(ranked) == 2
     assert all(r.scores.final_score < 1.0 for r in ranked)
+
+
+def test_ranking_helpers_and_validation_errors() -> None:
+    """Test ranking utility helpers and guard validations."""
+    # test rapidfuzz_similarity_normalized
+    assert (
+        rapidfuzz_similarity_normalized(normalize_text("bật đèn"), normalize_text("bật đèn")) == 1.0
+    )
+
+    # test rapidfuzz_similarity_normalized with empty strings
+    assert rapidfuzz_similarity_normalized("", "bật đèn") == 0.0
+    assert rapidfuzz_similarity_normalized("bật đèn", "") == 0.0
+
+    # test token_count_ratio with empty strings
+    assert token_count_ratio("", "bật") == 0.0
+    assert token_count_ratio("bật", "") == 0.0
+
+    # test CharNGramIndex with empty grams
+    char_index = CharNGramIndex.from_grams(())
+    assert char_index.score(frozenset({"abc"})) == []
+
+    # test CharNGramIndex.score with empty query grams
+    char_index_2 = CharNGramIndex.from_grams((frozenset({"abc"}),))
+    assert char_index_2.score(frozenset()) == [0.0]
+
+    # test rank_candidates guard validations
+    candidates = [Candidate(text="bật đèn", intent_name="HassTurnOn", language="vi")]
+    with pytest.raises(ValueError, match="max_candidates must be positive"):
+        rank_candidates("bật đèn", candidates, max_candidates=0)
+
+    with pytest.raises(
+        ValueError, match="rapidfuzz_prefilter_candidates must be at least max_candidates"
+    ):
+        rank_candidates("bật đèn", candidates, max_candidates=5, rapidfuzz_prefilter_candidates=2)
+
+    with pytest.raises(ValueError, match="candidate_char_index length must match candidates"):
+        rank_candidates("bật đèn", candidates, candidate_char_index=CharNGramIndex.from_grams(()))
+
+    # test rank_candidates empty candidates
+    assert rank_candidates("bật đèn", []) == ()
+
+
+def test_apply_intent_disambiguation_promotes_higher_intent_score_within_margin() -> None:
+    """Top-2 have different intents, close final_score, second has higher intent_score."""
+    margin = ranking.TIEBREAKER_INTENT_MARGIN
+
+    first = RankedCandidate(
+        candidate=Candidate(text="turn on kitchen light", intent_name="HassTurnOn", language="en"),
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.9,
+            char_ngram_score=0.9,
+            bm25_score=0.9,
+            intent_score=0.5,
+            final_score=1.0,
+        ),
+    )
+    second = RankedCandidate(
+        candidate=Candidate(
+            text="turn off bedroom light", intent_name="HassTurnOff", language="en"
+        ),
+        # final_score is slightly lower than the first but still within the tiebreaker margin
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.9,
+            char_ngram_score=0.9,
+            bm25_score=0.9,
+            intent_score=0.9,
+            final_score=1.0 - margin / 2.0,
+        ),
+    )
+
+    ranked = [first, second]
+
+    ranking._apply_intent_disambiguation(ranked)
+
+    # The higher intent_score candidate with a different intent should be promoted to rank 0
+    assert ranked[0] is second
+    assert ranked[1] is first
+
+
+def test_apply_intent_disambiguation_does_not_reorder_when_gap_exceeds_margin() -> None:
+    """Top-2 gap exceeds margin: no reordering even if second has higher intent_score."""
+    margin = ranking.TIEBREAKER_INTENT_MARGIN
+
+    first = RankedCandidate(
+        candidate=Candidate(text="turn on kitchen light", intent_name="HassTurnOn", language="en"),
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.9,
+            char_ngram_score=0.9,
+            bm25_score=0.9,
+            intent_score=0.5,
+            final_score=1.0,
+        ),
+    )
+    second = RankedCandidate(
+        candidate=Candidate(
+            text="turn off bedroom light", intent_name="HassTurnOff", language="en"
+        ),
+        # final_score gap exceeds the tiebreaker margin
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.9,
+            char_ngram_score=0.9,
+            bm25_score=0.9,
+            intent_score=0.9,
+            final_score=1.0 - (margin * 2.0),
+        ),
+    )
+
+    ranked = [first, second]
+
+    ranking._apply_intent_disambiguation(ranked)
+
+    # Because the final_score gap exceeds the margin, the ordering should not change
+    assert ranked[0] is first
+    assert ranked[1] is second
+
+
+def test_apply_intent_disambiguation_keeps_order_for_same_intent() -> None:
+    """Top-2 share the same intent: order is unchanged even within the margin."""
+    margin = ranking.TIEBREAKER_INTENT_MARGIN
+
+    first = RankedCandidate(
+        candidate=Candidate(text="turn on kitchen light", intent_name="HassTurnOn", language="en"),
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.9,
+            char_ngram_score=0.9,
+            bm25_score=0.9,
+            intent_score=0.5,
+            final_score=1.0,
+        ),
+    )
+    second = RankedCandidate(
+        candidate=Candidate(
+            text="turn on kitchen lamp", intent_name="HassTurnOn", language="en"
+        ),  # same intent as the first candidate
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.9,
+            char_ngram_score=0.9,
+            bm25_score=0.9,
+            intent_score=0.9,
+            final_score=1.0 - margin / 2.0,
+        ),
+    )
+
+    ranked = [first, second]
+
+    ranking._apply_intent_disambiguation(ranked)
+
+    # Because the intents are identical, the original ordering should be preserved
+    assert ranked[0] is first
+    assert ranked[1] is second

@@ -8,8 +8,8 @@ from dataclasses import dataclass, field
 from .bm25 import BM25Index
 from .candidate import Candidate, deduplicate_candidates
 from .const import DEFAULT_MAX_CANDIDATES, DEFAULT_MAX_TOTAL_CANDIDATES_PER_LANGUAGE
-from .normalization import char_ngrams_normalized
-from .ranking import CharNGramIndex, RankedCandidate, _literal_token_variants, rank_candidates
+from .normalization import char_ngrams_normalized, literal_token_variants
+from .ranking import CharNGramIndex, RankedCandidate, rank_candidates
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,7 +53,7 @@ class CanonicalIndex:
             exact_no_diacritics.setdefault(no_diac, []).append(candidate)
             literal_text = candidate.metadata.get("literal_text")
             if literal_text:
-                for variant in _literal_token_variants(literal_text):
+                for variant in literal_token_variants(literal_text):
                     all_tokens.update(variant)
         object.__setattr__(self, "_positional_literal_tokens", frozenset(all_tokens))
         object.__setattr__(self, "_exact_normalized_lookup", exact_normalized)

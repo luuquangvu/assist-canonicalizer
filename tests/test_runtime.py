@@ -7,6 +7,7 @@ import sys
 from collections.abc import Mapping
 from types import ModuleType
 from typing import Any, ClassVar
+from unittest.mock import patch
 
 import homeassistant.helpers.event
 import homeassistant.helpers.storage
@@ -28,9 +29,11 @@ from custom_components.assist_canonicalizer.grammar_loader import (
 from custom_components.assist_canonicalizer.indexer import CanonicalIndex, build_index
 from custom_components.assist_canonicalizer.runtime import (
     CanonicalizerRuntime,
+    _build_index_from_snapshot,
     _canonical_fingerprint_value,
-    normalize_language,
+    _create_build_snapshot,
 )
+from custom_components.assist_canonicalizer.utils import normalize_language
 
 
 class FakeHass:
@@ -360,7 +363,7 @@ async def test_persistent_store_save_and_load(monkeypatch: Any) -> None:
 
     MockStore.reset()
     try:
-        snapshot = runtime._create_build_snapshot("vi")
+        snapshot = _create_build_snapshot("vi", *runtime._capture_build_inputs())
         await runtime.async_save_index_to_store(hass, index, snapshot.fingerprint)
 
         stored_index = MockStore.stored_data["assist_canonicalizer.index_vi"]
@@ -400,7 +403,7 @@ async def test_persistent_store_rejects_stale_fingerprint(monkeypatch: Any) -> N
     hass = HashableFakeHass()
     runtime = CanonicalizerRuntime()
     runtime.update_registry_slot_values({"name": ("old lamp",)})
-    snapshot = runtime._create_build_snapshot("en")
+    snapshot = _create_build_snapshot("en", *runtime._capture_build_inputs())
     index = build_index("en", [Candidate(text="turn on old lamp", intent_name="HassTurnOn")])
     await runtime.async_save_index_to_store(hass, index, snapshot.fingerprint)
 
@@ -419,7 +422,7 @@ async def test_persistent_store_rejects_malformed_candidate(monkeypatch: Any) ->
     MockStore.reset()
     hass = HashableFakeHass()
     runtime = CanonicalizerRuntime()
-    snapshot = runtime._create_build_snapshot("en")
+    snapshot = _create_build_snapshot("en", *runtime._capture_build_inputs())
     index = build_index("en", [Candidate(text="turn on light", intent_name="HassTurnOn")])
     await runtime.async_save_index_to_store(hass, index, snapshot.fingerprint)
     MockStore.stored_data["assist_canonicalizer.index_en"]["candidates"][0].pop("normalized_text")
@@ -437,7 +440,7 @@ async def test_async_clear_index_removes_specific_and_all_stores(monkeypatch: An
     hass = HashableFakeHass()
     runtime = CanonicalizerRuntime()
     for language in ("en", "vi"):
-        snapshot = runtime._create_build_snapshot(language)
+        snapshot = _create_build_snapshot(language, *runtime._capture_build_inputs())
         index = build_index(
             language,
             [Candidate(text=f"sample {language}", intent_name="Sample", language=language)],
@@ -602,3 +605,177 @@ def test_canonical_fingerprint_value_sorting() -> None:
     nested_b = {"y": 3, "x": {"b": 2, "a": 1}}
 
     assert _canonical_fingerprint_value(nested_a) == _canonical_fingerprint_value(nested_b)
+
+
+async def test_rank_with_dynamic_candidates_filters_exact_matches() -> None:
+    """Verify that only candidates with score >= 1.0 are returned if an exact match exists."""
+    intent_sources: dict[str, Mapping[str, Any]] = {
+        "built_in": {
+            "intents": {
+                "HassTurnOn": {
+                    "data": [
+                        {
+                            "sentences": ["bật {name}"],
+                            "requires_context": {"domain": "light"},
+                        }
+                    ]
+                }
+            }
+        }
+    }
+    registry_slots = {
+        "name": ("đèn phòng khách", "đèn bếp"),
+        "name:light": ("đèn phòng khách", "đèn bếp"),
+    }
+
+    runtime = CanonicalizerRuntime()
+    runtime.update_registry_slot_values(registry_slots)
+    runtime.language_intent_sources["vi"] = intent_sources
+
+    indexed_candidates = [
+        Candidate(
+            text="bật đèn bếp",
+            intent_name="HassTurnOn",
+            source=CandidateSource.BUILT_IN,
+            language="vi",
+            metadata={"literal_text": "bật"},
+        )
+    ]
+    index = build_index("vi", indexed_candidates)
+
+    ranked = runtime.rank_with_dynamic_candidates("vi", index, "bật đèn bếp")
+
+    assert len(ranked) == 1
+    assert ranked[0].candidate.normalized_text == "bật đèn bếp"
+    assert ranked[0].scores.final_score == 1.0
+
+
+async def test_rank_with_dynamic_candidates_preserves_multiple_exact_matches() -> None:
+    """Verify that multiple exact matches (with different intents) are all preserved."""
+    intent_sources: dict[str, Mapping[str, Any]] = {
+        "built_in": {
+            "intents": {
+                "HassShoppingListAddItem": {
+                    "data": [
+                        {
+                            "sentences": ["đặt {name} vào danh sách mua sắm"],
+                        }
+                    ]
+                },
+                "HassListAddItem": {
+                    "data": [
+                        {
+                            "sentences": ["đặt {name} vào danh sách mua sắm"],
+                        }
+                    ]
+                },
+            }
+        }
+    }
+    registry_slots = {"name": ("sữa",), "name:shopping_list": ("sữa",)}
+
+    runtime = CanonicalizerRuntime()
+    runtime.update_registry_slot_values(registry_slots)
+    runtime.language_intent_sources["vi"] = intent_sources
+
+    indexed_candidates = [
+        Candidate(
+            text="đặt sữa vào danh sách mua sắm",
+            intent_name="HassShoppingListAddItem",
+            source=CandidateSource.BUILT_IN,
+            language="vi",
+            metadata={"literal_text": "đặt|vào|danh|sách|mua|sắm"},
+        ),
+        Candidate(
+            text="đặt sữa vào danh sách mua sắm",
+            intent_name="HassListAddItem",
+            source=CandidateSource.BUILT_IN,
+            language="vi",
+            metadata={"literal_text": "đặt|vào|danh|sách|mua|sắm"},
+        ),
+    ]
+    index = build_index("vi", indexed_candidates)
+
+    ranked = runtime.rank_with_dynamic_candidates("vi", index, "đặt sữa vào danh sách mua sắm")
+
+    assert len(ranked) == 2
+    expected_intents = {"HassShoppingListAddItem", "HassListAddItem"}
+    assert {r.candidate.intent_name for r in ranked} == expected_intents
+    assert all(r.scores.final_score == 1.0 for r in ranked)
+
+
+def test_rebuild_index_synchronous() -> None:
+    """Verify that index building from snapshot constructs correct candidates."""
+    runtime = CanonicalizerRuntime()
+    intent_sources = {
+        "built_in": {
+            "intents": {
+                "HassTurnOn": {
+                    "data": [
+                        {
+                            "sentences": ["bật {name}"],
+                        }
+                    ]
+                }
+            }
+        }
+    }
+    runtime.update_intent_sources(intent_sources)
+    runtime.update_registry_slot_values({"name": ("đèn",)})
+
+    with patch(
+        "custom_components.assist_canonicalizer.runtime.load_language_intent_sources",
+        return_value={},
+    ):
+        snapshot = _create_build_snapshot("vi", *runtime._capture_build_inputs())
+
+        index = _build_index_from_snapshot(snapshot)
+
+    assert index.language == "vi"
+    assert index.candidate_count > 0
+    assert index.candidates[0].text == "bật đèn"
+
+
+async def test_async_rebuild_index_real_flow(monkeypatch: Any) -> None:
+    """Verify async_rebuild_index runs the real build snapshot and build index functions."""
+    monkeypatch.setattr(homeassistant.helpers.storage, "Store", MockStore)
+    MockStore.reset()
+    runtime = CanonicalizerRuntime()
+    intent_sources = {
+        "built_in": {
+            "intents": {
+                "HassTurnOn": {
+                    "data": [
+                        {
+                            "sentences": ["bật {name}"],
+                        }
+                    ]
+                }
+            }
+        }
+    }
+    runtime.update_intent_sources(intent_sources)
+    runtime.update_registry_slot_values({"name": ("đèn",)})
+
+    class DummyHass:
+        """Dummy Home Assistant instance for async executor testing."""
+
+        async def async_add_executor_job(self, func: Any, *args: Any) -> Any:
+            """Execute a function synchronously."""
+            return func(*args)
+
+        def async_create_task(self, coro: Any) -> Any:
+            """Create and run an asyncio task."""
+            return asyncio.create_task(coro)
+
+    hass = DummyHass()
+    with patch(
+        "custom_components.assist_canonicalizer.runtime.load_language_intent_sources",
+        return_value={},
+    ):
+        index = await runtime.async_rebuild_index(hass, "vi")
+
+    assert index.language == "vi"
+    assert index.candidate_count > 0
+    assert index.candidates[0].text == "bật đèn"
+    assert runtime.get_index("vi") is index
