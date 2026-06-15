@@ -23,7 +23,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from string import ascii_letters, digits
+from string import ascii_letters, ascii_lowercase, digits
 from typing import TYPE_CHECKING, Any
 
 import hassil
@@ -39,6 +39,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 _PATH_ALLOWED_CHARS = ascii_letters + digits + "/._-"
+_TARGET_ALLOWED_CHARS = ascii_lowercase + "_"
 _MISSING_LIST_RE = re.compile(r"\{([^}]+)\}")
 
 _BOOTSTRAPPED = False
@@ -201,18 +202,25 @@ REGISTRY_SLOTS: dict[str, dict[str, tuple[str, ...]]] = {
 }
 
 
+def sanitize_chars(value: str, allowed: str) -> str:
+    """Validate and sanitize a string using allowed characters to break taint."""
+    if not isinstance(value, str):
+        raise ValueError("Expected a string.")
+    safe_chars: list[str] = []
+    for char in value:
+        idx = allowed.find(char)
+        if idx == -1:
+            raise ValueError(f"character {char!r} is not allowed.")
+        safe_chars.append(allowed[idx])
+    return "".join(safe_chars)
+
+
 def sanitize_path(root_path: str, user_path: str) -> str:
     """Validate, sanitize and contain a user-supplied file path."""
-    if not isinstance(user_path, str):
-        raise ValueError(f"Invalid path value {user_path!r}; expected a string.")
-
-    safe_chars: list[str] = []
-    for char in user_path:
-        idx = _PATH_ALLOWED_CHARS.find(char)
-        if idx == -1:
-            raise ValueError(f"Invalid path {user_path!r}; character {char!r} is not allowed.")
-        safe_chars.append(_PATH_ALLOWED_CHARS[idx])
-    clean = "".join(safe_chars)
+    try:
+        clean = sanitize_chars(user_path, _PATH_ALLOWED_CHARS)
+    except ValueError as err:
+        raise ValueError(f"Invalid path {user_path!r}; {err}") from err
 
     root = os.path.realpath(root_path)
     fullpath = os.path.realpath(os.path.normpath(os.path.join(root, clean)))
@@ -3400,6 +3408,12 @@ def main() -> None:
             "Only 'evaluate' is supported.",
             file=sys.stderr,
         )
+        sys.exit(1)
+
+    try:
+        target = sanitize_chars(target, _TARGET_ALLOWED_CHARS)
+    except ValueError as err:
+        print(f"Error: Target contains invalid characters: {err}", file=sys.stderr)
         sys.exit(1)
 
     safe_target = target
