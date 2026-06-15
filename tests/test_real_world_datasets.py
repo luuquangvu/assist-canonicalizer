@@ -26,12 +26,9 @@ from custom_components.assist_canonicalizer.ranking import (
     RankedCandidate,
     ScoreBreakdown,
 )
-from tools import evaluate_metrics
-from tools.evaluate_metrics import (
-    _select_accepted_with_gate,
-)
+from tools import benchmark
 
-evaluate_metrics._bootstrap_project_imports()
+benchmark._bootstrap_project_imports()
 
 DATASET_DIR = Path("tests/real_world")
 _LANGUAGES: tuple[str, ...] | None = None
@@ -43,7 +40,7 @@ def _discover_languages() -> tuple[str, ...]:
     if _LANGUAGES is not None:
         return _LANGUAGES
     repo_root = str(Path(__file__).resolve().parent.parent)
-    safe_dir = evaluate_metrics.sanitize_path(repo_root, str(DATASET_DIR))
+    safe_dir = benchmark.sanitize_path(repo_root, str(DATASET_DIR))
     languages: list[str] = []
     safe_dir_real = os.path.realpath(safe_dir)
     for filename in sorted(os.listdir(safe_dir)):
@@ -107,9 +104,9 @@ def dataset_context(request: pytest.FixtureRequest) -> DatasetContext:
     path = DATASET_DIR / f"{language}.json"
     data = orjson.loads(path.read_text(encoding="utf-8"))
     raw_cases = data["test_cases"]
-    cases = tuple(evaluate_metrics._validate_test_cases(raw_cases, language, str(path)))
-    slots = evaluate_metrics._dataset_registry_slots(data, language)
-    sources = evaluate_metrics.load_language_intent_sources(language)
+    cases = tuple(benchmark._validate_test_cases(raw_cases, language, str(path)))
+    slots = benchmark._dataset_registry_slots(data, language)
+    sources = benchmark.load_language_intent_sources(language)
     candidates = build_candidates_from_intent_sources(language, sources, slots)
     merged_intents: dict[str, Any] = {}
     for source in sources.values():
@@ -124,7 +121,7 @@ def dataset_context(request: pytest.FixtureRequest) -> DatasetContext:
         ),
         static_normalized_texts=frozenset(candidate.normalized_text for candidate in candidates),
         intents=hassil.intents.Intents.from_dict(merged_intents),
-        slot_lists=evaluate_metrics.make_hassil_slot_lists(slots),
+        slot_lists=benchmark.make_hassil_slot_lists(slots),
     )
 
 
@@ -176,8 +173,7 @@ def test_real_world_hard_categories_are_not_direct_hassil_matches(
         if case["category"] not in HARD_CATEGORIES:
             continue
         exact_static = (
-            evaluate_metrics.normalize_text(case["query"])
-            in dataset_context.static_normalized_texts
+            benchmark.normalize_text(case["query"]) in dataset_context.static_normalized_texts
         )
         hassil_ok = _recognizes_expected(dataset_context, case)
         if exact_static or hassil_ok:
@@ -229,10 +225,7 @@ def test_real_world_extra_words_are_not_exact_candidates(
     for case in dataset_context.cases:
         if case["category"] != "extra_words":
             continue
-        if (
-            evaluate_metrics.normalize_text(case["query"])
-            in dataset_context.static_normalized_texts
-        ):
+        if benchmark.normalize_text(case["query"]) in dataset_context.static_normalized_texts:
             failures.append(case["query"])
     assert not failures, f"{dataset_context.language}: extra_words exact candidates: {failures}"
 
@@ -257,7 +250,7 @@ def test_real_world_expected_intents_align_with_hassil(
     for case in dataset_context.cases:
         if case["category"] not in HASSIL_ALIGN_CATEGORIES:
             continue
-        results = evaluate_metrics.run_hassil_recognize_all(
+        results = benchmark.run_hassil_recognize_all(
             case["query"], dataset_context.intents, dataset_context.slot_lists
         )
         if not results:
@@ -339,7 +332,7 @@ def test_real_world_expected_slots_align_with_hassil(
         expected_slots = case.get("expected_slots", {})
         if not expected_slots:
             continue
-        results = evaluate_metrics.run_hassil_recognize_all(
+        results = benchmark.run_hassil_recognize_all(
             case["query"], dataset_context.intents, dataset_context.slot_lists
         )
         hassil_parses_by_intent: dict[str, list[dict[str, Any]]] = {}
@@ -404,13 +397,11 @@ def _has_expected_candidate(
 
 def _recognizes_expected(context: DatasetContext, case: Mapping[str, Any]) -> bool:
     """Return whether HassIL directly recognizes a case as the expected result."""
-    results = evaluate_metrics.run_hassil_recognize_all(
-        case["query"], context.intents, context.slot_lists
-    )
+    results = benchmark.run_hassil_recognize_all(case["query"], context.intents, context.slot_lists)
     expected_slots = case.get("expected_slots", {})
     return any(
         result.intent.name == case["expected_intent"]
-        and evaluate_metrics._slots_match(
+        and benchmark._slots_match(
             {name: entity.value for name, entity in result.entities.items()},
             expected_slots,
         )
@@ -421,7 +412,7 @@ def _recognizes_expected(context: DatasetContext, case: Mapping[str, Any]) -> bo
 def test_select_accepted_with_gate_diagnostics() -> None:
     """Verify that _select_accepted_with_gate exposes structured reasons."""
     # 1. Empty ranked list
-    res, diag = _select_accepted_with_gate(())
+    res, diag = benchmark._select_accepted_with_gate(())
     assert res is None
     assert diag["reason"] == FallbackReason.EMPTY_INDEX.value
 
@@ -438,7 +429,7 @@ def test_select_accepted_with_gate_diagnostics() -> None:
             final_score=accepted_score,
         ),
     )
-    res, diag = _select_accepted_with_gate((rc_1,))
+    res, diag = benchmark._select_accepted_with_gate((rc_1,))
     assert res is rc_1
     assert diag["reason"] == "accepted"
 
@@ -454,7 +445,7 @@ def test_select_accepted_with_gate_diagnostics() -> None:
             final_score=low_conf_score,
         ),
     )
-    res, diag = _select_accepted_with_gate((rc_low,))
+    res, diag = benchmark._select_accepted_with_gate((rc_low,))
     assert res is None
     assert diag["reason"] == FallbackReason.LOW_CONFIDENCE.value
 
@@ -483,6 +474,6 @@ def test_select_accepted_with_gate_diagnostics() -> None:
             final_score=competitor_score,
         ),
     )
-    res, diag = _select_accepted_with_gate((rc_winner, rc_competitor))
+    res, diag = benchmark._select_accepted_with_gate((rc_winner, rc_competitor))
     assert res is None
     assert diag["reason"] == FallbackReason.LOW_MARGIN.value
