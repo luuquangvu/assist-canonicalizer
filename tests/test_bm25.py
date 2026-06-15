@@ -1,10 +1,13 @@
 """Tests for BM25 search index."""
 
-from collections import Counter
-
 import pytest
 
-from custom_components.assist_canonicalizer.bm25 import BM25Document, BM25Index
+from custom_components.assist_canonicalizer.bm25 import (
+    BM25Document,
+    BM25Index,
+    _analyze_document,
+    _analyze_tokens,
+)
 
 
 def test_bm25_validation_errors() -> None:
@@ -96,25 +99,35 @@ def test_bm25_score_custom_documents_with_candidates_and_cache() -> None:
     c1 = DummyCandidate("hello world", ("hello", "world"))
     c2 = DummyCandidate("testing bm25", ("testing", "bm25"))
 
+    _analyze_document.cache_clear()
+    _analyze_tokens.cache_clear()
+
     # Verify we can score it
     res = index.score_custom_documents("World BM25", [c1, c2])
     assert res[0] > 0.0
     assert res[1] > 0.0
 
-    # Verify that the cache was populated
-    assert "hello world" in index._custom_cache
-    assert index._custom_cache["hello world"] == (
-        ("hello", "world"),
-        Counter({"hello": 1, "world": 1}),
-        2,
-    )
+    # Since tokens are provided, _analyze_tokens should have been called
+    info_tok = _analyze_tokens.cache_info()
+    assert info_tok.misses == 2
+    assert info_tok.hits == 0
 
-    # Modify the cache entry to verify it gets reused
-    index._custom_cache["hello world"] = (
-        ("hello", "world"),
-        Counter({"hello": 1, "world": 1}),
-        10,
-    )  # artificially set length to 10
-    # Rescoring should use the modified cache entry (changing the length factor and the score)
+    # Rescoring should hit the cache
     res_cached = index.score_custom_documents("World BM25", [c1, c2])
-    assert res_cached != res
+    assert res_cached == res
+
+    info_tok_after = _analyze_tokens.cache_info()
+    assert info_tok_after.hits == 2
+
+    # Verify that string-based scoring uses _analyze_document and hits the cache too
+    _analyze_document.cache_clear()
+    res_str = index.score_custom_documents("World BM25", ["hello world", "testing bm25"])
+    assert res_str == res
+    info_doc = _analyze_document.cache_info()
+    assert info_doc.misses == 2
+    assert info_doc.hits == 0
+
+    res_str_cached = index.score_custom_documents("World BM25", ["hello world", "testing bm25"])
+    assert res_str_cached == res_str
+    info_doc_after = _analyze_document.cache_info()
+    assert info_doc_after.hits == 2

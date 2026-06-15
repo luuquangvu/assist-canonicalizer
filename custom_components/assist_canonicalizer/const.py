@@ -57,8 +57,9 @@ POSITIONAL_SIMILARITY_PARTIAL_CREDIT = 0.50
 
 # Tiebreaker: minimum score margin between top candidates of different intents
 # to skip the two-pass disambiguation.  If the top two candidates belong to
-# different intents and their score gap is less than this margin (or the second
-# candidate has a *higher* intent_action score), a second pass is run.
+# different intents and their score gap is less than this margin, they are
+# evaluated in a second pass where the competitor is promoted if its intent_score
+# is higher.
 TIEBREAKER_INTENT_MARGIN = 0.05
 
 # Non-entity penalty blend: fraction of the intent score that can be reduced

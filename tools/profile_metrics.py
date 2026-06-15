@@ -583,21 +583,17 @@ class BaselineManager:
                 )
 
         # Recursively compare per-metric stats
-        for key in current:
-            if key in baseline:
-                cur_val = current[key]
-                base_val = baseline[key]
-                if isinstance(cur_val, dict) and isinstance(base_val, dict):
-                    for metric in ("mean", "median", "p95", "p99", "max", "min"):
-                        if metric in cur_val and metric in base_val:
-                            _check(
-                                f"{key}.{metric}",
-                                float(cur_val[metric]),
-                                float(base_val[metric]),
-                                f"{key}.{metric}",
-                            )
-                elif isinstance(cur_val, (int, float)) and isinstance(base_val, (int, float)):
-                    _check(key, float(cur_val), float(base_val), key)
+        def _compare_recursive(cur_val: Any, base_val: Any, path: str) -> None:
+            if isinstance(cur_val, dict) and isinstance(base_val, dict):
+                for k in cur_val:
+                    if k in base_val:
+                        _compare_recursive(cur_val[k], base_val[k], f"{path}.{k}" if path else k)
+            elif isinstance(cur_val, (int, float)) and isinstance(base_val, (int, float)):
+                leaf = path.split(".")[-1] if path else ""
+                if leaf in ("mean", "median", "p95", "p99", "max", "min") or "." not in path:
+                    _check(path, float(cur_val), float(base_val), path)
+
+        _compare_recursive(current, baseline, "")
 
         return regressions
 

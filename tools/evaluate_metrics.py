@@ -1598,7 +1598,8 @@ async def run_evaluation(
         }
 
     _print_summary_table("Summary: ALL LANGUAGES", global_results)
-    _print_ablation_table("Ablation Top-1: ALL LANGUAGES", global_ablations)
+    if not skip_ablations:
+        _print_ablation_table("Ablation Top-1: ALL LANGUAGES", global_ablations)
     lex_stats = _aggregate_mode_stats(global_results, "lexical")
     threshold_failures = _threshold_failures(
         lex_stats,

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 from math import log
 from typing import Any
 
@@ -17,6 +18,20 @@ class BM25Document:
 
     text: str
     tokens: tuple[str, ...]
+
+
+@lru_cache(maxsize=8192)
+def _analyze_tokens(tokens: tuple[str, ...]) -> tuple[Counter[str], int]:
+    """Compute term frequencies and length for a tokenized document."""
+    return Counter(tokens), len(tokens)
+
+
+@lru_cache(maxsize=8192)
+def _analyze_document(text: str) -> tuple[tuple[str, ...], Counter[str], int]:
+    """Tokenize and compute term frequencies and length for a document text."""
+    tokens = tokenize_normalized(text)
+    counter, length = _analyze_tokens(tokens)
+    return tokens, counter, length
 
 
 class BM25Index:
@@ -51,7 +66,6 @@ class BM25Index:
             for token, idf in self._inverse_document_frequencies.items()
         }
         self._postings = self._build_postings()
-        self._custom_cache: dict[str, tuple[tuple[str, ...], Counter[str], int]] = {}
 
     @classmethod
     def from_texts(cls, texts: Sequence[str], k1: float = 1.5, b: float = 0.75) -> BM25Index:
@@ -198,16 +212,10 @@ class BM25Index:
                 text = doc.normalized_text
                 tokens = doc.normalized_tokens
 
-            cached = self._custom_cache.get(text)
-            if cached is None:
-                if tokens is None:
-                    tokens = tokenize_normalized(text)
-                counter = Counter(tokens)
-                length = len(tokens)
-                cached = (tokens, counter, length)
-                self._custom_cache[text] = cached
+            if tokens is None:
+                tokens, counter, length = _analyze_document(text)
             else:
-                tokens, counter, length = cached
+                counter, length = _analyze_tokens(tokens)
 
             doc_token_counters.append(counter)
             len_factor = use_k1 * (one_minus_b + b_over_avg * length)
