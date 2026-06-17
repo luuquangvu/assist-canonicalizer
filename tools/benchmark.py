@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import cProfile
 import gc
 import io
 import json
@@ -1745,11 +1746,14 @@ class PhaseTimer:
         self.current_phase: str | None = None
         self._stack: list[tuple[str, float, float]] = []
         self._monitor = resource_monitor
+        self.enabled: bool = True
 
     def _current_rss(self) -> float:
         """Get the current process RSS memory utilization in MB."""
-        if self._monitor is not None:
-            return self._monitor.current_rss_mb
+        if self._monitor is not None and self._monitor.is_alive():
+            sampled_rss_mb = self._monitor.current_rss_mb
+            if sampled_rss_mb > 0.0:
+                return sampled_rss_mb
         try:
             with open("/proc/self/stat", "rb") as f:
                 parts = f.read().decode().split()
@@ -1760,12 +1764,16 @@ class PhaseTimer:
 
     def start(self, name: str) -> None:
         """Start measuring a phase by name."""
+        if not self.enabled:
+            return
         rss = self._current_rss()
         self.current_phase = name
         self._stack.append((name, time.perf_counter(), rss))
 
     def stop(self) -> None:
         """Stop the current active phase timing and record statistics."""
+        if not self.enabled:
+            return
         if not self._stack:
             return
         name, start_time, start_rss = self._stack.pop()
@@ -1781,6 +1789,8 @@ class PhaseTimer:
 
     def record(self, name: str, elapsed: float, rss_delta: float = 0.0) -> None:
         """Directly record performance numbers for a given phase name."""
+        if not self.enabled:
+            return
         self.phases.setdefault(name, []).append(elapsed)
         self.memory_deltas.setdefault(name, []).append(rss_delta)
 
@@ -1798,7 +1808,7 @@ class PhaseTimer:
 class ResourceMonitor(threading.Thread):
     """Monitors CPU, memory (RSS, VmSize, VmPeak), and GC of the current process."""
 
-    def __init__(self, interval: float = 0.02) -> None:
+    def __init__(self, interval: float = 0.1) -> None:
         """Initialize the background resource monitoring thread."""
         super().__init__(daemon=True)
         self.interval: float = interval
@@ -1865,7 +1875,11 @@ class ResourceMonitor(threading.Thread):
         self.stop_event.set()
 
     def snapshot_gc(self) -> None:
-        """Take a snapshot of current garbage collection stats."""
+        """Take a snapshot of current garbage collection stats.
+
+        Note: This method is safe to call even if the monitoring thread has not
+        been started (e.g., when target is 'components').
+        """
         try:
             gc_stats = gc.get_stats()
             self.gc_snapshots.append(
@@ -1886,7 +1900,11 @@ class ResourceMonitor(threading.Thread):
             pass
 
     def get_cpu_metrics(self) -> dict[str, float]:
-        """Compute average and peak CPU utilization percentages."""
+        """Compute average and peak CPU utilization percentages.
+
+        Note: This method returns zeroed metrics safely if the thread has not
+        been started.
+        """
         with self._lock:
             if len(self.cpu_samples) < 2:
                 return {"avg_pct": 0.0, "peak_pct": 0.0}
@@ -1905,7 +1923,11 @@ class ResourceMonitor(threading.Thread):
             }
 
     def get_memory_metrics(self) -> dict[str, float]:
-        """Compute average and peak memory (RSS and Vm) metrics in MB."""
+        """Compute average and peak memory (RSS and Vm) metrics in MB.
+
+        Note: This method returns zeroed metrics safely if the thread has not
+        been started.
+        """
         with self._lock:
             return {
                 "rss_avg_mb": sum(self.rss_samples) / len(self.rss_samples)
@@ -2465,6 +2487,7 @@ def _profile_evaluate(
     for run_idx in range(total_runs):
         is_warmup = run_idx < warmup
         label = f"evaluate_run_{run_idx}"
+        timer.enabled = not is_warmup
 
         if is_warmup:
             print(f"Warmup run {run_idx + 1}/{warmup} ...", flush=True)
@@ -2472,9 +2495,9 @@ def _profile_evaluate(
             print(f"Profiling run {run_idx - warmup + 1}/{iterations} ...", flush=True)
 
         if granularity == "coarse" or is_warmup:
-            timer.start(label)
             gc.collect()
             monitor.snapshot_gc()
+            timer.start(label)
 
             asyncio.run(
                 run_evaluation(
@@ -2488,9 +2511,9 @@ def _profile_evaluate(
             )
             timer.stop()
         elif granularity == "medium":
-            timer.start(label)
             gc.collect()
             monitor.snapshot_gc()
+            timer.start(label)
             with timer.phase("evaluate_total"):
                 asyncio.run(
                     run_evaluation(
@@ -2504,9 +2527,9 @@ def _profile_evaluate(
                 )
             timer.stop()
         else:  # fine
-            timer.start(label)
             gc.collect()
             monitor.snapshot_gc()
+            timer.start(label)
             with timer.phase("evaluate_total"):
                 asyncio.run(
                     run_evaluation(
@@ -2560,6 +2583,7 @@ def _profile_build_index(
         for run_idx in range(total_runs):
             is_warmup = run_idx < warmup
             label = f"build_index_{lang}"
+            timer.enabled = not is_warmup
 
             sources = load_language_intent_sources(lang)
             gc.collect()
@@ -2568,7 +2592,7 @@ def _profile_build_index(
             timer.start(label)
             with timer.phase(f"build_candidates_{lang}"):
                 candidates = build_candidates_from_intent_sources(lang, sources, slots)
-            with timer.phase(f"build_index_{lang}"):
+            with timer.phase(f"build_index_only_{lang}"):
                 build_index(lang, candidates)
             timer.stop()
 
@@ -2638,6 +2662,7 @@ def _profile_rank(
         for run_idx in range(total_runs):
             is_warmup = run_idx < warmup
             label = f"rank_{lang}"
+            timer.enabled = not is_warmup
 
             gc.collect()
             monitor.snapshot_gc()
@@ -2775,6 +2800,7 @@ def _profile_components(
 
     for run_idx in range(total_runs):
         is_warmup = run_idx < warmup
+        timer.enabled = not is_warmup
         for query_raw, query_norm, lang, lit_text in all_queries:
             if is_warmup:
                 _ = normalize_text(query_raw)
@@ -2918,19 +2944,25 @@ def _build_report(
     if per_lang:
         report["per_language"] = per_lang
 
-    cpu_metrics = monitor.get_cpu_metrics()
-    mem_metrics = monitor.get_memory_metrics()
-    report["resource"] = {**cpu_metrics, **mem_metrics}
+    if monitor.cpu_samples and monitor.rss_samples:
+        cpu_metrics = monitor.get_cpu_metrics()
+        mem_metrics = monitor.get_memory_metrics()
+        report["resource"] = {**cpu_metrics, **mem_metrics}
 
     regressions = baseline.compare(
         target, report, max_regression_pct, warn_on_missing=warn_on_missing
     )
     report["regressions"] = regressions
 
+    stability_min_duration_sec = 0.010
     cov_values: list[float] = []
     for _phase_name, phase_data in phase_stats.items():
         e = phase_data.get("elapsed")
-        if isinstance(e, dict) and e.get("cov_pct", 0) > 0:
+        if (
+            isinstance(e, dict)
+            and e.get("cov_pct", 0) > 0
+            and float(e.get("mean", 0.0)) >= stability_min_duration_sec
+        ):
             cov_values.append(float(e["cov_pct"]))
     if cov_values:
         avg_cov = statistics.mean(cov_values)
@@ -2970,10 +3002,11 @@ def _run_profiling(
     print(f"Languages: {', '.join(sorted(datasets.keys()))}")
     print(f"{'=' * 90}")
 
-    monitor = ResourceMonitor(interval=0.02)
+    monitor = ResourceMonitor(interval=0.1)
     timer = PhaseTimer(monitor)
 
-    monitor.start()
+    if target != "components":
+        monitor.start()
     monitor.snapshot_gc()
     gc.collect()
     gc.disable()
@@ -2998,8 +3031,9 @@ def _run_profiling(
     finally:
         gc.enable()
         monitor.snapshot_gc()
-        monitor.stop_monitor()
-        monitor.join(timeout=5.0)
+        if target != "components":
+            monitor.stop_monitor()
+            monitor.join(timeout=5.0)
 
     report = _build_report(
         target,
@@ -3241,6 +3275,29 @@ def _write_profile_all_text(all_reports: dict[str, Any], path: str) -> None:
     while lines and lines[-1] == "":
         lines.pop()
     atomic_write(path, "\n".join(lines) + "\n")
+
+
+def _save_cprofile_metric(
+    pr: cProfile.Profile,
+    profile_dir: Path,
+    sort_key: str,
+    filename: str,
+    action: str,
+    label: str,
+) -> io.StringIO:
+    """Extract, sort, and save cProfile statistics to a text file."""
+    s = io.StringIO()
+    ps = pstats.Stats(pr, stream=s).sort_stats(sort_key)
+    if action == "print_stats":
+        ps.print_stats(50)
+    elif action == "print_callers":
+        ps.print_callers(50)
+    elif action == "print_callees":
+        ps.print_callees(50)
+    out_path = profile_dir / filename
+    out_path.write_text(s.getvalue(), encoding="utf-8")
+    print(f"cProfile {label} summary saved to {out_path}")
+    return s
 
 
 # ---------------------------------------------------------------------------
@@ -3607,9 +3664,7 @@ def main() -> None:
             # Optional cProfile dump during rankings profiling
             if args.cprofile:
                 print("\nRunning cProfile snapshot ...", flush=True)
-                import cProfile as cProf
-
-                pr = cProf.Profile()
+                pr = cProfile.Profile()
                 pr.enable()
 
                 _bootstrap_project_imports()
@@ -3633,12 +3688,59 @@ def main() -> None:
                 pr.dump_stats(str(prof_dump))
                 print(f"cProfile dump saved to {prof_dump}")
 
-                s = io.StringIO()
-                ps = pstats.Stats(pr, stream=s).sort_stats("cumulative")
-                ps.print_stats(50)
+                # 1. Cumulative time stats (overall bottlenecks)
+                s_cum = _save_cprofile_metric(
+                    pr,
+                    profile_dir,
+                    "cumulative",
+                    "profile_metrics_cumulative.txt",
+                    "print_stats",
+                    "cumulative",
+                )
+
+                # 2. Internal time stats (tottime) - crucial for micro-optimizations
+                _ = _save_cprofile_metric(
+                    pr,
+                    profile_dir,
+                    "tottime",
+                    "profile_metrics_tottime.txt",
+                    "print_stats",
+                    "internal-time",
+                )
+
+                # 3. Call count stats (ncalls) - find functions called too frequently
+                _ = _save_cprofile_metric(
+                    pr,
+                    profile_dir,
+                    "ncalls",
+                    "profile_metrics_ncalls.txt",
+                    "print_stats",
+                    "call-count",
+                )
+
+                # 4. Callers relationship stats - showing function callers
+                _ = _save_cprofile_metric(
+                    pr,
+                    profile_dir,
+                    "tottime",
+                    "profile_metrics_callers.txt",
+                    "print_callers",
+                    "callers",
+                )
+
+                # 5. Callees relationship stats - showing function callees
+                _ = _save_cprofile_metric(
+                    pr,
+                    profile_dir,
+                    "tottime",
+                    "profile_metrics_callees.txt",
+                    "print_callees",
+                    "callees",
+                )
+
                 print("\nTOP 50 FUNCTIONS BY CUMULATIVE TIME:")
                 print("-" * 80)
-                print(s.getvalue())
+                print(s_cum.getvalue())
 
         except KeyboardInterrupt:
             print("\nPROFILE_INTERRUPTED", flush=True)
