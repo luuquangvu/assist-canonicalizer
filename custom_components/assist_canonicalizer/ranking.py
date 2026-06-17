@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from heapq import nsmallest
@@ -75,10 +76,10 @@ class CharNGramIndex:
     @classmethod
     def from_grams(cls, candidate_grams: Sequence[frozenset[str]]) -> CharNGramIndex:
         """Build a character n-gram posting index from candidate gram sets."""
-        postings: dict[str, list[int]] = {}
+        postings = defaultdict(list)
         for index, grams in enumerate(candidate_grams):
             for gram in grams:
-                postings.setdefault(gram, []).append(index)
+                postings[gram].append(index)
         return cls(
             gram_counts=tuple(len(grams) for grams in candidate_grams),
             postings={gram: tuple(indexes) for gram, indexes in postings.items()},
@@ -107,15 +108,35 @@ class CharNGramIndex:
 
 
 def rapidfuzz_similarity_normalized(
-    query: str, candidate: str, *, query_token_count: int | None = None
+    query: str,
+    candidate: str,
+    *,
+    query_token_count: int | None = None,
+    query_sorted: str | None = None,
+    candidate_sorted: str | None = None,
+    candidate_token_count: int | None = None,
 ) -> float:
     """Return a RapidFuzz score that penalizes unmatched extra tokens."""
     if not query or not candidate:
         return 0.0
     wratio = float(fuzz.WRatio(query, candidate))
-    token_sort = float(fuzz.token_sort_ratio(query, candidate))
+    if query_sorted is not None and candidate_sorted is not None:
+        token_sort = float(fuzz.ratio(query_sorted, candidate_sorted))
+    else:
+        token_sort = float(fuzz.token_sort_ratio(query, candidate))
     token_set = float(fuzz.token_set_ratio(query, candidate))
-    token_set *= token_count_ratio(query, candidate, query_token_count=query_token_count)
+
+    query_count = query_token_count if query_token_count is not None else query.count(" ") + 1
+    candidate_count = (
+        candidate_token_count if candidate_token_count is not None else candidate.count(" ") + 1
+    )
+    len_ratio = (
+        min(query_count, candidate_count) / max(query_count, candidate_count)
+        if query_count and candidate_count
+        else 0.0
+    )
+    token_set *= len_ratio
+
     return (wratio + token_sort + token_set) / 300.0
 
 
@@ -178,11 +199,14 @@ def _query_token_coverage(
 
 
 def _exact_intent_score(
-    literal_text: str,
+    literal_text_or_variants: str | tuple[frozenset[str], ...],
     query_tokens: frozenset[str],
 ) -> float:
     """Return how well query tokens cover localized template literal words."""
-    variants = literal_token_variants(literal_text)
+    if isinstance(literal_text_or_variants, str):
+        variants = literal_token_variants(literal_text_or_variants)
+    else:
+        variants = literal_text_or_variants
     if not variants:
         return 1.0
     max_score = 0.0
@@ -253,7 +277,7 @@ def _build_positional_lookup(
 
 
 def _precompute_literal_analysis(
-    literal_text: str,
+    literal_text_or_variants: str | tuple[frozenset[str], ...],
     query_tokens: frozenset[str],
     positional_lookup: dict[str, frozenset[str]],
 ) -> _LiteralVariantAnalysis:
@@ -274,8 +298,12 @@ def _precompute_literal_analysis(
     — an O(variants * positional_hits) operation instead of the previous
     O(variants * all_tokens) loop with repeated dict lookups.
     """
+    if isinstance(literal_text_or_variants, str):
+        variants = literal_token_variants(literal_text_or_variants)
+    else:
+        variants = literal_text_or_variants
     result: _LiteralVariantAnalysis = []
-    for literal_tokens in literal_token_variants(literal_text):
+    for literal_tokens in variants:
         exact_count = 0
         positional_hits: list[frozenset[str]] = []
         for token in literal_tokens:
@@ -307,7 +335,7 @@ def _positional_intent_score_from_lookup(
     if not variants:
         return 1.0
     if candidate_entity is not None and query_tokens.issubset(candidate_entity):
-        return _exact_intent_score(literal_text, query_tokens)
+        return _exact_intent_score(variants, query_tokens)
     best_score = 0.0
     for literal_tokens in variants:
         matched_weight = 0.0
@@ -366,6 +394,7 @@ def rank_candidates(
     """Rank candidates for a query using lexical scoring."""
     if max_candidates < 1:
         raise ValueError("max_candidates must be positive")
+    disambiguation_limit = max(2, max_candidates)
     if rapidfuzz_prefilter_candidates < max_candidates:
         raise ValueError("rapidfuzz_prefilter_candidates must be at least max_candidates")
     if not candidates:
@@ -400,6 +429,7 @@ def rank_candidates(
     query_tokens = frozenset(query_normalized.split())
     query_tokens_tuple = tuple(query_normalized.split())
     query_token_count = len(query_tokens_tuple)
+    query_sorted = " ".join(sorted(query_tokens_tuple))
     intent_score_cache: dict[str, float] = {}
     if positional_literal_tokens is None:
         all_tokens: set[str] = set()
@@ -436,7 +466,10 @@ def rank_candidates(
         -(CHAR_NGRAM_WEIGHT * cs + BM25_WEIGHT * bs)
         for cs, bs in zip(char_scores, bm25_scores, strict=True)
     ]
-    prefilter_limit = min(len(candidates), rapidfuzz_prefilter_candidates)
+    prefilter_limit = min(
+        len(candidates),
+        max(rapidfuzz_prefilter_candidates, disambiguation_limit),
+    )
 
     top_indices = nsmallest(
         prefilter_limit, range(len(prefilter_keys)), key=prefilter_keys.__getitem__
@@ -449,7 +482,7 @@ def rank_candidates(
     )
 
     literal_analysis_cache: dict[str, _LiteralVariantAnalysis] = {}
-    ranked: list[RankedCandidate] = []
+    ranked_tuples: list[tuple[float, Candidate, float, float, float, float]] = []
     for idx in top_indices:
         candidate = candidates[idx]
         bm25_score = bm25_scores[idx]
@@ -458,6 +491,9 @@ def rank_candidates(
             query_normalized,
             candidate.normalized_text,
             query_token_count=query_token_count,
+            query_sorted=query_sorted,
+            candidate_sorted=candidate.normalized_text_sorted,
+            candidate_token_count=len(candidate.normalized_tokens),
         )
         literal_text = candidate.metadata.get("literal_text")
         candidate_tokens = candidate.normalized_tokens_set
@@ -466,12 +502,10 @@ def rank_candidates(
         if literal_text:
             exact = intent_score_cache.get(literal_text)
             if exact is None:
-                exact = _exact_intent_score(literal_text, query_tokens)
+                exact = _exact_intent_score(candidate.literal_variants, query_tokens)
                 intent_score_cache[literal_text] = exact
             if exact >= 1.0:
-                variants = literal_token_variants(literal_text)
-                total_unique = len({tok for var in variants for tok in var})
-                if total_unique >= 2:
+                if candidate.total_unique_literal_tokens >= 2:
                     matched_q = len(query_tokens & candidate_tokens)
                     intent_score = matched_q / len(query_tokens) if query_tokens else 1.0
             elif query_tokens.issubset(candidate_tokens):
@@ -480,7 +514,7 @@ def rank_candidates(
                 analysis = literal_analysis_cache.get(literal_text)
                 if analysis is None:
                     analysis = _precompute_literal_analysis(
-                        literal_text, query_tokens, positional_lookup
+                        candidate.literal_variants, query_tokens, positional_lookup
                     )
                     literal_analysis_cache[literal_text] = analysis
                 best = 0.0
@@ -502,15 +536,30 @@ def rank_candidates(
                 )
                 intent_score *= 1.0 - NON_ENTITY_PENALTY_BLEND + NON_ENTITY_PENALTY_BLEND * penalty
         combined = lexical_score(rapidfuzz_score, char_score, bm25_score, intent_score)
-        scores = ScoreBreakdown(
-            rapidfuzz_score=rapidfuzz_score,
-            char_ngram_score=char_score,
-            bm25_score=bm25_score,
-            intent_score=intent_score,
-            final_score=combined,
+        ranked_tuples.append(
+            (
+                combined,
+                candidate,
+                rapidfuzz_score,
+                char_score,
+                bm25_score,
+                intent_score,
+            )
         )
-        ranked.append(RankedCandidate(candidate=candidate, scores=scores))
-    ranked.sort(key=lambda item: item.scores.final_score, reverse=True)
+    ranked_tuples.sort(key=lambda item: item[0], reverse=True)
+    ranked = [
+        RankedCandidate(
+            candidate=item[1],
+            scores=ScoreBreakdown(
+                rapidfuzz_score=item[2],
+                char_ngram_score=item[3],
+                bm25_score=item[4],
+                intent_score=item[5],
+                final_score=item[0],
+            ),
+        )
+        for item in ranked_tuples[:disambiguation_limit]
+    ]
     _apply_intent_disambiguation(ranked)
     return tuple(ranked[:max_candidates])
 

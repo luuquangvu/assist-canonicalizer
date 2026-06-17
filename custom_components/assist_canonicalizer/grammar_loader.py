@@ -816,13 +816,13 @@ def _expansion_rules_cache_key(
     return tuple(sorted(expansion_rules.items()))
 
 
-@lru_cache(maxsize=8192)
+@lru_cache(maxsize=65536)
 def _cached_normalize_no_diac(text: str, language: str | None = None) -> str:
     """Cache diacritics removal for efficient lookups."""
     return normalize_text_no_diacritics(text, language)
 
 
-@lru_cache(maxsize=8192)
+@lru_cache(maxsize=2048)
 def _cached_template_literal_text(
     text: str,
     expansion_rules_key: tuple[tuple[str, str], ...],
@@ -838,7 +838,7 @@ def _cached_template_literal_text(
     return "|".join(deduplicated)
 
 
-@lru_cache(maxsize=8192)
+@lru_cache(maxsize=2048)
 def _cached_template_literal_token_variants(
     text: str,
     expansion_rules_key: tuple[tuple[str, str], ...],

@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from string import ascii_letters, ascii_lowercase, digits
@@ -63,6 +64,11 @@ BM25Index: Any = None
 CharNGramIndex: Any = None
 rapidfuzz_similarity_normalized: Any = None
 lexical_score: Any = None
+_build_positional_lookup: Any = None
+_exact_intent_score: Any = None
+_positional_intent_score_from_lookup: Any = None
+literal_token_variants: Any = None
+_apply_intent_disambiguation: Any = None
 
 
 def _bootstrap_project_imports() -> None:
@@ -75,6 +81,8 @@ def _bootstrap_project_imports() -> None:
     global normalize_text, normalize_text_no_diacritics, char_ngrams_normalized
     global _RankedCandidate, _ScoreBreakdown, Candidate, FallbackReason
     global BM25Index, CharNGramIndex, rapidfuzz_similarity_normalized, lexical_score
+    global _build_positional_lookup, _exact_intent_score, _positional_intent_score_from_lookup
+    global literal_token_variants, _apply_intent_disambiguation
 
     if _BOOTSTRAPPED:
         return
@@ -115,10 +123,25 @@ def _bootstrap_project_imports() -> None:
         ScoreBreakdown as ImportedScoreBreakdown,
     )
     from custom_components.assist_canonicalizer.ranking import (
+        _apply_intent_disambiguation as imported_apply_intent_disambiguation,
+    )
+    from custom_components.assist_canonicalizer.ranking import (
+        _build_positional_lookup as imported_build_positional_lookup,
+    )
+    from custom_components.assist_canonicalizer.ranking import (
+        _exact_intent_score as imported_exact_intent_score,
+    )
+    from custom_components.assist_canonicalizer.ranking import (
+        _positional_intent_score_from_lookup as imported_positional_intent_score_from_lookup,
+    )
+    from custom_components.assist_canonicalizer.ranking import (
         accepted_candidate as imported_accepted_candidate,
     )
     from custom_components.assist_canonicalizer.ranking import (
         lexical_score as imported_lexical_score,
+    )
+    from custom_components.assist_canonicalizer.ranking import (
+        literal_token_variants as imported_literal_token_variants,
     )
     from custom_components.assist_canonicalizer.ranking import (
         rapidfuzz_similarity_normalized as imported_rf_sim,
@@ -144,6 +167,11 @@ def _bootstrap_project_imports() -> None:
     CharNGramIndex = ImportedCharNGramIndex
     rapidfuzz_similarity_normalized = imported_rf_sim
     lexical_score = imported_lexical_score
+    _build_positional_lookup = imported_build_positional_lookup
+    _exact_intent_score = imported_exact_intent_score
+    _positional_intent_score_from_lookup = imported_positional_intent_score_from_lookup
+    literal_token_variants = imported_literal_token_variants
+    _apply_intent_disambiguation = imported_apply_intent_disambiguation
 
     _BOOTSTRAPPED = True
 
@@ -1728,7 +1756,8 @@ class _PhaseContext:
 
     def __enter__(self) -> _PhaseContext:
         """Enter the phase context and start the timer."""
-        self._timer.start(self._name)
+        track_memory = not self._name.endswith("_inner")
+        self._timer.start(self._name, track_memory=track_memory)
         return self
 
     def __exit__(self, *args: object) -> None:
@@ -1744,7 +1773,7 @@ class PhaseTimer:
         self.phases: dict[str, list[float]] = {}
         self.memory_deltas: dict[str, list[float]] = {}
         self.current_phase: str | None = None
-        self._stack: list[tuple[str, float, float]] = []
+        self._stack: list[tuple[str, float, float, bool]] = []
         self._monitor = resource_monitor
         self.enabled: bool = True
 
@@ -1762,13 +1791,13 @@ class PhaseTimer:
         except Exception:
             return 0.0
 
-    def start(self, name: str) -> None:
+    def start(self, name: str, track_memory: bool = True) -> None:
         """Start measuring a phase by name."""
         if not self.enabled:
             return
-        rss = self._current_rss()
+        rss = self._current_rss() if track_memory else 0.0
         self.current_phase = name
-        self._stack.append((name, time.perf_counter(), rss))
+        self._stack.append((name, time.perf_counter(), rss, track_memory))
 
     def stop(self) -> None:
         """Stop the current active phase timing and record statistics."""
@@ -1776,9 +1805,9 @@ class PhaseTimer:
             return
         if not self._stack:
             return
-        name, start_time, start_rss = self._stack.pop()
+        name, start_time, start_rss, track_memory = self._stack.pop()
         elapsed = time.perf_counter() - start_time
-        rss_delta = max(0.0, self._current_rss() - start_rss)
+        rss_delta = max(0.0, self._current_rss() - start_rss) if track_memory else 0.0
         self.phases.setdefault(name, []).append(elapsed)
         self.memory_deltas.setdefault(name, []).append(rss_delta)
         self.current_phase = self._stack[-1][0] if self._stack else None
@@ -2678,8 +2707,6 @@ def _profile_rank(
             else:
                 for qi, query in enumerate(queries):
                     q_start = time.perf_counter()
-                    from contextlib import suppress
-
                     with timer.phase("rank_candidates_inner"), suppress(Exception):
                         _ = index.rank(query)
                     q_elapsed = time.perf_counter() - q_start
@@ -2724,11 +2751,6 @@ def _profile_components(
 ) -> dict[str, Any]:
     """Micro-benchmark isolated scoring components."""
     _bootstrap_project_imports()
-    from custom_components.assist_canonicalizer.ranking import (
-        _build_positional_lookup,
-        _exact_intent_score,
-        _positional_intent_score_from_lookup,
-    )
 
     all_queries: list[tuple[str, str, str, str | None]] = []
     all_per_lang: dict[str, list[tuple[str, str, str, str | None]]] = {}
@@ -2791,6 +2813,29 @@ def _profile_components(
             all_norm_texts.append(c.normalized_text)
             all_candidates.append(c)
 
+    _disambig_pair: tuple[Any, Any] | None = None
+    if len(all_candidates) >= 2:
+        for _i in range(len(all_candidates)):
+            for _j in range(_i + 1, len(all_candidates)):
+                if all_candidates[_i].intent_name != all_candidates[_j].intent_name:
+                    _disambig_pair = (all_candidates[_i], all_candidates[_j])
+                    break
+            if _disambig_pair is not None:
+                break
+        if _disambig_pair is None:
+            _disambig_pair = (all_candidates[0], all_candidates[1])
+
+    _rapidfuzz_queries: list[tuple[str, str, int]] | None = None
+    _rapidfuzz_cand_sorted: str | None = None
+    _rapidfuzz_cand_tokens: int | None = None
+    if all_norm_texts:
+        _cand_norm = all_norm_texts[0]
+        _rapidfuzz_cand_sorted = " ".join(sorted(_cand_norm.split()))
+        _rapidfuzz_cand_tokens = _cand_norm.count(" ") + 1
+        _rapidfuzz_queries = [
+            (qn, " ".join(sorted(qn.split())), qn.count(" ") + 1) for _, qn, _, _ in all_queries
+        ]
+
     if not all_queries:
         return {}
 
@@ -2801,8 +2846,8 @@ def _profile_components(
     for run_idx in range(total_runs):
         is_warmup = run_idx < warmup
         timer.enabled = not is_warmup
-        for query_raw, query_norm, lang, lit_text in all_queries:
-            if is_warmup:
+        if is_warmup:
+            for query_raw, query_norm, lang, lit_text in all_queries:
                 _ = normalize_text(query_raw)
                 _ = normalize_text_no_diacritics(query_raw, lang)
                 _ = char_ngrams_normalized(query_norm)
@@ -2817,79 +2862,132 @@ def _profile_components(
                 if lit_text:
                     _ = _exact_intent_score(lit_text, q_tokens)
                 _ = lexical_score(0.5, 0.5, 0.5, 0.5)
-                continue
-
-            t0 = time.perf_counter()
-            _ = normalize_text(query_raw)
-            component_results["normalize_text"]["elapsed"].append(time.perf_counter() - t0)
-
-            t0 = time.perf_counter()
-            _ = normalize_text_no_diacritics(query_raw, lang)
-            component_results["normalize_text_no_diacritics"]["elapsed"].append(
-                time.perf_counter() - t0
-            )
-
-            t0 = time.perf_counter()
-            _ = char_ngrams_normalized(query_norm)
-            component_results["char_ngrams_normalized"]["elapsed"].append(time.perf_counter() - t0)
-
-            if bm25_idx is not None:
-                t0 = time.perf_counter()
-                _ = bm25_idx.score(query_norm)
-                component_results["bm25_score"]["elapsed"].append(time.perf_counter() - t0)
-
-            q_grams = char_ngrams_normalized(query_norm)
-            if char_idx is not None:
-                t0 = time.perf_counter()
-                _ = char_idx.score(q_grams)
-                component_results["char_ngram_score"]["elapsed"].append(time.perf_counter() - t0)
-
-            if all_norm_texts:
-                t0 = time.perf_counter()
-                _ = rapidfuzz_similarity_normalized(query_norm, all_norm_texts[0])
-                component_results["rapidfuzz_similarity"]["elapsed"].append(
-                    time.perf_counter() - t0
-                )
-
-            q_tokens = frozenset(query_norm.split())
-            if lit_text:
-                t0 = time.perf_counter()
-                _ = _exact_intent_score(lit_text, q_tokens)
-                component_results["exact_intent_score"]["elapsed"].append(time.perf_counter() - t0)
-
-            if lit_text:
-                from custom_components.assist_canonicalizer.ranking import literal_token_variants
-
-                variants = literal_token_variants(lit_text)
-                all_lit_tokens = frozenset().union(*variants) if variants else frozenset()
-                pos_lookup = _build_positional_lookup(all_lit_tokens, q_tokens)
-
-                t0 = time.perf_counter()
-                _ = _positional_intent_score_from_lookup(lit_text, q_tokens, pos_lookup, None)
-                component_results["positional_intent_score"]["elapsed"].append(
-                    time.perf_counter() - t0
-                )
-
-            t0 = time.perf_counter()
-            _ = lexical_score(0.5, 0.5, 0.5, 0.5)
-            component_results["lexical_score"]["elapsed"].append(time.perf_counter() - t0)
-
             if all_candidates and len(all_candidates) >= 2:
+                assert _disambig_pair is not None
                 fake_scores_a = _ScoreBreakdown(0.8, 0.8, 0.8, 0.9, 0.85)
                 fake_scores_b = _ScoreBreakdown(0.8, 0.8, 0.8, 0.95, 0.84)
                 fake_ranked = [
-                    _RankedCandidate(candidate=all_candidates[0], scores=fake_scores_a),
-                    _RankedCandidate(candidate=all_candidates[1], scores=fake_scores_b),
+                    _RankedCandidate(candidate=_disambig_pair[0], scores=fake_scores_a),
+                    _RankedCandidate(candidate=_disambig_pair[1], scores=fake_scores_b),
                 ]
-                from custom_components.assist_canonicalizer.ranking import (
-                    _apply_intent_disambiguation,
-                )
-
-                t0 = time.perf_counter()
                 _apply_intent_disambiguation(fake_ranked)
-                component_results["intent_disambiguation"]["elapsed"].append(
-                    time.perf_counter() - t0
+            continue
+
+        # 1. normalize_text
+        t0 = time.perf_counter()
+        for query_raw, _, _, _ in all_queries:
+            _ = normalize_text(query_raw)
+        component_results["normalize_text"]["elapsed"].append(
+            (time.perf_counter() - t0) / len(all_queries)
+        )
+
+        # 2. normalize_text_no_diacritics
+        t0 = time.perf_counter()
+        for query_raw, _, lang, _ in all_queries:
+            _ = normalize_text_no_diacritics(query_raw, lang)
+        component_results["normalize_text_no_diacritics"]["elapsed"].append(
+            (time.perf_counter() - t0) / len(all_queries)
+        )
+
+        # 3. char_ngrams_normalized
+        t0 = time.perf_counter()
+        for _, query_norm, _, _ in all_queries:
+            _ = char_ngrams_normalized(query_norm)
+        component_results["char_ngrams_normalized"]["elapsed"].append(
+            (time.perf_counter() - t0) / len(all_queries)
+        )
+
+        # 4. bm25_score
+        if bm25_idx is not None:
+            t0 = time.perf_counter()
+            for _, query_norm, _, _ in all_queries:
+                _ = bm25_idx.score(query_norm)
+            component_results["bm25_score"]["elapsed"].append(
+                (time.perf_counter() - t0) / len(all_queries)
+            )
+
+        # 5. char_ngram_score
+        if char_idx is not None:
+            q_grams_list = [char_ngrams_normalized(qn) for _, qn, _, _ in all_queries]
+            t0 = time.perf_counter()
+            for qg in q_grams_list:
+                _ = char_idx.score(qg)
+            component_results["char_ngram_score"]["elapsed"].append(
+                (time.perf_counter() - t0) / len(all_queries)
+            )
+
+        # 6. rapidfuzz_similarity
+        if all_norm_texts:
+            assert _rapidfuzz_queries is not None
+            t0 = time.perf_counter()
+            for qn, qs, qt_cnt in _rapidfuzz_queries:
+                _ = rapidfuzz_similarity_normalized(
+                    qn,
+                    all_norm_texts[0],
+                    query_token_count=qt_cnt,
+                    query_sorted=qs,
+                    candidate_sorted=_rapidfuzz_cand_sorted,
+                    candidate_token_count=_rapidfuzz_cand_tokens,
                 )
+            component_results["rapidfuzz_similarity"]["elapsed"].append(
+                (time.perf_counter() - t0) / len(all_queries)
+            )
+
+        # 7. exact_intent_score
+        lit_queries = [(qn, lt) for _, qn, _, lt in all_queries if lt]
+        if lit_queries:
+            lit_queries_variants = [
+                (literal_token_variants(lt), frozenset(qn.split())) for qn, lt in lit_queries
+            ]
+            t0 = time.perf_counter()
+            for variants, qt in lit_queries_variants:
+                _ = _exact_intent_score(variants, qt)
+            component_results["exact_intent_score"]["elapsed"].append(
+                (time.perf_counter() - t0) / len(lit_queries_variants)
+            )
+
+        # 8. positional_intent_score
+        if lit_queries:
+            pos_lookups = []
+            for qn, lt in lit_queries:
+                qt = frozenset(qn.split())
+                variants = literal_token_variants(lt)
+                all_lit = frozenset().union(*variants) if variants else frozenset()
+                lookup = _build_positional_lookup(all_lit, qt)
+                pos_lookups.append((lt, qt, lookup))
+            t0 = time.perf_counter()
+            for lt, qt, lookup in pos_lookups:
+                _ = _positional_intent_score_from_lookup(lt, qt, lookup, None)
+            component_results["positional_intent_score"]["elapsed"].append(
+                (time.perf_counter() - t0) / len(lit_queries)
+            )
+
+        # 9. lexical_score
+        t0 = time.perf_counter()
+        for _ in range(len(all_queries)):
+            _ = lexical_score(0.5, 0.5, 0.5, 0.5)
+        component_results["lexical_score"]["elapsed"].append(
+            (time.perf_counter() - t0) / len(all_queries)
+        )
+
+        # 10. intent_disambiguation
+        if all_candidates and len(all_candidates) >= 2:
+            assert _disambig_pair is not None
+            fake_scores_a = _ScoreBreakdown(0.8, 0.8, 0.8, 0.9, 0.85)
+            fake_scores_b = _ScoreBreakdown(0.8, 0.8, 0.8, 0.95, 0.84)
+            fake_ranked_runs = [
+                [
+                    _RankedCandidate(candidate=_disambig_pair[0], scores=fake_scores_a),
+                    _RankedCandidate(candidate=_disambig_pair[1], scores=fake_scores_b),
+                ]
+                for _ in range(len(all_queries))
+            ]
+            t0 = time.perf_counter()
+            for run_list in fake_ranked_runs:
+                _apply_intent_disambiguation(run_list)
+            component_results["intent_disambiguation"]["elapsed"].append(
+                (time.perf_counter() - t0) / len(all_queries)
+            )
 
     result: dict[str, Any] = {}
     for comp_name in SCORING_COMPONENT_NAMES:

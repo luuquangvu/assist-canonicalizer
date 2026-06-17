@@ -41,7 +41,14 @@ def normalize_text_no_diacritics(text: str, language: str | None = None) -> str:
     4. Accent/diacritic stripping (via Unicode NFD decomposition followed by
        removing combining diacritics/accents).
     """
-    normalized = normalize_text(text)
+    return normalize_text_no_diacritics_from_normalized(normalize_text(text), language)
+
+
+@lru_cache(maxsize=65536)
+def normalize_text_no_diacritics_from_normalized(
+    normalized: str, language: str | None = None
+) -> str:
+    """Strip diacritics/accents from already-normalized text."""
     if not normalized:
         return ""
 
@@ -67,6 +74,7 @@ def tokenize_text(text: str) -> tuple[str, ...]:
     return tuple(normalized.split())
 
 
+@lru_cache(maxsize=65536)
 def tokenize_normalized(text: str) -> tuple[str, ...]:
     """Return whitespace tokens from already-normalized text."""
     if not text:
@@ -74,6 +82,7 @@ def tokenize_normalized(text: str) -> tuple[str, ...]:
     return tuple(text.split())
 
 
+@lru_cache(maxsize=65536)
 def char_ngrams_normalized(text: str, size: int = 3) -> frozenset[str]:
     """Return character n-grams from already-normalized text."""
     if size < 1:
@@ -86,7 +95,7 @@ def char_ngrams_normalized(text: str, size: int = 3) -> frozenset[str]:
     return frozenset(compact[index : index + size] for index in range(len(compact) - size + 1))
 
 
-@lru_cache(maxsize=8192)
+@lru_cache(maxsize=2048)
 def literal_token_variants(literal_text: str) -> tuple[frozenset[str], ...]:
     """Return normalized literal token variants for intent action scoring."""
     variants = []
@@ -97,3 +106,9 @@ def literal_token_variants(literal_text: str) -> tuple[frozenset[str], ...]:
         if literal_tokens:
             variants.append(literal_tokens)
     return tuple(variants)
+
+
+@lru_cache(maxsize=2048)
+def literal_tokens_list(literal_text: str) -> tuple[str, ...]:
+    """Return all normalized tokens inside a literal text template."""
+    return tuple(normalize_text(literal_text).split())
