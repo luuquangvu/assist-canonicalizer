@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import lru_cache
@@ -20,13 +20,13 @@ class BM25Document:
     tokens: tuple[str, ...]
 
 
-@lru_cache(maxsize=8192)
+@lru_cache(maxsize=65536)
 def _analyze_tokens(tokens: tuple[str, ...]) -> tuple[Counter[str], int]:
     """Compute term frequencies and length for a tokenized document."""
     return Counter(tokens), len(tokens)
 
 
-@lru_cache(maxsize=8192)
+@lru_cache(maxsize=65536)
 def _analyze_document(text: str) -> tuple[tuple[str, ...], Counter[str], int]:
     """Tokenize and compute term frequencies and length for a document text."""
     tokens = tokenize_normalized(text)
@@ -126,7 +126,7 @@ class BM25Index:
 
     def _build_postings(self) -> dict[str, tuple[tuple[int, float], ...]]:
         """Build posting lists with precomputed per-document score contributions."""
-        postings: dict[str, list[tuple[int, float]]] = {}
+        postings = defaultdict(list)
         for document_index, term_frequencies in enumerate(self._term_frequencies):
             len_factor = self._document_len_factors[document_index]
             idf_k1p1 = self._idf_k1_plus_1
@@ -136,7 +136,7 @@ class BM25Index:
                     continue
                 denominator = frequency + len_factor
                 precomputed = (idf_mult * frequency) / denominator
-                postings.setdefault(token, []).append((document_index, precomputed))
+                postings[token].append((document_index, precomputed))
         return {token: tuple(values) for token, values in postings.items()}
 
     def _score_documents(self, query_tokens: tuple[str, ...]) -> list[float]:
