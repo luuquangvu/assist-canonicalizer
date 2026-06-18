@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-from importlib import import_module
 from typing import Any
 
 import voluptuous as vol
@@ -49,8 +48,8 @@ def validate_supported_language(value: Any) -> str:
     if not lang.strip():
         raise vol.Invalid("Language cannot be empty")
     try:
-        intents_module = import_module("home_assistant_intents")
-        language_module = import_module("homeassistant.util.language")
+        import home_assistant_intents as intents_module
+        from homeassistant.util import language as language_module
     except ImportError:
         return lang
 

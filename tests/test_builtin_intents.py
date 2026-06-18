@@ -113,10 +113,7 @@ def test_load_built_in_intents_type_error() -> None:
 
     mock_module.get_intents = mock_get_intents
 
-    with patch(
-        "custom_components.assist_canonicalizer.builtin_intents.import_module",
-        return_value=mock_module,
-    ):
+    with patch.dict(sys.modules, {"home_assistant_intents": mock_module}):
         assert _load_built_in_intents("vi") == {"built_in_key": "built_in_val"}
 
 

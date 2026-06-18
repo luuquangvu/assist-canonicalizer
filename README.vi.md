@@ -283,7 +283,7 @@ Bạn có thể kiểm tra lý do dự phòng của câu lệnh gần nhất b�
 
 **Bộ chuẩn hóa luôn chuyển sang dự phòng và không bao giờ so khớp thành công.**
 
-1. Hãy sử dụng hành động **Diagnostics** để kiểm tra `last_fallback_reason`. Nếu lý do là `empty_index`, có nghĩa là chỉ mục chưa được tạo. Chỉ mục sẽ tự động được xây dựng ở câu lệnh đầu tiên, hoặc bạn có thể kích hoạt thủ công qua hành động **Rebuild Index**.
+1. Hãy sử dụng hành động **Diagnostics** để kiểm tra `last_fallback_reason`. Nếu lý do là `empty_index`, có nghĩa là chỉ mục chưa được tạo. Chỉ mục sẽ được chủ động làm nóng (warmup) ngay khi khởi động/tải lại cho tất cả ngôn ngữ được cấu hình trong Assist pipeline. Nếu `empty_index` vẫn xuất hiện, quá trình warmup có thể đã bị bỏ qua (không có pipeline nào được cấu hình, không có ngôn ngữ mặc định), hoặc quá trình xây dựng trong nền chưa hoàn tất. Bạn có thể kích hoạt thủ công qua hành động **Rebuild Index**.
 2. Nếu lý do là `low_confidence`, ngưỡng `min_confidence` bạn đặt có thể quá cao. Hãy thử hạ thấp cấu hình này xuống. Bạn nên dùng công cụ **Test Match** để xem điểm số thực tế của các câu lệnh mẫu.
 3. Nếu lý do là `validation_failed`, câu lệnh đã được so khớp thành công nhưng bị tác nhân mặc định của Home Assistant (Hassil) từ chối khi thực thi. Hãy chạy hành động **Dump Candidates** để kiểm tra xem cấu trúc câu lệnh chuẩn hóa của bạn đã chính xác và khớp với các định nghĩa intent chưa.
 
@@ -296,7 +296,9 @@ Bạn có thể kiểm tra lý do dự phòng của câu lệnh gần nhất b�
 
 **Bộ tích hợp xử lý chậm ở câu lệnh đầu tiên.**
 
-Lượt yêu cầu đầu tiên của mỗi ngôn ngữ sẽ kích hoạt quá trình quét và dựng chỉ mục mẫu câu. Các lượt tiếp theo sẽ truy vấn trực tiếp trên RAM nên tốc độ xử lý sẽ cực kỳ nhanh. Khi khởi động lại Home Assistant, danh sách ứng cử viên sẽ được tải lại từ bộ lưu trữ trên đĩa để dựng lại chỉ mục, quá trình này nhanh hơn nhiều so với quét lại từ đầu nhưng cũng cần một vài giây để hoàn tất.
+Chỉ mục cho các ngôn ngữ đã cấu hình trong Assist pipeline được xây dựng chủ động trong nền ngay khi khởi động và sau khi tải lại. Trong điều kiện bình thường, câu lệnh đầu tiên cho một ngôn ngữ sẽ truy cập vào bộ nhớ đệm đã sẵn sàng và không gặp độ trễ khởi tạo.
+
+Nếu vẫn có độ trễ, chỉ mục có thể chưa hoàn tất quá trình xây dựng (kiểm tra `pending_rebuild_languages` trong kết quả **Diagnostics**). Các ngôn ngữ nằm ngoài cấu hình pipeline của bạn sẽ được xây dựng lười (lazy) ở lần sử dụng đầu tiên. Các lượt truy vấn tiếp theo sẽ sử dụng chỉ mục trong RAM nên tốc độ xử lý sẽ cực kỳ nhanh.
 
 **Tôi mới cập nhật thực thể/khu vực/tầng nhưng bộ chuẩn hóa chưa nhận diện.**
 

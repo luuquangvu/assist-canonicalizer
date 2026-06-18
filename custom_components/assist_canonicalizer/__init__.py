@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, cast
 
 from homeassistant.const import Platform
@@ -13,6 +14,7 @@ from .const import (
 from .registry import async_registry_slot_values
 from .runtime import CanonicalizerRuntime
 from .services import async_setup_services, async_unload_services
+from .utils import normalize_language
 
 agent_manager: Any = cast(Any, None)
 try:
@@ -62,10 +64,22 @@ try:
 except (ImportError, RuntimeError):
     floor_registry = cast(Any, None)
 
+async_get_pipelines: Any = cast(Any, None)
+try:
+    from homeassistant.components.assist_pipeline import (
+        async_get_pipelines as _async_get_pipelines,
+    )
+
+    async_get_pipelines = _async_get_pipelines
+except (ImportError, RuntimeError):
+    async_get_pipelines = cast(Any, None)
+
 type AssistCanonicalizerConfigEntry = Any
 type HomeAssistantInstance = Any
 
 PLATFORMS = [Platform.CONVERSATION]
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _runtime_from_entry(
@@ -103,6 +117,9 @@ async def async_setup_entry(
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     async_setup_services(hass)
+
+    hass.async_create_task(_async_warmup_pipeline_languages(hass, runtime))
+
     return True
 
 
@@ -170,3 +187,59 @@ def _subscribe_registry_updates(hass: HomeAssistantInstance, runtime: Canonicali
     runtime.add_cleanup_callback(
         exposed_entities.async_listen_entity_updates(hass, "conversation", refresh_from_event)
     )
+
+
+def _discover_pipeline_languages(hass: HomeAssistantInstance) -> set[str]:
+    """Return unique language codes from all configured Assist pipelines."""
+    languages: set[str] = set()
+    if async_get_pipelines is None:
+        return languages
+
+    try:
+        pipelines = async_get_pipelines(hass)
+    except Exception:
+        return languages
+
+    for pipeline in pipelines:
+        lang = getattr(pipeline, "language", None)
+        if isinstance(lang, str) and lang.strip():
+            languages.add(normalize_language(lang))
+
+    return languages
+
+
+async def _warmup_single_language(
+    hass: HomeAssistantInstance,
+    runtime: CanonicalizerRuntime,
+    language: str,
+) -> None:
+    """Try to load an index from store, falling back to a rebuild. Never raises."""
+    try:
+        index = runtime.get_index(language)
+        if index is not None:
+            return
+        index = await runtime.async_load_index_from_store(hass, language)
+        if index is None:
+            await runtime.async_rebuild_index(hass, language)
+    except Exception:
+        _LOGGER.debug(
+            "Failed to warm up canonicalizer index for language %s",
+            language,
+            exc_info=True,
+        )
+
+
+async def _async_warmup_pipeline_languages(
+    hass: HomeAssistantInstance,
+    runtime: CanonicalizerRuntime,
+) -> None:
+    """Discover configured pipeline languages and warm every index in the background."""
+    languages = _discover_pipeline_languages(hass)
+    if not languages:
+        try:
+            languages = {normalize_language(str(hass.config.language))}
+        except Exception:
+            return
+
+    for language in languages:
+        hass.async_create_task(_warmup_single_language(hass, runtime, language))

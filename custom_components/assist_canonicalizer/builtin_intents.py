@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from importlib import import_module
 from pathlib import Path
 from typing import Any
 
@@ -37,8 +36,8 @@ def language_variant_for(language: str) -> str | None:
     if not language.strip():
         return None
     try:
-        intents_module = import_module("home_assistant_intents")
-        language_module = import_module("homeassistant.util.language")
+        import home_assistant_intents as intents_module
+        from homeassistant.util import language as language_module
     except ImportError:
         return language
 
@@ -50,7 +49,7 @@ def language_variant_for(language: str) -> str | None:
 def _load_built_in_intents(language_variant: str) -> Mapping[str, Any]:
     """Load built-in Home Assistant intents for a language variant."""
     try:
-        intents_module = import_module("home_assistant_intents")
+        import home_assistant_intents as intents_module
     except ImportError:
         return {}
 
@@ -71,7 +70,7 @@ def _load_custom_sentences(
         return {}
 
     try:
-        yaml_module = import_module("yaml")
+        import yaml as yaml_module
     except ImportError:
         return {}
 
