@@ -283,7 +283,7 @@ You can inspect the fallback reason for the last query using the **Diagnostics**
 
 **The canonicalizer always falls back and never matches.**
 
-1. Run the **Diagnostics** action and check `last_fallback_reason`. If it's `empty_index`, the index hasn't been built yet; it builds automatically on the first query, but you can force a rebuild with the **Rebuild Index** action.
+1. Run the **Diagnostics** action and check `last_fallback_reason`. If it's `empty_index`, the index hasn't been built yet. Indexes are proactively warmed up at startup/reload for all configured Assist pipeline languages. If `empty_index` still appears, the warmup may have been skipped (no pipelines configured, no default language available), or the background build hasn't completed yet. You can force a rebuild with the **Rebuild Index** action.
 2. If the reason is `low_confidence`, your `min_confidence` threshold may be too high. Try lowering it in the integration options. Use **Test Match** with sample sentences to see actual scores.
 3. If the reason is `validation_failed`, the canonical sentence was matched but the built-in HA agent rejected it. Use **Dump Candidates** to inspect whether the correct candidates exist for your language.
 
@@ -296,7 +296,9 @@ You can inspect the fallback reason for the last query using the **Diagnostics**
 
 **The integration appears slow on the first query.**
 
-The first query for a language triggers index building. Subsequent queries use the cached in-memory index and are much faster. After a restart, candidate lists are reloaded from storage and indexes are rebuilt, which is faster than a full rebuild from intent sources but not instant.
+Indexes for configured Assist pipeline languages are built proactively in the background at startup and after reloads. Under normal conditions, the first query for a language should hit an already-warm cache and experience no cold-start delay.
+
+If a delay does occur, the index may not have finished building yet (check `pending_rebuild_languages` in the **Diagnostics** output). Languages outside your pipeline configuration are built lazily on first use. Subsequent queries use the cached in-memory index and are much faster.
 
 **I changed my entities/areas/floors but the canonicalizer doesn't reflect them.**
 

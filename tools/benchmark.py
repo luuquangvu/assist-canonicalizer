@@ -176,10 +176,6 @@ def _bootstrap_project_imports() -> None:
     _BOOTSTRAPPED = True
 
 
-# ---------------------------------------------------------------------------
-# Shared Core Helpers
-# ---------------------------------------------------------------------------
-
 REGISTRY_SLOTS: dict[str, dict[str, tuple[str, ...]]] = {
     "en": {
         "name": (
@@ -477,11 +473,6 @@ def _slots_match(actual: Mapping[str, Any], expected: Mapping[str, Any]) -> bool
         if not _values_equal(actual_value, expected_value):
             return False
     return True
-
-
-# ---------------------------------------------------------------------------
-# Mode: Accuracy metrics evaluation
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -1643,10 +1634,6 @@ async def run_evaluation(
     print("\nEvaluation Complete.")
     return overall_success
 
-
-# ---------------------------------------------------------------------------
-# Mode: Performance Profiling
-# ---------------------------------------------------------------------------
 
 DEFAULT_ITERATIONS = 10
 DEFAULT_WARMUP = 3
@@ -3396,11 +3383,6 @@ def _save_cprofile_metric(
     out_path.write_text(s.getvalue(), encoding="utf-8")
     print(f"cProfile {label} summary saved to {out_path}")
     return s
-
-
-# ---------------------------------------------------------------------------
-# CLI Main Entry Point
-# ---------------------------------------------------------------------------
 
 
 def main() -> None:
