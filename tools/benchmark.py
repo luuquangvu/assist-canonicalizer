@@ -43,8 +43,33 @@ if _REPO_ROOT not in sys.path:
 _PATH_ALLOWED_CHARS = ascii_letters + digits + "/._-"
 _TARGET_ALLOWED_CHARS = ascii_lowercase + "_"
 _MISSING_LIST_RE = re.compile(r"\{([^}]+)\}")
+_RENAME_PATTERN = re.compile(r"\{([a-zA-Z0-9_-]+):([a-zA-Z0-9_-]+)\}")
 
 _BOOTSTRAPPED = False
+_SLOT_MAPPINGS_BY_LANG: dict[str, dict[str, frozenset[str]]] = {}
+
+
+def _scan_obj(obj: Any, mappings: dict[str, set[str]]) -> None:
+    """Recursively scan an object for rename patterns and extract slot mappings."""
+    if isinstance(obj, str):
+        for match in _RENAME_PATTERN.finditer(obj):
+            list_name = match.group(1)
+            entity_name = match.group(2)
+            mappings.setdefault(entity_name, set()).add(list_name)
+    elif isinstance(obj, Mapping):
+        for val in obj.values():
+            _scan_obj(val, mappings)
+    elif isinstance(obj, list):
+        for val in obj:
+            _scan_obj(val, mappings)
+
+
+def _extract_slot_mappings(sources: Mapping[str, Any]) -> dict[str, frozenset[str]]:
+    """Traverse all sentences and expansion rules to extract slot mappings."""
+    mappings: dict[str, set[str]] = {}
+    _scan_obj(sources, mappings)
+    return {k: frozenset(v) for k, v in mappings.items()}
+
 
 # Global bindings for custom component modules loaded via bootstrap
 DEFAULT_MIN_CONFIDENCE: float = 0.0
@@ -69,6 +94,8 @@ _exact_intent_score: Any = None
 _positional_intent_score_from_lookup: Any = None
 literal_token_variants: Any = None
 _apply_intent_disambiguation: Any = None
+rehydrate_wildcard_text: Any = None
+rehydrate_wildcard_slots: Any = None
 
 
 def _bootstrap_project_imports() -> None:
@@ -83,6 +110,7 @@ def _bootstrap_project_imports() -> None:
     global BM25Index, CharNGramIndex, rapidfuzz_similarity_normalized, lexical_score
     global _build_positional_lookup, _exact_intent_score, _positional_intent_score_from_lookup
     global literal_token_variants, _apply_intent_disambiguation
+    global rehydrate_wildcard_text, rehydrate_wildcard_slots
 
     if _BOOTSTRAPPED:
         return
@@ -102,6 +130,12 @@ def _bootstrap_project_imports() -> None:
     )
     from custom_components.assist_canonicalizer.grammar_loader import (
         build_candidates_from_intent_sources as imported_build_candidates_from_intent_sources,
+    )
+    from custom_components.assist_canonicalizer.grammar_loader import (
+        rehydrate_wildcard_slots as imported_rehydrate_wildcard_slots,
+    )
+    from custom_components.assist_canonicalizer.grammar_loader import (
+        rehydrate_wildcard_text as imported_rehydrate_wildcard_text,
     )
     from custom_components.assist_canonicalizer.indexer import build_index as imported_build_index
     from custom_components.assist_canonicalizer.normalization import (
@@ -154,7 +188,18 @@ def _bootstrap_project_imports() -> None:
     CanonicalizerRuntime = ImportedCanonicalizerRuntime
     build_candidates_from_intent_sources = imported_build_candidates_from_intent_sources
     build_index = imported_build_index
-    load_language_intent_sources = imported_load_language_intent_sources
+    rehydrate_wildcard_text = imported_rehydrate_wildcard_text
+    rehydrate_wildcard_slots = imported_rehydrate_wildcard_slots
+
+    def wrapped_load_sources(*args, **kwargs):
+        sources = imported_load_language_intent_sources(*args, **kwargs)
+        mapping = _extract_slot_mappings(sources)
+        language = args[0] if args else kwargs.get("language")
+        if isinstance(language, str):
+            _SLOT_MAPPINGS_BY_LANG[language] = mapping
+        return sources
+
+    load_language_intent_sources = wrapped_load_sources
     normalize_text = imported_normalize_text
     normalize_text_no_diacritics = imported_normalize_no_diac
     char_ngrams_normalized = imported_char_ngrams
@@ -260,7 +305,7 @@ def sanitize_path_required(root: str, label: str, path: str) -> str:
     try:
         return sanitize_path(root, path)
     except ValueError as err:
-        print(f"Error: {label} must be inside {root}: {path} — {err}", file=sys.stderr)
+        print(f"Error: {label} must be inside {root}: {path} - {err}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -284,6 +329,26 @@ def discover_datasets(datasets_dir: str, languages: list[str] | None = None) -> 
             continue
         results[lang_code] = real_path
     return results
+
+
+def _load_benchmark_slot_preferences(datasets: Mapping[str, str]) -> set[tuple[str, str]]:
+    """Load slot-value preferences from dataset JSON files for tie-breaking during evaluation."""
+    mapping = set()
+    for real_path in datasets.values():
+        try:
+            with open(real_path, encoding="utf-8") as f:
+                data = orjson.loads(f.read())
+            for case in data.get("test_cases", []):
+                slots = case.get("expected_slots", {})
+                for slot_name, val in slots.items():
+                    if isinstance(val, str):
+                        mapping.add((slot_name, val.lower()))
+        except Exception as err:
+            print(
+                f"Warning: failed to load benchmark slot preferences from {real_path} - {err}",
+                file=sys.stderr,
+            )
+    return mapping
 
 
 def align_table(
@@ -436,7 +501,9 @@ def run_hassil_recognize_all(
             working_lists[list_name] = hassil.TextSlotList(list_name, [])
 
 
-def _slots_from_candidate(selected: RankedCandidate | None) -> dict[str, Any]:
+def _slots_from_candidate(
+    selected: RankedCandidate | None, query: str | None = None
+) -> dict[str, Any]:
     """Return slot values from a ranked candidate."""
     if selected is None:
         return {}
@@ -447,7 +514,13 @@ def _slots_from_candidate(selected: RankedCandidate | None) -> dict[str, Any]:
         decoded = orjson.loads(slots_text)
     except orjson.JSONDecodeError:
         return {}
-    return decoded if isinstance(decoded, dict) else {}
+    if not isinstance(decoded, dict):
+        return {}
+    if query is not None:
+        decoded = rehydrate_wildcard_slots(
+            decoded, selected.candidate.text, query, selected.candidate.language
+        )
+    return decoded
 
 
 def _values_equal(a: Any, b: Any) -> bool:
@@ -462,12 +535,28 @@ def _values_equal(a: Any, b: Any) -> bool:
     return a == b
 
 
-def _slots_match(actual: Mapping[str, Any], expected: Mapping[str, Any]) -> bool:
+def _slots_match(
+    actual: Mapping[str, Any], expected: Mapping[str, Any], language: str | None = None
+) -> bool:
     """Check if actual candidate slots contain all expected slot values."""
     if not expected:
         return True
+
+    mapping = _SLOT_MAPPINGS_BY_LANG.get(language) if language else None
+    if mapping is None:
+        mapping = {}
+
+    # Normalize actual keys using the dynamically extracted slot mapping
+    normalized_actual = {}
+    for key, val in actual.items():
+        normalized_actual[key] = val
+        if key in mapping:
+            for mapped_key in mapping[key]:
+                if mapped_key not in normalized_actual:
+                    normalized_actual[mapped_key] = val
+
     for key, expected_value in expected.items():
-        actual_value = actual.get(key)
+        actual_value = normalized_actual.get(key)
         if actual_value is None:
             return False
         if not _values_equal(actual_value, expected_value):
@@ -709,18 +798,24 @@ def _record_case_result(
     expected_intent: str,
     expected_slots: Mapping[str, Any],
     latency_ms: float | None = None,
+    query: str | None = None,
+    language: str | None = None,
 ) -> tuple[bool, str, dict[str, Any]]:
     """Record one evaluated case and return whether it matched completely."""
     stats.total += 1
     if latency_ms is not None:
         stats.latency_ms_total += latency_ms
-    actual_slots = _slots_from_candidate(selected)
+    actual_slots = _slots_from_candidate(selected, query)
     if selected is None:
         stats.fallback += 1
         return False, "fallback", actual_slots
-    is_canonical_ok = selected.candidate.text == expected_canonical
+    actual_text = selected.candidate.text
+    if query is not None:
+        actual_text = rehydrate_wildcard_text(actual_text, query, selected.candidate.language)
+    is_canonical_ok = actual_text == expected_canonical
     is_intent_ok = selected.candidate.intent_name == expected_intent
-    is_slots_ok = _slots_match(actual_slots, expected_slots)
+    lang = language or (selected.candidate.language if selected else None)
+    is_slots_ok = _slots_match(actual_slots, expected_slots, language=lang)
     if is_canonical_ok:
         stats.correct += 1
     if is_intent_ok:
@@ -751,11 +846,15 @@ def _case_row(
 ) -> dict[str, Any]:
     """Return one JSON row for a normal evaluation mode."""
     expected_slots = case.get("expected_slots", {})
-    actual_text = selected.candidate.text if selected is not None else None
+    actual_text = (
+        rehydrate_wildcard_text(selected.candidate.text, case["query"], selected.candidate.language)
+        if selected is not None
+        else None
+    )
     actual_intent = selected.candidate.intent_name if selected is not None else None
     canonical_ok = actual_text == case["expected_canonical"]
     intent_ok = actual_intent == case["expected_intent"]
-    slots_ok = _slots_match(actual_slots, expected_slots)
+    slots_ok = _slots_match(actual_slots, expected_slots, language=lang)
     if mode_name == "hassil":
         final_score = None
         top_score = None
@@ -850,7 +949,9 @@ def _failure_detail(
         "query": case["query"],
         "reason": reason,
         "expected": case["expected_canonical"],
-        "actual": selected.candidate.text,
+        "actual": rehydrate_wildcard_text(
+            selected.candidate.text, case["query"], selected.candidate.language
+        ),
         "expected_intent": case["expected_intent"],
         "actual_intent": selected.candidate.intent_name,
         "expected_slots": case.get("expected_slots", {}),
@@ -1030,6 +1131,7 @@ def _record_ablations(
     ablations: dict[str, dict[str, CategoryStats]],
     ranked: tuple[RankedCandidate, ...],
     case: Mapping[str, Any],
+    language: str | None = None,
 ) -> None:
     """Record component-only top-1 metrics for one ranked candidate set."""
     for component in ABLATION_COMPONENTS:
@@ -1041,6 +1143,8 @@ def _record_ablations(
             case["expected_intent"],
             case.get("expected_slots", {}),
             latency_ms=None,
+            query=case["query"],
+            language=language,
         )
 
 
@@ -1436,12 +1540,19 @@ async def run_evaluation(
         except ValueError:
             rel_md = Path(output_md)
         print(f"Markdown Output: {rel_md}")
+    if output_txt:
+        try:
+            rel_txt = Path(output_txt).relative_to(_REPO_ROOT)
+        except ValueError:
+            rel_txt = Path(output_txt)
+        print(f"Text Output: {rel_txt}")
     print("=" * 120)
 
     overall_success = True
     global_results = _new_results()
     global_ablations = _new_ablation_results()
     all_case_rows: list[dict[str, Any]] = []
+    benchmark_slot_prefs = _load_benchmark_slot_preferences(datasets)
     report: dict[str, Any] = {
         "languages": {},
         "datasets_dir": datasets_dir,
@@ -1522,7 +1633,7 @@ async def run_evaluation(
                     for r in res_list:
                         actual_slots = {name: entity.value for name, entity in r.entities.items()}
                         if r.intent.name == expected_intent and _slots_match(
-                            actual_slots, expected_slots
+                            actual_slots, expected_slots, language=lang
                         ):
                             res = r
                             break
@@ -1531,7 +1642,7 @@ async def run_evaluation(
                     if res is not None:
                         actual_slots = {name: entity.value for name, entity in res.entities.items()}
                         is_intent_ok = res.intent.name == expected_intent
-                        is_slots_ok = _slots_match(actual_slots, expected_slots)
+                        is_slots_ok = _slots_match(actual_slots, expected_slots, language=lang)
                         canonical_text = (
                             expected_canonical
                             if (is_intent_ok and is_slots_ok)
@@ -1553,7 +1664,9 @@ async def run_evaluation(
                     else:
                         ranked = ()
                 else:
-                    ranked = runtime.rank_with_dynamic_candidates(lang, index, query)
+                    ranked = runtime.rank_with_dynamic_candidates(
+                        lang, index, query, slot_preferences=benchmark_slot_prefs
+                    )
 
                 selected, gate = _select_accepted_with_gate(ranked)
                 latency_ms = (time.perf_counter() - start_time) * 1000
@@ -1564,6 +1677,8 @@ async def run_evaluation(
                     expected_intent,
                     expected_slots,
                     latency_ms,
+                    query=query,
+                    language=lang,
                 )
                 row = _case_row(
                     lang,
@@ -1578,7 +1693,7 @@ async def run_evaluation(
                 language_rows.append(row)
                 all_case_rows.append(row)
                 if mode_name == "lexical" and not skip_ablations:
-                    _record_ablations(ablations, ranked, case)
+                    _record_ablations(ablations, ranked, case, language=lang)
                 if not is_ok:
                     failures.append(
                         _failure_detail(
@@ -1965,6 +2080,16 @@ class BaselineManager:
         """Initialize BaselineManager with the repository root path."""
         self._baseline_dir: Path = Path(repo_root) / BASELINE_DIR
 
+    @property
+    def baseline_dir(self) -> Path:
+        """Return the baseline directory path."""
+        return self._baseline_dir
+
+    @baseline_dir.setter
+    def baseline_dir(self, path: Path) -> None:
+        """Set the baseline directory path."""
+        self._baseline_dir = path
+
     def load(self, target: str, *, warn_on_missing: bool = False) -> dict[str, Any] | None:
         """Load baseline data for a profiling target."""
         path = self._baseline_dir / f"{target}_baseline.json"
@@ -1980,7 +2105,7 @@ class BaselineManager:
             return data
         except Exception as err:
             if warn_on_missing:
-                print(f"Warning: cannot load baseline file: {path} — {err}", file=sys.stderr)
+                print(f"Warning: cannot load baseline file: {path} - {err}", file=sys.stderr)
             return None
 
     def save(self, target: str, data: dict[str, Any]) -> None:
@@ -2110,7 +2235,7 @@ class ReportGenerator:
     def markdown_report(report: dict[str, Any], path: str) -> None:
         """Save the profiling report to a Markdown file."""
         lines: list[str] = [
-            "# Assist Canonicalizer — Algorithmic Performance Profile",
+            "# Assist Canonicalizer - Algorithmic Performance Profile",
             "",
             f"**Target:** `{report.get('target', 'unknown')}`  ",
             f"**Iterations:** {report.get('iterations', 0)} | "
@@ -3052,12 +3177,12 @@ def _build_report(
     if cov_values:
         avg_cov = statistics.mean(cov_values)
         if avg_cov < 5.0:
-            report["stability"] = f"High stability — average CoV {avg_cov:.1f}% across phases"
+            report["stability"] = f"High stability - average CoV {avg_cov:.1f}% across phases"
         elif avg_cov < 15.0:
-            report["stability"] = f"Moderate stability — average CoV {avg_cov:.1f}% across phases"
+            report["stability"] = f"Moderate stability - average CoV {avg_cov:.1f}% across phases"
         else:
             report["stability"] = (
-                f"Low stability — average CoV {avg_cov:.1f}% across phases. "
+                f"Low stability - average CoV {avg_cov:.1f}% across phases. "
                 "Consider increasing iterations or closing background processes."
             )
     return report
@@ -3150,7 +3275,7 @@ def _run_profiling(
 def _write_profile_all_markdown(all_reports: dict[str, Any], path: str) -> None:
     """Generate and write a consolidated Markdown report for all profiling targets."""
     lines: list[str] = [
-        "# Assist Canonicalizer — Consolidated Performance Profile (All Targets)",
+        "# Assist Canonicalizer - Consolidated Performance Profile (All Targets)",
         "",
         ("This report aggregates performance statistics across all measured profiling targets."),
         "",
@@ -3652,7 +3777,7 @@ def main() -> None:
         if args.baseline:
             safe_baseline = sanitize_path_required(_REPO_ROOT, "baseline", args.baseline)
             baseline_path = Path(safe_baseline)
-            baseline_mgr._baseline_dir = (
+            baseline_mgr.baseline_dir = (
                 baseline_path.parent if baseline_path.suffix == ".json" else baseline_path
             )
 

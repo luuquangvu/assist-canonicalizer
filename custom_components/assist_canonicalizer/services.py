@@ -30,6 +30,7 @@ from .const import (
     SERVICE_REBUILD_INDEX,
     SERVICE_TEST_MATCH,
 )
+from .grammar_loader import rehydrate_wildcard_text
 from .indexer import CanonicalIndex
 from .normalization import normalize_text
 from .ranking import RankedCandidate, accepted_candidate
@@ -181,8 +182,10 @@ async def _handle_test_match(hass: Any, call: ServiceCall) -> dict[str, Any]:
         "index_cached": True,
         "dynamic_candidate_count": runtime.diagnostics.dynamic_candidate_count,
         ATTR_ACCEPTED: selected is not None,
-        ATTR_SELECTED_CANDIDATE: _ranked_candidate_response(selected) if selected else None,
-        ATTR_TOP_CANDIDATES: [_ranked_candidate_response(item) for item in ranked],
+        ATTR_SELECTED_CANDIDATE: (
+            _ranked_candidate_response(selected, query=text) if selected else None
+        ),
+        ATTR_TOP_CANDIDATES: [_ranked_candidate_response(item, query=text) for item in ranked],
     }
 
 
@@ -338,20 +341,26 @@ def _ranked_candidate_candidate_response(candidate: Any) -> dict[str, Any]:
     }
 
 
-def _ranked_candidate_response(ranked: RankedCandidate) -> dict[str, Any]:
+def _ranked_candidate_response(ranked: RankedCandidate, query: str | None = None) -> dict[str, Any]:
     """Return a serializable ranked candidate response."""
     candidate = ranked.candidate
+    text = candidate.text
+    normalized_text = candidate.normalized_text
+    if query is not None:
+        text = rehydrate_wildcard_text(text, query, candidate.language)
+        normalized_text = normalize_text(text)
     return {
-        ATTR_TEXT: candidate.text,
+        ATTR_TEXT: text,
         ATTR_INTENT_NAME: candidate.intent_name,
         ATTR_SOURCE: candidate.source.value,
-        ATTR_NORMALIZED_TEXT: candidate.normalized_text,
+        ATTR_NORMALIZED_TEXT: normalized_text,
         "score": ranked.scores.final_score,
         "scores": {
             "rapidfuzz": ranked.scores.rapidfuzz_score,
             "char_ngram": ranked.scores.char_ngram_score,
             "bm25": ranked.scores.bm25_score,
             "intent": ranked.scores.intent_score,
+            "penalty": ranked.scores.penalty,
             "final": ranked.scores.final_score,
         },
     }

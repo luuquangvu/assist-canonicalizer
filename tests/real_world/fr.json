@@ -293,23 +293,23 @@
       "expected_slots": {}
     },
     {
-      "query": "ajoute du shopping_list_item à la liste de courses",
+      "query": "ajoute du lait à la liste de courses",
       "language": "fr",
       "expected_intent": "HassShoppingListAddItem",
-      "expected_canonical": "ajoute du shopping_list_item à la liste de courses",
+      "expected_canonical": "ajoute du lait à la liste de courses",
       "category": "intent_coverage",
       "expected_slots": {
-        "shopping_list_item": "shopping_list_item"
+        "shopping_list_item": "lait"
       }
     },
     {
-      "query": "annonce message",
+      "query": "annonce le dîner est prêt",
       "language": "fr",
       "expected_intent": "HassBroadcast",
-      "expected_canonical": "annonce message",
+      "expected_canonical": "annonce le dîner est prêt",
       "category": "intent_coverage",
       "expected_slots": {
-        "message": "message"
+        "message": "le dîner est prêt"
       }
     },
     {
@@ -417,15 +417,15 @@
       }
     },
     {
-      "query": "mets shopping_list_item au liste de courses",
+      "query": "mets lait au liste de courses",
       "language": "fr",
       "expected_intent": "HassListAddItem",
-      "expected_canonical": "mets shopping_list_item au liste de courses",
+      "expected_canonical": "mets lait au liste de courses",
       "category": "intent_coverage",
       "expected_slots": {
         "name:todo": "liste de courses",
         "name": "liste de courses",
-        "shopping_list_item": "shopping_list_item"
+        "shopping_list_item": "lait"
       }
     },
     {

@@ -21,6 +21,8 @@ from custom_components.assist_canonicalizer.const import (
 from custom_components.assist_canonicalizer.grammar_loader import (
     build_candidates_from_intent_sources,
     build_query_registry_candidates,
+    rehydrate_wildcard_text,
+    wildcard_slot_names,
 )
 from custom_components.assist_canonicalizer.ranking import (
     RankedCandidate,
@@ -91,8 +93,15 @@ class DatasetContext:
     cases: tuple[dict[str, Any], ...]
     sources: dict[str, Mapping[str, Any]]
     slots: dict[str, tuple[str, ...]]
-    static_candidate_pairs: frozenset[tuple[str, str]]
+    static_non_wildcard_pairs: frozenset[tuple[str, str]]
+    static_wildcard_pairs: frozenset[tuple[str, str]]
     static_normalized_texts: frozenset[str]
+
+    @property
+    def static_candidate_pairs(self) -> frozenset[tuple[str, str]]:
+        """Return union of wildcard and non-wildcard static candidate pairs."""
+        return self.static_non_wildcard_pairs | self.static_wildcard_pairs
+
     intents: hassil.intents.Intents
     slot_lists: dict[str, hassil.intents.SlotList]
 
@@ -111,13 +120,21 @@ def dataset_context(request: pytest.FixtureRequest) -> DatasetContext:
     merged_intents: dict[str, Any] = {}
     for source in sources.values():
         hassil.merge_dict(merged_intents, source)
+    wc_slots = wildcard_slot_names(language)
     return DatasetContext(
         language=language,
         cases=cases,
         sources=sources,
         slots=slots,
-        static_candidate_pairs=frozenset(
-            (candidate.intent_name, candidate.text) for candidate in candidates
+        static_non_wildcard_pairs=frozenset(
+            (candidate.intent_name, candidate.text)
+            for candidate in candidates
+            if not any(wc in candidate.text for wc in wc_slots)
+        ),
+        static_wildcard_pairs=frozenset(
+            (candidate.intent_name, candidate.text)
+            for candidate in candidates
+            if any(wc in candidate.text for wc in wc_slots)
         ),
         static_normalized_texts=frozenset(candidate.normalized_text for candidate in candidates),
         intents=hassil.intents.Intents.from_dict(merged_intents),
@@ -143,7 +160,7 @@ def test_real_world_expected_canonicals_are_hassil_candidates(
     dataset_context: DatasetContext,
 ) -> None:
     """Assert expected canonical commands come from generated HassIL candidates."""
-    dynamic_cache: dict[str, frozenset[tuple[str, str]]] = {}
+    dynamic_cache: dict[tuple[str, str], frozenset[tuple[str, str]]] = {}
     missing = []
     for case in dataset_context.cases:
         if not _has_expected_candidate(dataset_context, case, dynamic_cache):
@@ -195,7 +212,7 @@ def test_real_world_registry_has_domain_scoped_slots(
 
     When an intent with ``requires_context: {domain: X}`` lacks domain-scoped
     registry keys (e.g. ``name:vacuum``), the grammar loader silently produces
-    0 candidates — a behaviour drift between the benchmark dataset and a real
+    0 candidates, a behaviour drift between the benchmark dataset and a real
     Home Assistant deployment.
 
     Rather than reverse-engineering which domain-scoped keys are needed, this
@@ -242,7 +259,7 @@ def test_real_world_expected_intents_align_with_hassil(
 
     Cases where the canonicalizer does not generate the HassIL-chosen
     intent (e.g.  HassListAddItem vs HassShoppingListAddItem with
-    different slot names) are not errors — they reflect genuine
+    different slot names) are not errors, they reflect genuine
     differences in the intent matching space.
     """
     dynamic_cache: dict[str, set[tuple[str, str]]] = {}
@@ -293,7 +310,7 @@ def _slot_value_matches(expected: Any, hassil_value: Any, query: str) -> bool:
 
     When the HassIL value is a computed domain-level sentinel not
     appearing literally in *query* (e.g. ``all``, ``tất cả``,
-    ``alle``), the slot is accepted — the canonicalizer extracts
+    ``alle``), the slot is accepted, the canonicalizer extracts
     the literal text while HassIL resolves to a domain operation.
     """
     if isinstance(expected, str) and isinstance(hassil_value, str):
@@ -313,7 +330,7 @@ def test_real_world_expected_slots_align_with_hassil(
 
     For exact_match and intent_coverage, when HassIL recognizes the
     expected intent, every key in *expected_slots* that also appears
-    in HassIL entities is compared — a mismatch means the dataset
+    in HassIL entities is compared, a mismatch means the dataset
     label is wrong and must be corrected to match HassIL ground truth.
 
     HassIL entity values not present literally in the query text are
@@ -321,7 +338,7 @@ def test_real_world_expected_slots_align_with_hassil(
     ``name=all`` for ``"tắt quạt"``), since the canonicalizer extracts
     literal slot text while HassIL resolves domain operations.
 
-    Keys present only in one system are skipped — naming conventions
+    Keys present only in one system are skipped, naming conventions
     differ by design (e.g. ``shopping_list_item`` vs ``item``,
     ``timer_seconds`` vs ``minutes``).
     """
@@ -375,16 +392,28 @@ def test_real_world_expected_slots_align_with_hassil(
 def _has_expected_candidate(
     context: DatasetContext,
     case: Mapping[str, Any],
-    dynamic_cache: dict[str, frozenset[tuple[str, str]]],
+    dynamic_cache: dict[tuple[str, str], frozenset[tuple[str, str]]],
 ) -> bool:
     """Return whether a case expected command exists in static or dynamic candidates."""
     pair = (case["expected_intent"], case["expected_canonical"])
-    if pair in context.static_candidate_pairs:
+    if pair in context.static_non_wildcard_pairs:
         return True
+
+    expected_intent, expected_canonical = pair
+    for intent, text in context.static_wildcard_pairs:
+        if (
+            intent == expected_intent
+            and rehydrate_wildcard_text(text, case["query"], context.language) == expected_canonical
+        ):
+            return True
     canonical = case["expected_canonical"]
-    if canonical not in dynamic_cache:
-        dynamic_cache[canonical] = frozenset(
-            (candidate.intent_name, candidate.text)
+    cache_key = (canonical, case["query"])
+    if cache_key not in dynamic_cache:
+        dynamic_cache[cache_key] = frozenset(
+            (
+                candidate.intent_name,
+                rehydrate_wildcard_text(candidate.text, case["query"], context.language),
+            )
             for candidate in build_query_registry_candidates(
                 context.language,
                 context.sources,
@@ -392,7 +421,7 @@ def _has_expected_candidate(
                 canonical,
             )
         )
-    return pair in dynamic_cache[canonical]
+    return pair in dynamic_cache[cache_key]
 
 
 def _recognizes_expected(context: DatasetContext, case: Mapping[str, Any]) -> bool:

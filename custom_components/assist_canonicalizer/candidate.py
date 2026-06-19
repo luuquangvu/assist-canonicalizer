@@ -13,6 +13,7 @@ from .normalization import (
     normalize_text_no_diacritics_from_normalized,
     tokenize_normalized,
 )
+from .utils import wildcard_slot_names_sorted
 
 
 class CandidateSource(StrEnum):
@@ -56,6 +57,10 @@ class Candidate:
     _total_unique_literal_tokens: int | None = field(
         default=None, init=False, repr=False, compare=False
     )
+    _has_wildcard: bool | None = field(default=None, init=False, repr=False, compare=False)
+    _wildcard_info: tuple[int, str] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         """Validate and normalize candidate data."""
@@ -66,6 +71,30 @@ class Candidate:
         if not self.normalized_text:
             object.__setattr__(self, "normalized_text", normalize_text(self.text))
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
+
+    def __hash__(self) -> int:
+        """Return the hash code for Candidate."""
+        return hash(
+            (
+                self.text,
+                self.intent_name,
+                self.source,
+                self.language,
+                frozenset(self.metadata.items()),
+            )
+        )
+
+    def __eq__(self, other: object) -> bool:
+        """Return whether two candidates are equal."""
+        if not isinstance(other, Candidate):
+            return NotImplemented
+        return (
+            self.text == other.text
+            and self.intent_name == other.intent_name
+            and self.source == other.source
+            and self.language == other.language
+            and self.metadata == other.metadata
+        )
 
     @property
     def normalized_text_no_diacritics(self) -> str:
@@ -128,11 +157,49 @@ class Candidate:
         """Return lower priority values for more trusted candidate sources."""
         return _SOURCE_PRIORITY[self.source]
 
+    @property
+    def wildcard_info(self) -> tuple[int, str] | None:
+        """Return the (index, wildcard_name) of the first wildcard token if any."""
+        if self._has_wildcard is None:
+            wildcards = wildcard_slot_names_sorted(self.language)
+            info = None
+            if wildcards:
+                text = self.text
+                if any(wc in text for wc in wildcards):
+                    sentence_template = self.metadata.get("sentence_template")
+                    wildcard_slots_meta = self.metadata.get("wildcard_slots")
+                    if sentence_template is not None:
+                        wildcard_slots = (
+                            frozenset(wildcard_slots_meta.split(","))
+                            if wildcard_slots_meta
+                            else frozenset()
+                        )
+                        active_wildcards = [wc for wc in wildcards if wc in wildcard_slots]
+                    else:
+                        active_wildcards = list(wildcards)
+
+                    if active_wildcards:
+                        for idx, token in enumerate(self.normalized_tokens):
+                            for wc in active_wildcards:
+                                if wc in token:
+                                    info = (idx, wc)
+                                    break
+                            if info is not None:
+                                break
+            object.__setattr__(self, "_wildcard_info", info)
+            object.__setattr__(self, "_has_wildcard", info is not None)
+        return self._wildcard_info
+
+    @property
+    def has_wildcard(self) -> bool:
+        """Return whether the candidate text contains any wildcard placeholders."""
+        return self.wildcard_info is not None
+
 
 def deduplicate_candidates(candidates: list[Candidate]) -> tuple[Candidate, ...]:
     """Deduplicate by (normalized text, intent name) preserving best source priority.
 
-    Candidates with identical text but different intents are kept — the downstream
+    Candidates with identical text but different intents are kept, the downstream
     HassIL validation loop resolves the intent based on real home context
     (requires_context / excludes_context).
     """

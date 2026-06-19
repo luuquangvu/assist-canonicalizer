@@ -566,13 +566,13 @@
       }
     },
     {
-      "query": "đặt shopping_list_item vào danh sách mua sắm",
+      "query": "đặt sữa vào danh sách mua sắm",
       "language": "vi",
       "expected_intent": "HassShoppingListAddItem",
-      "expected_canonical": "đặt shopping_list_item vào danh sách mua sắm",
+      "expected_canonical": "đặt sữa vào danh sách mua sắm",
       "category": "intent_coverage",
       "expected_slots": {
-        "shopping_list_item": "shopping_list_item"
+        "shopping_list_item": "sữa"
       }
     },
     {
@@ -628,23 +628,23 @@
       }
     },
     {
-      "query": "đặt shopping_list_item vào",
+      "query": "đặt sữa vào",
       "language": "vi",
       "expected_intent": "HassShoppingListAddItem",
-      "expected_canonical": "đặt shopping_list_item vào",
+      "expected_canonical": "đặt sữa vào",
       "category": "intent_coverage",
       "expected_slots": {
-        "shopping_list_item": "shopping_list_item"
+        "shopping_list_item": "sữa"
       }
     },
     {
-      "query": "đặt shopping_list_item vào danh sách việc cần làm",
+      "query": "đặt sữa vào danh sách việc cần làm",
       "language": "vi",
       "expected_intent": "HassListAddItem",
-      "expected_canonical": "đặt shopping_list_item vào danh sách việc cần làm",
+      "expected_canonical": "đặt sữa vào danh sách việc cần làm",
       "category": "intent_coverage",
       "expected_slots": {
-        "shopping_list_item": "shopping_list_item",
+        "shopping_list_item": "sữa",
         "name": "danh sách việc cần làm"
       }
     },

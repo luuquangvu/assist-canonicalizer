@@ -571,3 +571,192 @@ def test_apply_intent_disambiguation_keeps_order_for_same_intent() -> None:
     # Because the intents are identical, the original ordering should be preserved
     assert ranked[0] is first
     assert ranked[1] is second
+
+
+def test_rank_candidates_rehydrates_wildcard() -> None:
+    """Test that rank_candidates correctly rehydrates wildcard placeholder candidates."""
+    # We create a candidate with a wildcard slot
+    candidate = Candidate(
+        text="broadcast message",
+        intent_name="HassBroadcast",
+        language="en",
+        metadata={"literal_text": "broadcast message"},
+    )
+    assert candidate.has_wildcard
+
+    # We query with a real value
+    query = "broadcast dinner is ready"
+
+    # Call rank_candidates. This will trigger wildcard rehydration.
+    ranked = rank_candidates(
+        query=query,
+        candidates=[candidate],
+        max_candidates=1,
+        language="en",
+    )
+
+    # Verify candidate was ranked and has a high score due to rehydration
+    assert len(ranked) == 1
+    assert ranked[0].candidate == candidate
+    assert ranked[0].scores.final_score > 0.0
+    assert ranked[0].scores.penalty > 0.0
+    assert ranked[0].scores.rapidfuzz_score >= 0.99
+
+
+def test_rank_candidates_wildcard_bypasses_prefilter() -> None:
+    """Test that wildcard candidates bypass the pre-filter and are evaluated."""
+    # We create multiple candidates to exceed the pre-filter limit.
+    # If we set rapidfuzz_prefilter_candidates=1 and max_candidates=1, then prefilter_limit is 2.
+    # We have 3 candidates, so the lowest-scoring one in the pre-filter would be discarded.
+    wildcard_cand = Candidate(
+        text="broadcast message",
+        intent_name="HassBroadcast",
+        language="en",
+        metadata={"literal_text": "broadcast message"},
+    )
+    cand_1 = Candidate(
+        text="turn on light",
+        intent_name="HassTurnOn",
+        language="en",
+        metadata={"literal_text": "turn on"},
+    )
+    cand_2 = Candidate(
+        text="turn off light",
+        intent_name="HassTurnOff",
+        language="en",
+        metadata={"literal_text": "turn off"},
+    )
+
+    # First, verify that if wildcard prefilter structures are empty,
+    # wildcard_cand is discarded because it has a lower prefilter score.
+    ranked_disabled = rank_candidates(
+        query="turn on broadcast dinner is ready",
+        candidates=[cand_1, cand_2, wildcard_cand],
+        max_candidates=1,
+        rapidfuzz_prefilter_candidates=1,
+        language="en",
+        wildcard_always_passes=frozenset(),
+        wildcard_variants_with_len={},
+    )
+    assert len(ranked_disabled) == 1
+    assert ranked_disabled[0].candidate != wildcard_cand
+
+    # Now, test with default parameters (wildcard lookups enabled),
+    # verifying that wildcard_cand bypasses the pre-filter and ranks first.
+    ranked = rank_candidates(
+        query="turn on broadcast dinner is ready",
+        candidates=[cand_1, cand_2, wildcard_cand],
+        max_candidates=1,
+        rapidfuzz_prefilter_candidates=1,
+        language="en",
+    )
+    assert len(ranked) == 1
+    assert ranked[0].candidate == wildcard_cand
+
+
+def test_rank_candidates_applies_slot_preferences_tiebreaker() -> None:
+    """Verify that slot_preferences tie-breaks wildcard candidate ranking."""
+    cand_shopping = Candidate(
+        text="add shopping_list_item",
+        intent_name="HassShoppingListAddItem",
+        language="en",
+        metadata={"literal_text": "add"},
+    )
+    cand_todo = Candidate(
+        text="add todo_list_item",
+        intent_name="HassListAddItem",
+        language="en",
+        metadata={"literal_text": "add"},
+    )
+
+    assert cand_shopping.has_wildcard
+    assert cand_todo.has_wildcard
+
+    query = "add milk"
+
+    ranked_no_prefs = rank_candidates(
+        query=query,
+        candidates=[cand_todo, cand_shopping],
+        max_candidates=2,
+        language="en",
+    )
+    assert len(ranked_no_prefs) == 2
+    assert ranked_no_prefs[0].candidate == cand_todo
+
+    ranked_with_prefs = rank_candidates(
+        query=query,
+        candidates=[cand_todo, cand_shopping],
+        max_candidates=2,
+        language="en",
+        slot_preferences={("shopping_list_item", "milk")},
+    )
+    assert len(ranked_with_prefs) == 2
+    assert ranked_with_prefs[0].candidate == cand_shopping
+
+
+def test_wildcard_lookups_coverage() -> None:
+    """Exercise all wildcard index precomputation and ranking branches for coverage."""
+    cand_always_pass = Candidate(
+        text="message",
+        intent_name="HassBroadcast",
+        language="en",
+        metadata={"literal_text": ""},
+    )
+    cand_var_len_0 = Candidate(
+        text="broadcast message",
+        intent_name="HassBroadcastVar0",
+        language="en",
+        metadata={"literal_text": "|broadcast"},
+    )
+    cand_normal = Candidate(
+        text="broadcast message",
+        intent_name="HassBroadcastNormal",
+        language="en",
+        metadata={"literal_text": "broadcast"},
+    )
+
+    # 1. Exercise indexer post-init (with wildcard indices)
+    index = build_index("en", [cand_always_pass, cand_var_len_0, cand_normal])
+    assert index.candidate_count == 3
+
+    # 2. Exercise ranking with precomputed index wildcard structures
+    ranked = index.rank("broadcast dinner")
+    assert len(ranked) >= 1
+
+    # 3. Exercise fallback ranking when wildcard_indices is None
+    ranked_fallback = rank_candidates(
+        query="broadcast dinner",
+        candidates=[cand_always_pass, cand_var_len_0, cand_normal],
+        max_candidates=1,
+        rapidfuzz_prefilter_candidates=1,
+        language="en",
+    )
+    assert len(ranked_fallback) == 1
+
+
+def test_vietnamese_shopping_list_rehydration_selection() -> None:
+    """Verify that wildcard length penalty correctly ranks specific template over generic ones."""
+    cand_specific = Candidate(
+        text="đặt shopping_list_item vào danh sách mua sắm",
+        intent_name="HassShoppingListAddItem",
+        language="vi",
+        metadata={"literal_text": "đặt|vào danh sách mua sắm"},
+    )
+    cand_generic = Candidate(
+        text="đặt shopping_list_item cho",
+        intent_name="HassShoppingListAddItem",
+        language="vi",
+        metadata={"literal_text": "đặt|cho"},
+    )
+
+    ranked = rank_candidates(
+        query="cho món bánh chuối vào danh sách mua sắm cho anh nhé",
+        candidates=[cand_generic, cand_specific],
+        max_candidates=2,
+        language="vi",
+    )
+
+    assert len(ranked) == 2
+    # Specific template should be ranked first because cand_generic's wildcard
+    # is too long and gets penalized
+    assert ranked[0].candidate == cand_specific

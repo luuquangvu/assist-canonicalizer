@@ -12,7 +12,7 @@ _PUNCTUATION_RE = re.compile(r"[^\w\s]", re.UNICODE)
 _WHITESPACE_RE = re.compile(r"\s+")
 
 # Precomputed BMP translation table that deletes all Unicode combining marks.
-# Built once at import — covers all diacritics used by DE, EN, FR, NL, VI and
+# Built once at import; covers all diacritics used by DE, EN, FR, NL, VI and
 # avoids per-character Python overhead in normalize_text_no_diacritics.
 _COMBINING_TABLE: dict[int, None] = {
     cp: None for cp in range(0x10000) if unicodedata.combining(chr(cp))
@@ -51,6 +51,9 @@ def normalize_text_no_diacritics_from_normalized(
     """Strip diacritics/accents from already-normalized text."""
     if not normalized:
         return ""
+
+    if normalized.isascii():
+        return normalized
 
     if language:
         lang_code = language.split("-")[0].lower()

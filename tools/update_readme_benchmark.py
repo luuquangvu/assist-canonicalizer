@@ -187,7 +187,7 @@ def _generate_overall_section(report: dict[str, Any], is_vi: bool) -> str:
     hass_err = hass_mis + hass_fall
     lex_err = lex_mis + lex_fall
 
-    # Common data rows — cell values identical for both languages
+    # Common data rows, cell values identical for both languages
     data_rows: list[tuple[str, ...]] = [
         ("`hassil`", f"{hass_acc:.1f}%", f"{hass_mis:.1f}%", f"{hass_fall:.1f}%"),
         ("`lexical`", f"**{lex_acc:.1f}%**", f"**{lex_mis:.1f}%**", f"**{lex_fall:.1f}%**"),

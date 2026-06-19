@@ -245,3 +245,45 @@ class BM25Index:
         if max_score <= 0:
             return tuple(0.0 for _ in raw_scores)
         return tuple(score / max_score for score in raw_scores)
+
+    def raw_scores(self, query_tokens: tuple[str, ...]) -> list[float]:
+        """Return raw unnormalized BM25 scores for all indexed documents."""
+        return self._score_documents(query_tokens)
+
+    def raw_score_tokens(
+        self,
+        doc_tokens: tuple[str, ...],
+        query_tokens: tuple[str, ...],
+    ) -> float:
+        """Compute raw unnormalized BM25 score of custom doc_tokens against query_tokens."""
+        if not query_tokens or not doc_tokens:
+            return 0.0
+        avg_len = self._average_length
+        if avg_len == 0:
+            return 0.0
+
+        k1 = self._k1
+        b = self._b
+        k1_plus_1 = k1 + 1
+        one_minus_b = 1.0 - b
+        b_over_avg = b / avg_len
+
+        counter = Counter(doc_tokens)
+        length = len(doc_tokens)
+        len_factor = k1 * (one_minus_b + b_over_avg * length)
+
+        document_count = len(self._documents)
+        default_idf = log(1 + (document_count - 0 + 0.5) / (0 + 0.5)) if document_count else 0.0
+
+        raw_score = 0.0
+        seen_tokens: set[str] = set()
+        for token in query_tokens:
+            if token in seen_tokens:
+                continue
+            seen_tokens.add(token)
+            frequency = counter.get(token, 0)
+            if frequency > 0:
+                idf = self._inverse_document_frequencies.get(token, default_idf)
+                raw_score += (idf * k1_plus_1 * frequency) / (frequency + len_factor)
+
+        return raw_score

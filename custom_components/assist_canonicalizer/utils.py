@@ -42,3 +42,47 @@ def normalize_language(language: str) -> str:
     if language_variant is not None:
         return language_variant
     return requested.replace("_", "-").lower()
+
+
+@lru_cache(maxsize=128)
+def wildcard_slot_names(language: str | None = None) -> frozenset[str]:
+    r"""Return all known wildcard slot names for the given language from home_assistant_intents.
+
+    Wildcard slots (``"wildcard": true`` in HassIL lists) capture free-form
+    user text, they have no predefined values.  Candidate templates expand
+    these slots using the literal list name (e.g. ``"shopping_list_item"``),
+    and the placeholder must be rehydrated from the original query before
+    delegation.
+
+    The result is computed once and cached.
+    """
+    names: set[str] = set()
+    try:
+        import home_assistant_intents as intents_module
+    except ImportError:
+        return frozenset()
+    try:
+        languages = [language] if language else intents_module.get_languages()
+        for lang in languages:
+            try:
+                data = intents_module.get_intents(lang)
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+            lists = data.get("lists", {})
+            if not isinstance(lists, dict):
+                continue
+            for name, config in lists.items():
+                if isinstance(config, dict) and config.get("wildcard"):
+                    names.add(name)
+    except Exception:
+        pass
+    return frozenset(names)
+
+
+@lru_cache(maxsize=128)
+def wildcard_slot_names_sorted(language: str | None = None) -> tuple[str, ...]:
+    """Return all known wildcard slot names sorted by length descending (cached)."""
+    names = wildcard_slot_names(language)
+    return tuple(sorted(names, key=len, reverse=True))

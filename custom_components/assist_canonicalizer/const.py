@@ -1,6 +1,7 @@
 """Constants for Assist Canonicalizer."""
 
 from enum import StrEnum
+from math import ceil
 
 DOMAIN = "assist_canonicalizer"
 NAME = "Assist Canonicalizer"
@@ -65,6 +66,23 @@ TIEBREAKER_INTENT_MARGIN = 0.05
 # Non-entity penalty blend: fraction of the intent score that can be reduced
 # when a candidate fails to cover non-entity query tokens (politeness/filler).
 NON_ENTITY_PENALTY_BLEND = 0.05
+
+# Minimum fraction of literal variant tokens that must match query tokens
+# to evaluate a wildcard candidate.
+WILDCARD_LITERAL_COVERAGE_THRESHOLD = 0.75
+
+# Minimum character-level similarity required to align a template prefix/suffix
+# token with a query token during wildcard rehydration.
+WILDCARD_STEM_ALIGNMENT_THRESHOLD = 0.60
+
+# Maximum acceptable length ratio between tokens to proceed with similarity computation.
+# Derived from WILDCARD_STEM_ALIGNMENT_THRESHOLD: if max_len / min_len <= ratio,
+# then fuzz.ratio >= threshold must hold. We use ceil to provide a safety margin
+# against floating-point rounding errors.
+MAX_TOKEN_LENGTH_RATIO = ceil(((2.0 / WILDCARD_STEM_ALIGNMENT_THRESHOLD) - 1.0) * 10000) / 10000
+
+# Penalty factor per word in rehydrated wildcard to favor templates with more literal tokens
+WILDCARD_LENGTH_PENALTY_FACTOR = 0.015
 
 
 class FallbackReason(StrEnum):

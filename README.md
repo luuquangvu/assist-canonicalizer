@@ -145,10 +145,10 @@ The ranking engine was benchmarked against the default Home Assistant Hassil int
 
 | Mode      | Intent/Slot | Mismatch | Fallback |
 | :-------- | ----------: | -------: | -------: |
-| `hassil`  |       31.0% |     8.3% |    60.7% |
+| `hassil`  |       34.0% |     5.3% |    60.7% |
 | `lexical` |   **83.7%** | **8.9%** | **7.4%** |
 
-> Intent/slot accuracy jumped from **31.0% to 83.7%**. The combined error rate (mismatch + fallback) dropped from **69.0% to 16.3%**.
+> Intent/slot accuracy jumped from **34.0% to 83.7%**. The combined error rate (mismatch + fallback) dropped from **66.0% to 16.3%**.
 
 <!-- BENCHMARK_OVERALL_END -->
 
@@ -158,15 +158,15 @@ The ranking engine was benchmarked against the default Home Assistant Hassil int
 
 | Language | Mode      | Intent/Slot |  Mismatch |  Fallback |
 | :------- | :-------- | ----------: | --------: | --------: |
-| EN       | `hassil`  |       30.6% |     13.5% |     55.9% |
+| EN       | `hassil`  |       37.8% |      6.3% |     55.9% |
 | EN       | `lexical` |   **88.3%** |  **6.3%** |  **5.4%** |
-| DE       | `hassil`  |       33.3% |     11.5% |     55.2% |
+| DE       | `hassil`  |       36.8% |      8.0% |     55.2% |
 | DE       | `lexical` |   **89.7%** |  **3.4%** |  **6.9%** |
-| FR       | `hassil`  |       35.3% |      7.1% |     57.6% |
+| FR       | `hassil`  |       36.5% |      5.9% |     57.6% |
 | FR       | `lexical` |   **85.9%** |  **5.9%** |  **8.2%** |
 | NL       | `hassil`  |       34.3% |      4.8% |     61.0% |
 | NL       | `lexical` |   **74.3%** | **15.2%** | **10.5%** |
-| VI       | `hassil`  |       20.5% |      3.6% |     75.9% |
+| VI       | `hassil`  |       22.9% |      1.2% |     75.9% |
 | VI       | `lexical` |   **80.7%** | **13.3%** |  **6.0%** |
 
 <!-- BENCHMARK_LANGS_END -->
@@ -289,7 +289,7 @@ You can inspect the fallback reason for the last query using the **Diagnostics**
 
 **My custom sentences aren't being recognized.**
 
-1. Verify your custom sentences are configured correctly — they can be in `config/custom_sentences/<lang>/` YAML files, `configuration.yaml` intent scripts, or sentence automations created via the UI. Ensure they use the correct language code.
+1. Verify your custom sentences are configured correctly: they can be in `config/custom_sentences/<lang>/` YAML files, `configuration.yaml` intent scripts, or sentence automations created via the UI. Ensure they use the correct language code.
 2. Run **Dump Candidates** with `rebuild: true` for your language. Check the `source` counts: if `custom_sentence` is zero, your files may not be loading.
 3. Ensure your YAML files follow the [Home Assistant sentence syntax](https://www.home-assistant.io/voice_control/custom_sentences/).
 4. Force a rebuild with **Rebuild Index** after making changes to your sentence files.
