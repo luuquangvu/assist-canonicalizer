@@ -303,13 +303,13 @@
       "expected_slots": {}
     },
     {
-      "query": "füge shopping_list_item zur einkaufsliste hinzu",
+      "query": "füge Milch zur einkaufsliste hinzu",
       "language": "de",
       "expected_intent": "HassShoppingListAddItem",
-      "expected_canonical": "füge shopping_list_item zur EinkaufsListe hinzu",
+      "expected_canonical": "füge Milch zur EinkaufsListe hinzu",
       "category": "intent_coverage",
       "expected_slots": {
-        "shopping_list_item": "shopping_list_item"
+        "shopping_list_item": "Milch"
       }
     },
     {
@@ -324,13 +324,13 @@
       }
     },
     {
-      "query": "verkünde message",
+      "query": "verkünde Abendessen ist fertig",
       "language": "de",
       "expected_intent": "HassBroadcast",
-      "expected_canonical": "verkünde message",
+      "expected_canonical": "verkünde Abendessen ist fertig",
       "category": "intent_coverage",
       "expected_slots": {
-        "message": "message"
+        "message": "Abendessen ist fertig"
       }
     },
     {
@@ -442,39 +442,39 @@
       }
     },
     {
-      "query": "todo_list_item in einkaufsliste",
+      "query": "Lebensmittel in einkaufsliste",
       "language": "de",
       "expected_intent": "HassListAddItem",
-      "expected_canonical": "todo_list_item in einkaufsliste",
+      "expected_canonical": "Lebensmittel in einkaufsliste",
       "category": "intent_coverage",
       "expected_slots": {
         "name:todo": "einkaufsliste",
         "name": "einkaufsliste",
-        "todo_list_item": "todo_list_item"
+        "todo_list_item": "Lebensmittel"
       }
     },
     {
-      "query": "todo_list_item aus einkaufsliste nehmen",
+      "query": "Lebensmittel aus einkaufsliste nehmen",
       "language": "de",
       "expected_intent": "HassListCompleteItem",
-      "expected_canonical": "todo_list_item aus einkaufsliste nehmen",
+      "expected_canonical": "Lebensmittel aus einkaufsliste nehmen",
       "category": "intent_coverage",
       "expected_slots": {
         "name:todo": "einkaufsliste",
         "name": "einkaufsliste",
-        "todo_list_item": "todo_list_item"
+        "todo_list_item": "Lebensmittel"
       }
     },
     {
-      "query": "lösch todo_list_item auf einkaufsliste",
+      "query": "lösch Lebensmittel auf einkaufsliste",
       "language": "de",
       "expected_intent": "HassListRemoveItem",
-      "expected_canonical": "lösch todo_list_item auf einkaufsliste",
+      "expected_canonical": "lösch Lebensmittel auf einkaufsliste",
       "category": "intent_coverage",
       "expected_slots": {
         "name:todo": "einkaufsliste",
         "name": "einkaufsliste",
-        "todo_list_item": "todo_list_item"
+        "todo_list_item": "Lebensmittel"
       }
     },
     {
@@ -524,13 +524,13 @@
       }
     },
     {
-      "query": "spiel den search_querypodcast",
+      "query": "spiel den Jazzpodcast",
       "language": "de",
       "expected_intent": "HassMediaSearchAndPlay",
-      "expected_canonical": "spiel den search_querypodcast",
+      "expected_canonical": "spiel den Jazzpodcast",
       "category": "intent_coverage",
       "expected_slots": {
-        "search_query": "search_query",
+        "search_query": "Jazz",
         "media_class_my_split": "podcast"
       }
     },
@@ -604,13 +604,13 @@
       "expected_slots": {}
     },
     {
-      "query": "lösch shopping_list_item auf Liste",
+      "query": "lösch Milch auf Liste",
       "language": "de",
       "expected_intent": "HassShoppingListCompleteItem",
-      "expected_canonical": "lösch shopping_list_item auf Liste",
+      "expected_canonical": "lösch Milch auf Liste",
       "category": "intent_coverage",
       "expected_slots": {
-        "shopping_list_item": "shopping_list_item"
+        "shopping_list_item": "Milch"
       }
     },
     {

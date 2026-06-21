@@ -24,6 +24,13 @@ from .normalization import (
     normalize_text_no_diacritics,
 )
 from .registry import AREA_SLOT_NAMES, ENTITY_SLOT_NAMES, merge_slot_values
+from .rehydration import (
+    rehydrate_wildcard_slots as rehydrate_wildcard_slots,
+)
+from .rehydration import (
+    rehydrate_wildcard_text as rehydrate_wildcard_text,
+)
+from .utils import wildcard_slot_names as wildcard_slot_names
 
 _TEMPLATE_MARKERS = frozenset("{}[]<>|()")
 _SLOT_PATTERN = re.compile(r"{([^{}]+)}")
@@ -209,6 +216,12 @@ def compile_dynamic_registry_intents(
                         frozenset(_cached_normalize_no_diac(token, language) for token in tokens)
                         for tokens in variants
                     )
+                    base_metadata = _candidate_metadata(source_key, sentence, expansion_rules)
+                    wildcards = wildcard_slot_names(language)
+                    sentence_wildcards = sentence_slots & wildcards
+                    if sentence_wildcards:
+                        base_metadata["wildcard_slots"] = ",".join(sorted(sentence_wildcards))
+
                     templates.append(
                         DynamicRegistryTemplate(
                             sentence=sentence,
@@ -218,7 +231,7 @@ def compile_dynamic_registry_intents(
                             expansion_rules=expansion_rules,
                             base_data_slot_values=base_data_slot_values,
                             required_slots=frozenset(_required_slots(sentence, expansion_rules)),
-                            metadata=_candidate_metadata(source_key, sentence, expansion_rules),
+                            metadata=base_metadata,
                             literal_token_variants=variants,
                             literal_token_variants_no_diac=no_diac_variants,
                         )
@@ -414,6 +427,10 @@ def _candidates_from_intent_config(
             if any(not slot_values.get(slot) for slot in required):
                 continue
             base_metadata = _candidate_metadata(source_key, sentence, expansion_rules)
+            wildcards = wildcard_slot_names(language)
+            sentence_wildcards = sentence_slots & wildcards
+            if sentence_wildcards:
+                base_metadata["wildcard_slots"] = ",".join(sorted(sentence_wildcards))
             presorted_values = _presort_slot_values(slot_values)
             for expanded_sentence in _candidate_texts(sentence, slot_values, expansion_rules):
                 candidates.append(

@@ -284,10 +284,12 @@ class CanonicalizerRuntime:
         index: CanonicalIndex,
         query: str,
         max_candidates: int = DEFAULT_MAX_CANDIDATES,
+        *,
+        slot_preferences: set[tuple[str, str]] | None = None,
     ) -> tuple[RankedCandidate, ...]:
         """Rank cached index candidates plus query-scoped registry expansions."""
         language = normalize_language(language)
-        ranked = index.rank(query, max_candidates=max_candidates)
+        ranked = index.rank(query, max_candidates=max_candidates, slot_preferences=slot_preferences)
         self.update_diagnostics(dynamic_candidate_count=0)
         dynamic_candidates = build_query_registry_candidates(
             language,
@@ -304,13 +306,15 @@ class CanonicalizerRuntime:
             query,
             dynamic_candidates,
             max_candidates=max_candidates,
-            reference_bm25_index=index._bm25_index,
+            reference_bm25_index=index.bm25_index,
             candidate_char_index=CharNGramIndex.from_grams(
                 tuple(
                     char_ngrams_normalized(candidate.normalized_text)
                     for candidate in dynamic_candidates
                 )
             ),
+            language=language,
+            slot_preferences=slot_preferences,
         )
         return _merge_ranked_candidates(ranked, dynamic_ranked, max_candidates)
 

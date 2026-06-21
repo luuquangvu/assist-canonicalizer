@@ -674,23 +674,23 @@
       }
     },
     {
-      "query": "broadcast message",
+      "query": "broadcast dinner's ready",
       "language": "en",
       "expected_intent": "HassBroadcast",
-      "expected_canonical": "broadcast message",
+      "expected_canonical": "broadcast dinner's ready",
       "category": "intent_coverage",
       "expected_slots": {
-        "message": "message"
+        "message": "dinner's ready"
       }
     },
     {
-      "query": "please announce message now",
+      "query": "please announce dinner's ready now",
       "language": "en",
       "expected_intent": "HassBroadcast",
-      "expected_canonical": "announce message",
+      "expected_canonical": "announce dinner's ready now",
       "category": "extra_words",
       "expected_slots": {
-        "message": "message"
+        "message": "dinner's ready now"
       }
     },
     {
@@ -776,57 +776,57 @@
       }
     },
     {
-      "query": "add todo_list_item to shopping list",
+      "query": "add groceries to shopping list",
       "language": "en",
       "expected_intent": "HassListAddItem",
-      "expected_canonical": "add todo_list_item to shopping list",
+      "expected_canonical": "add groceries to shopping list",
       "category": "intent_coverage",
       "expected_slots": {
         "name": "shopping list",
-        "todo_list_item": "todo_list_item"
+        "todo_list_item": "groceries"
       }
     },
     {
-      "query": "please add todo_list_item to my shopping list list",
+      "query": "please add groceries to my shopping list list",
       "language": "en",
       "expected_intent": "HassListAddItem",
-      "expected_canonical": "add todo_list_item to my shopping list",
+      "expected_canonical": "add groceries to my shopping list",
       "category": "extra_words",
       "expected_slots": {
         "name": "shopping list",
-        "todo_list_item": "todo_list_item"
+        "todo_list_item": "groceries"
       }
     },
     {
-      "query": "check off todo_list_item from shopping list",
+      "query": "check off groceries from shopping list",
       "language": "en",
       "expected_intent": "HassListCompleteItem",
-      "expected_canonical": "check off;todo_list_item from shopping list",
+      "expected_canonical": "check off;groceries from shopping list",
       "category": "intent_coverage",
       "expected_slots": {
         "name": "shopping list",
-        "todo_list_item": "todo_list_item"
+        "todo_list_item": "groceries"
       }
     },
     {
-      "query": "delete todo_list_item from shopping list",
+      "query": "delete groceries from shopping list",
       "language": "en",
       "expected_intent": "HassListRemoveItem",
-      "expected_canonical": "delete todo_list_item from shopping list",
+      "expected_canonical": "delete groceries from shopping list",
       "category": "intent_coverage",
       "expected_slots": {
         "name": "shopping list",
-        "todo_list_item": "todo_list_item"
+        "todo_list_item": "groceries"
       }
     },
     {
-      "query": "play artist search_query",
+      "query": "play artist jazz",
       "language": "en",
       "expected_intent": "HassMediaSearchAndPlay",
-      "expected_canonical": "play artist search_query",
+      "expected_canonical": "play artist jazz",
       "category": "intent_coverage",
       "expected_slots": {
-        "search_query": "search_query",
+        "search_query": "jazz",
         "media_class": "artist"
       }
     },
@@ -875,23 +875,23 @@
       }
     },
     {
-      "query": "add shopping_list_item to shopping list",
+      "query": "add milk to shopping list",
       "language": "en",
       "expected_intent": "HassShoppingListAddItem",
-      "expected_canonical": "add shopping_list_item to shopping list",
+      "expected_canonical": "add milk to shopping list",
       "category": "intent_coverage",
       "expected_slots": {
-        "shopping_list_item": "shopping_list_item"
+        "shopping_list_item": "milk"
       }
     },
     {
-      "query": "check off shopping_list_item from shopping list",
+      "query": "check off milk from shopping list",
       "language": "en",
       "expected_intent": "HassShoppingListCompleteItem",
-      "expected_canonical": "check off;shopping_list_item from shopping list",
+      "expected_canonical": "check off;milk from shopping list",
       "category": "intent_coverage",
       "expected_slots": {
-        "shopping_list_item": "shopping_list_item"
+        "shopping_list_item": "milk"
       }
     },
     {

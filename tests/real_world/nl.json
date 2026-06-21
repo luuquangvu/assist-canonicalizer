@@ -614,25 +614,34 @@
       "category": "intent_coverage"
     },
     {
-      "query": "broadcast message",
+      "query": "broadcast eten is klaar",
       "language": "nl",
       "expected_intent": "HassBroadcast",
-      "expected_canonical": "broadcast message",
-      "category": "intent_coverage"
+      "expected_canonical": "broadcast eten is klaar",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "message": "eten is klaar"
+      }
     },
     {
-      "query": "zet shopping_list_item op lijst",
+      "query": "zet melk op lijst",
       "language": "nl",
       "expected_intent": "HassShoppingListAddItem",
-      "expected_canonical": "zet shopping_list_item op lijst",
-      "category": "intent_coverage"
+      "expected_canonical": "zet melk op lijst",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "shopping_list_item": "melk"
+      }
     },
     {
-      "query": "speel search_query",
+      "query": "speel jazz",
       "language": "nl",
       "expected_intent": "HassMediaSearchAndPlay",
-      "expected_canonical": "speel search_query",
-      "category": "intent_coverage"
+      "expected_canonical": "speel jazz",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "search_query": "jazz"
+      }
     },
     {
       "query": "alle timer stoppen woonkamer",
@@ -652,11 +661,14 @@
       "category": "intent_coverage"
     },
     {
-      "query": "haal shopping_list_item van lijst af",
+      "query": "haal melk van lijst af",
       "language": "nl",
       "expected_intent": "HassShoppingListCompleteItem",
-      "expected_canonical": "haal shopping_list_item van lijst af",
-      "category": "intent_coverage"
+      "expected_canonical": "haal melk van lijst af",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "shopping_list_item": "melk"
+      }
     },
     {
       "query": "timer hervatten",
@@ -666,46 +678,76 @@
       "category": "intent_coverage"
     },
     {
-      "query": "zet todo_list_item op boodschappenlijst",
+      "query": "zet boodschappen op boodschappenlijst",
       "language": "nl",
       "expected_intent": "HassListAddItem",
-      "expected_canonical": "zet todo_list_item op boodschappenlijst",
-      "category": "intent_coverage"
+      "expected_canonical": "zet boodschappen op boodschappenlijst",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "todo_list_item": "boodschappen",
+        "name:todo": "boodschappenlijst",
+        "name": "boodschappenlijst"
+      }
     },
     {
-      "query": "voeg todo_list_item toe aan todolijst",
+      "query": "voeg boodschappen toe aan todolijst",
       "language": "nl",
       "expected_intent": "HassListAddItem",
-      "expected_canonical": "voeg todo_list_item toe aan todolijst",
-      "category": "intent_coverage"
+      "expected_canonical": "voeg boodschappen toe aan todolijst",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "todo_list_item": "boodschappen",
+        "name:todo": "todolijst",
+        "name": "todolijst"
+      }
     },
     {
-      "query": "vink todo_list_item van boodschappenlijst af",
+      "query": "vink boodschappen van boodschappenlijst af",
       "language": "nl",
       "expected_intent": "HassListCompleteItem",
-      "expected_canonical": "vink todo_list_item van boodschappenlijst;af",
-      "category": "intent_coverage"
+      "expected_canonical": "vink boodschappen van boodschappenlijst;af",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "todo_list_item": "boodschappen",
+        "name:todo": "boodschappenlijst",
+        "name": "boodschappenlijst"
+      }
     },
     {
-      "query": "markeer todo_list_item op todolijst als klaar",
+      "query": "markeer boodschappen op todolijst als klaar",
       "language": "nl",
       "expected_intent": "HassListCompleteItem",
-      "expected_canonical": "markeer todo_list_item op todolijst als klaar",
-      "category": "intent_coverage"
+      "expected_canonical": "markeer boodschappen op todolijst als klaar",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "todo_list_item": "boodschappen",
+        "name:todo": "todolijst",
+        "name": "todolijst"
+      }
     },
     {
-      "query": "verwijder todo_list_item van boodschappenlijst",
+      "query": "verwijder boodschappen van boodschappenlijst",
       "language": "nl",
       "expected_intent": "HassListRemoveItem",
-      "expected_canonical": "verwijder todo_list_item van boodschappenlijst",
-      "category": "intent_coverage"
+      "expected_canonical": "verwijder boodschappen van boodschappenlijst",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "todo_list_item": "boodschappen",
+        "name:todo": "boodschappenlijst",
+        "name": "boodschappenlijst"
+      }
     },
     {
-      "query": "haal todo_list_item van todolijst af",
+      "query": "haal boodschappen van todolijst af",
       "language": "nl",
       "expected_intent": "HassListRemoveItem",
-      "expected_canonical": "haal todo_list_item van todolijst;af",
-      "category": "intent_coverage"
+      "expected_canonical": "haal boodschappen van todolijst;af",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "todo_list_item": "boodschappen",
+        "name:todo": "todolijst",
+        "name": "todolijst"
+      }
     },
     {
       "query": "hoe laat is et",

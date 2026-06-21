@@ -27,6 +27,7 @@ from .const import (
     POSITIONAL_SIMILARITY_VERY_SHORT_THRESHOLD,
     RAPIDFUZZ_WEIGHT,
     TIEBREAKER_INTENT_MARGIN,
+    WILDCARD_LENGTH_PENALTY_FACTOR,
 )
 from .normalization import (
     char_ngrams_normalized,
@@ -34,6 +35,7 @@ from .normalization import (
     normalize_text,
     normalize_text_no_diacritics,
 )
+from .rehydration import get_wildcard_rehydration, wildcard_variants_analysis
 
 _LiteralVariantAnalysis = list[tuple[int, int, list[frozenset[str]]]]
 
@@ -47,6 +49,7 @@ class ScoreBreakdown:
     bm25_score: float
     intent_score: float
     final_score: float
+    penalty: float = 0.0
 
 
 _PERFECT_SCORE = ScoreBreakdown(
@@ -165,7 +168,7 @@ def lexical_score(
 
 
 def _positional_similarity(a: str, b: str) -> float:
-    """Character-level positional similarity — cheap edit-distance proxy."""
+    """Character-level positional similarity, cheap edit-distance proxy."""
     if a == b:
         return 1.0
     len_a = len(a)
@@ -248,7 +251,7 @@ def _build_positional_lookup(
     """Precompute which query tokens each literal token positionally matches.
 
     Uses first-character bucketing to prune the O(|literal|x|query|) inner
-    loop — positional similarity requires at least the first character to
+    loop, positional similarity requires at least the first character to
     match, so tokens that differ at position 0 can never reach any
     non-trivial positional similarity threshold.
     """
@@ -294,8 +297,8 @@ def _precompute_literal_analysis(
 
     This data is computed once per unique ``literal_text`` per
     ``rank_candidates`` invocation; the per-candidate scoring step then only
-    needs to check whether each frozenset is a subset of the candidate entity
-    — an O(variants * positional_hits) operation instead of the previous
+    needs to check whether each frozenset is a subset of the candidate entity,
+    an O(variants * positional_hits) operation instead of the previous
     O(variants * all_tokens) loop with repeated dict lookups.
     """
     if isinstance(literal_text_or_variants, str):
@@ -377,6 +380,127 @@ def _non_entity_coverage(
     return coverage * coverage
 
 
+def _rehydrated_bm25_score(
+    cand_tokens: tuple[str, ...],
+    query_tokens: tuple[str, ...],
+    index: BM25Index,
+    max_raw_score: float,
+) -> float:
+    """Compute the normalized BM25 score of a rehydrated candidate scaled by max_raw_score."""
+    raw_score = index.raw_score_tokens(cand_tokens, query_tokens)
+    if max_raw_score <= 0.0:
+        return 1.0 if raw_score > 0.0 else 0.0
+    return min(1.0, raw_score / max_raw_score)
+
+
+def _prefilter_wildcard_candidates(
+    candidates: Sequence[Candidate],
+    query_tokens: frozenset[str],
+    wildcard_always_passes: frozenset[int] | None,
+    wildcard_variants_with_len: dict[int, tuple[tuple[frozenset[str], int, int], ...]] | None,
+    wildcard_token_to_indices: dict[str, tuple[int, ...]] | None,
+) -> set[int]:
+    """Prefilter wildcard candidates using precomputed structures or on-the-fly coverage."""
+    wildcard_indices_set = set()
+    if wildcard_always_passes is not None:
+        candidates_to_check = set()
+        if wildcard_always_passes:
+            candidates_to_check.update(wildcard_always_passes)
+        if wildcard_token_to_indices:
+            for token in query_tokens:
+                indices = wildcard_token_to_indices.get(token)
+                if indices:
+                    candidates_to_check.update(indices)
+
+        for i in candidates_to_check:
+            if wildcard_always_passes and i in wildcard_always_passes:
+                wildcard_indices_set.add(i)
+                continue
+
+            variants_with_len = (
+                wildcard_variants_with_len.get(i) if wildcard_variants_with_len else None
+            )
+            if variants_with_len:
+                passed = False
+                for variant, var_len, req in variants_with_len:
+                    if var_len == 0:
+                        passed = True
+                        break
+                    matched = len(variant & query_tokens)
+                    if matched >= req:
+                        passed = True
+                        break
+                if passed:
+                    wildcard_indices_set.add(i)
+    else:
+        for i, cand in enumerate(candidates):
+            if not cand.has_wildcard:
+                continue
+            var_with_len, all_literal = wildcard_variants_analysis(cand)
+
+            always_passes = not cand.literal_variants or any(
+                length == 0 for _, length, _ in var_with_len
+            )
+            if always_passes:
+                wildcard_indices_set.add(i)
+                continue
+
+            if all_literal.isdisjoint(query_tokens):
+                continue
+
+            passed = False
+            for clean_var, var_len, req in var_with_len:
+                if var_len == 0:
+                    passed = True
+                    break
+                matched = len(clean_var & query_tokens)
+                if matched >= req:
+                    passed = True
+                    break
+            if passed:
+                wildcard_indices_set.add(i)
+    return wildcard_indices_set
+
+
+def _rehydrate_and_rescore_wildcard(
+    candidate: Candidate,
+    query: str,
+    query_tokens_tuple: tuple[str, ...],
+    query_grams: frozenset[str],
+    bm25_ref: BM25Index | None,
+    max_raw_score: float,
+    original_char_score: float,
+    original_bm25_score: float,
+) -> tuple[str | None, dict[str, str] | None, float, float]:
+    """Rehydrate wildcard candidate and recompute its lexical scores."""
+    rehydrated, replacements = get_wildcard_rehydration(candidate, query, query_tokens_tuple)
+    if not replacements:
+        return None, None, original_char_score, original_bm25_score
+
+    rehydrated_norm = normalize_text(rehydrated)
+
+    # Recompute Char-Ngram score
+    rehydrated_grams = char_ngrams_normalized(rehydrated_norm)
+    if rehydrated_grams and query_grams:
+        intersection = len(rehydrated_grams & query_grams)
+        union = len(rehydrated_grams | query_grams)
+        char_score = intersection / union if union else 0.0
+    else:
+        char_score = 0.0
+
+    # Recompute BM25 score
+    bm25_score = original_bm25_score
+    if bm25_ref is not None:
+        bm25_score = _rehydrated_bm25_score(
+            tuple(rehydrated_norm.split()),
+            query_tokens_tuple,
+            bm25_ref,
+            max_raw_score,
+        )
+
+    return rehydrated_norm, replacements, char_score, bm25_score
+
+
 def rank_candidates(
     query: str,
     candidates: Sequence[Candidate],
@@ -390,8 +514,19 @@ def rank_candidates(
     exact_normalized_lookup: dict[str, list[Candidate]] | None = None,
     exact_no_diacritics_lookup: dict[str, list[Candidate]] | None = None,
     language: str | None = None,
+    wildcard_always_passes: frozenset[int] | None = None,
+    wildcard_variants_with_len: (
+        dict[int, tuple[tuple[frozenset[str], int, int], ...]] | None
+    ) = None,
+    wildcard_token_to_indices: dict[str, tuple[int, ...]] | None = None,
+    slot_preferences: set[tuple[str, str]] | None = None,
 ) -> tuple[RankedCandidate, ...]:
-    """Rank candidates for a query using lexical scoring."""
+    """Rank candidates for a query using lexical scoring.
+
+    Candidate text containing wildcard placeholders is rehydrated from
+    *query* before scoring so that real free-text values contribute to
+    the semantic match instead of placeholder tokens.
+    """
     if max_candidates < 1:
         raise ValueError("max_candidates must be positive")
     disambiguation_limit = max(2, max_candidates)
@@ -403,6 +538,8 @@ def rank_candidates(
         candidates
     ):
         raise ValueError("candidate_char_index length must match candidates")
+
+    _rehydrated_cache: dict[int, tuple[str, dict[str, str]]] = {}
 
     query_normalized = normalize_text(query)
 
@@ -430,7 +567,7 @@ def rank_candidates(
     query_tokens_tuple = tuple(query_normalized.split())
     query_token_count = len(query_tokens_tuple)
     query_sorted = " ".join(sorted(query_tokens_tuple))
-    intent_score_cache: dict[str, float] = {}
+    intent_score_cache: dict[tuple[frozenset[str], ...], float] = {}
     if positional_literal_tokens is None:
         all_tokens: set[str] = set()
         for candidate in candidates:
@@ -444,17 +581,35 @@ def rank_candidates(
         non_entity_scratch = query_tokens - positional_literal_tokens
         non_entity_tokens = non_entity_scratch if non_entity_scratch else None
 
+    max_raw_score = 0.0
     if reference_bm25_index is not None:
         bm25_scores = reference_bm25_index.score_custom_documents_tokens(
             query_tokens_tuple, candidates
         )
-    elif bm25_index is None:
-        bm25_index = BM25Index.from_normalized_texts(
-            tuple(candidate.normalized_text for candidate in candidates)
-        )
-        bm25_scores = bm25_index.score_tokens(query_tokens_tuple)
+        max_idx = max(range(len(bm25_scores)), key=bm25_scores.__getitem__, default=0)
+        if bm25_scores[max_idx] > 0.0:
+            max_cand = candidates[max_idx]
+            max_raw_score = reference_bm25_index.raw_score_tokens(
+                max_cand.normalized_tokens, query_tokens_tuple
+            )
     else:
-        bm25_scores = bm25_index.score_tokens(query_tokens_tuple)
+        if bm25_index is None:
+            bm25_index = BM25Index.from_normalized_texts(
+                tuple(candidate.normalized_text for candidate in candidates)
+            )
+        doc_count = len(candidates)
+        if not query_tokens_tuple or not doc_count:
+            bm25_scores = (0.0,) * doc_count
+        else:
+            raw_scores = bm25_index.raw_scores(query_tokens_tuple)
+            max_raw_score = max(raw_scores, default=0.0)
+            if max_raw_score <= 0.0:
+                bm25_scores = (0.0,) * doc_count
+            else:
+                inv_max = 1.0 / max_raw_score
+                bm25_scores = tuple([score * inv_max for score in raw_scores])
+
+    _bm25_ref = reference_bm25_index or bm25_index
     if candidate_char_index is None:
         candidate_char_index = CharNGramIndex.from_grams(
             tuple(char_ngrams_normalized(candidate.normalized_text) for candidate in candidates)
@@ -475,48 +630,113 @@ def rank_candidates(
         prefilter_limit, range(len(prefilter_keys)), key=prefilter_keys.__getitem__
     )
 
+    wildcard_passed_set = _prefilter_wildcard_candidates(
+        candidates,
+        query_tokens,
+        wildcard_always_passes,
+        wildcard_variants_with_len,
+        wildcard_token_to_indices,
+    )
+    if wildcard_passed_set:
+        top_set = set(top_indices)
+        for wi in wildcard_passed_set:
+            if wi not in top_set:
+                top_indices.append(wi)
+
     positional_lookup = (
         _build_positional_lookup(positional_literal_tokens, query_tokens)
         if positional_literal_tokens
         else {}
     )
 
-    literal_analysis_cache: dict[str, _LiteralVariantAnalysis] = {}
-    ranked_tuples: list[tuple[float, Candidate, float, float, float, float]] = []
+    literal_analysis_cache: dict[
+        tuple[str, tuple[frozenset[str], ...]], _LiteralVariantAnalysis
+    ] = {}
+    ranked_tuples: list[tuple[float, Candidate, float, float, float, float, int, float]] = []
     for idx in top_indices:
         candidate = candidates[idx]
         bm25_score = bm25_scores[idx]
         char_score = char_scores[idx]
+        if candidate.has_wildcard:
+            if idx not in wildcard_passed_set:
+                continue
+            rehydrated_norm, replacements, char_score, bm25_score = _rehydrate_and_rescore_wildcard(
+                candidate,
+                query,
+                query_tokens_tuple,
+                query_grams,
+                _bm25_ref,
+                max_raw_score,
+                char_score,
+                bm25_score,
+            )
+            if not replacements or rehydrated_norm is None:
+                continue
+            _rehydrated_cache[idx] = (rehydrated_norm, replacements)
+        if idx in _rehydrated_cache:
+            cand_text, replacements = _rehydrated_cache[idx]
+            cand_tokens = cand_text.split()
+            cand_sorted = " ".join(sorted(cand_tokens))
+            cand_token_count = len(cand_tokens)
+            candidate_tokens = frozenset(cand_tokens)
+
+            norm_replacements = {
+                wc: normalize_text(val).split() for wc, val in replacements.items()
+            }
+            rehydrated_variants = []
+            for variant in candidate.literal_variants:
+                if variant.isdisjoint(norm_replacements):
+                    rehydrated_variants.append(variant)
+                    continue
+                new_variant = set()
+                for token in variant:
+                    if token in norm_replacements:
+                        new_variant.update(norm_replacements[token])
+                    else:
+                        new_variant.add(token)
+                rehydrated_variants.append(frozenset(new_variant))
+            literal_variants = tuple(rehydrated_variants)
+            total_unique_literal_tokens = (
+                len({tok for var in literal_variants for tok in var}) if literal_variants else 0
+            )
+        else:
+            cand_text = candidate.normalized_text
+            cand_sorted = candidate.normalized_text_sorted
+            cand_token_count = len(candidate.normalized_tokens)
+            candidate_tokens = candidate.normalized_tokens_set
+            literal_variants = candidate.literal_variants
+            total_unique_literal_tokens = candidate.total_unique_literal_tokens
+
         rapidfuzz_score = rapidfuzz_similarity_normalized(
             query_normalized,
-            candidate.normalized_text,
+            cand_text,
             query_token_count=query_token_count,
             query_sorted=query_sorted,
-            candidate_sorted=candidate.normalized_text_sorted,
-            candidate_token_count=len(candidate.normalized_tokens),
+            candidate_sorted=cand_sorted,
+            candidate_token_count=cand_token_count,
         )
         literal_text = candidate.metadata.get("literal_text")
-        candidate_tokens = candidate.normalized_tokens_set
         coverage = _query_token_coverage(query_tokens, candidate_tokens)
         intent_score = coverage
         if literal_text:
-            exact = intent_score_cache.get(literal_text)
+            exact = intent_score_cache.get(literal_variants)
             if exact is None:
-                exact = _exact_intent_score(candidate.literal_variants, query_tokens)
-                intent_score_cache[literal_text] = exact
+                exact = _exact_intent_score(literal_variants, query_tokens)
+                intent_score_cache[literal_variants] = exact
             if exact >= 1.0:
-                if candidate.total_unique_literal_tokens >= 2:
+                if total_unique_literal_tokens >= 2:
                     matched_q = len(query_tokens & candidate_tokens)
                     intent_score = matched_q / len(query_tokens) if query_tokens else 1.0
             elif query_tokens.issubset(candidate_tokens):
                 intent_score = exact
             else:
-                analysis = literal_analysis_cache.get(literal_text)
+                analysis_key = (literal_text, literal_variants)
+                analysis = literal_analysis_cache.get(analysis_key)
                 if analysis is None:
                     analysis = _precompute_literal_analysis(
-                        candidate.literal_variants, query_tokens, positional_lookup
+                        literal_variants, query_tokens, positional_lookup
                     )
-                    literal_analysis_cache[literal_text] = analysis
+                    literal_analysis_cache[analysis_key] = analysis
                 best = 0.0
                 for total_len, exact_count, positional_hits in analysis:
                     matched = float(exact_count)
@@ -536,6 +756,14 @@ def rank_candidates(
                 )
                 intent_score *= 1.0 - NON_ENTITY_PENALTY_BLEND + NON_ENTITY_PENALTY_BLEND * penalty
         combined = lexical_score(rapidfuzz_score, char_score, bm25_score, intent_score)
+        penalty_val = 0.0
+        if idx in _rehydrated_cache:
+            _, replacements = _rehydrated_cache[idx]
+            wc_len = sum(len(val.split()) for val in replacements.values())
+            penalty_val = WILDCARD_LENGTH_PENALTY_FACTOR * wc_len
+            combined -= penalty_val
+            if combined < 0.0:
+                combined = 0.0
         ranked_tuples.append(
             (
                 combined,
@@ -544,9 +772,24 @@ def rank_candidates(
                 char_score,
                 bm25_score,
                 intent_score,
+                idx,
+                penalty_val,
             )
         )
-    ranked_tuples.sort(key=lambda item: item[0], reverse=True)
+
+    def sort_key(item):
+        idx = item[6]
+        tb = 0.0
+        if slot_preferences and idx in _rehydrated_cache:
+            _, replacements = _rehydrated_cache[idx]
+            for slot_name, val in replacements.items():
+                if (slot_name, val.lower()) in slot_preferences:
+                    tb = 1.0
+                    break
+
+        return (item[0], tb, -idx)
+
+    ranked_tuples.sort(key=sort_key, reverse=True)
     ranked = [
         RankedCandidate(
             candidate=item[1],
@@ -556,6 +799,7 @@ def rank_candidates(
                 bm25_score=item[4],
                 intent_score=item[5],
                 final_score=item[0],
+                penalty=item[7],
             ),
         )
         for item in ranked_tuples[:disambiguation_limit]

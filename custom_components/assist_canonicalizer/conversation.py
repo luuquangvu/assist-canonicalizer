@@ -32,6 +32,7 @@ from .const import (
     NAME,
     FallbackReason,
 )
+from .grammar_loader import rehydrate_wildcard_text
 from .ranking import accepted_candidate
 from .runtime import CanonicalizerRuntime
 from .utils import elapsed_ms, normalize_language, resolve_entry_thresholds
@@ -175,10 +176,22 @@ class AssistCanonicalizerConversationEntity(
         ranked: tuple[Any, ...],
         user_input: ConversationInput,
     ) -> ConversationResult | None:
-        """Validate ranked canonical candidates through the primary Hassil agent."""
+        """Validate ranked canonical candidates through the primary Hassil agent.
+
+        Wildcard placeholders (e.g. ``shopping_list_item``) in candidate text
+        are rehydrated from the original query before delegation so that the
+        downstream agent receives real free-text values.
+        """
         for ranked_candidate in ranked[:DEFAULT_VALIDATION_CANDIDATES]:
+            candidate = ranked_candidate.candidate
+            candidate_text = candidate.text
+            rehydrated = rehydrate_wildcard_text(
+                candidate_text, user_input.text, user_input.language
+            )
+            if candidate.has_wildcard and rehydrated == candidate_text:
+                continue
             validation_result = await self._delegate_text(
-                ranked_candidate.candidate.text,
+                rehydrated,
                 user_input,
                 primary=True,
             )
