@@ -8,14 +8,17 @@ from __future__ import annotations
 
 import sys
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 import custom_components.assist_canonicalizer.config_flow as cf
 from custom_components.assist_canonicalizer.bm25 import BM25Index
-from custom_components.assist_canonicalizer.candidate import Candidate
+from custom_components.assist_canonicalizer.candidate import (
+    Candidate,
+    candidate_dedupe_preference_key,
+)
 from custom_components.assist_canonicalizer.ranking import (
     _non_entity_coverage,
     _positional_intent_score_from_lookup,
@@ -109,7 +112,89 @@ def test_wildcard_slot_names_exceptions_and_types_stability() -> None:
         try:
             assert wildcard_slot_names_sorted(None) == ()
         finally:
+            wildcard_slot_names.cache_clear()
             wildcard_slot_names_sorted.cache_clear()
+
+
+def test_candidate_literal_variants_recovers_from_corrupt_metadata() -> None:
+    """Recover literal variants from literal_text when cached JSON is corrupt."""
+    cand = Candidate(
+        text="turn on light",
+        intent_name="HassTurnOn",
+        metadata={
+            "literal_text": "turn on|switch on",
+            "literal_variants": "{not-json",
+        },
+    )
+
+    assert cand.literal_variants == (
+        frozenset({"turn", "on"}),
+        frozenset({"switch", "on"}),
+    )
+
+
+@pytest.mark.parametrize(
+    "literal_variants",
+    [
+        '"turn on"',
+        '{"tokens":["turn","on"]}',
+        "42",
+        '[["turn", 1]]',
+        '["turn"]',
+    ],
+)
+def test_candidate_literal_variants_recovers_from_malformed_metadata_shape(
+    literal_variants: str,
+) -> None:
+    """Recover literal variants when cached JSON is valid but has the wrong shape."""
+    cand = Candidate(
+        text="turn on light",
+        intent_name="HassTurnOn",
+        metadata={
+            "literal_text": "turn on|switch on",
+            "literal_variants": literal_variants,
+        },
+    )
+
+    assert cand.literal_variants == (
+        frozenset({"turn", "on"}),
+        frozenset({"switch", "on"}),
+    )
+
+
+def test_candidate_slot_tokens_recover_from_corrupt_metadata_slots() -> None:
+    """Recover slot tokens from slot_values when serialized slot metadata is corrupt."""
+    cand = Candidate(
+        text="turn on kitchen light",
+        intent_name="HassTurnOn",
+        metadata={"slots": "{not-json"},
+        slot_values=("kitchen light",),
+    )
+
+    assert cand.slot_tokens_set == frozenset({"kitchen", "light"})
+
+
+def test_candidate_slot_tokens_recover_from_non_object_metadata_slots() -> None:
+    """Recover slot tokens from slot_values when serialized slot metadata is not an object."""
+    cand = Candidate(
+        text="turn on kitchen light",
+        intent_name="HassTurnOn",
+        metadata={"slots": '["kitchen light"]'},
+        slot_values=("kitchen light",),
+    )
+
+    assert cand.slot_tokens_set == frozenset({"kitchen", "light"})
+
+
+def test_candidate_dedupe_preference_recovers_from_non_string_metadata_slots() -> None:
+    """Ignore manually constructed non-string slot metadata while deduping."""
+    cand = Candidate(
+        text="turn on kitchen light",
+        intent_name="HassTurnOn",
+        metadata=cast(Any, {"slots": {"name": "kitchen light"}}),
+    )
+
+    assert candidate_dedupe_preference_key(cand) == (-2, 0, 0, 1)
 
 
 def test_rehydration_no_wildcard_info_stability() -> None:
@@ -228,6 +313,85 @@ def test_prefilter_wildcard_candidates_stability() -> None:
     assert res_disjoint == set()
 
 
+def test_prefilter_wildcard_candidates_skips_impossible_precomputed_match() -> None:
+    """Skip wildcard variant scans when query overlap cannot meet the required hits."""
+    cands = [Candidate(text="add item", intent_name="dummy", language="en")]
+    variants: dict[int, tuple[tuple[frozenset[str], int, int], ...]] = {
+        0: (
+            (frozenset({"add", "to", "list"}), 3, 3),
+            (frozenset({"put", "on", "list"}), 3, 3),
+        )
+    }
+
+    skipped = _prefilter_wildcard_candidates(
+        candidates=cands,
+        query_tokens=frozenset({"add"}),
+        wildcard_always_passes=frozenset(),
+        wildcard_variants_with_len=variants,
+        wildcard_token_to_indices={"add": (0,)},
+        wildcard_literal_tokens_by_index={0: frozenset({"add", "to", "list", "put", "on"})},
+        wildcard_min_required_by_index={0: 3},
+    )
+    assert skipped == set()
+
+    matched = _prefilter_wildcard_candidates(
+        candidates=cands,
+        query_tokens=frozenset({"add", "to", "list"}),
+        wildcard_always_passes=frozenset(),
+        wildcard_variants_with_len=variants,
+        wildcard_token_to_indices={"add": (0,), "to": (0,), "list": (0,)},
+        wildcard_literal_tokens_by_index={0: frozenset({"add", "to", "list", "put", "on"})},
+        wildcard_min_required_by_index={0: 3},
+    )
+    assert matched == {0}
+
+
+def test_prefilter_wildcard_candidates_fallback_when_reverse_index_missing() -> None:
+    """Verify fallback to on-the-fly wildcard scanning when reverse index is missing."""
+    with patch(
+        "custom_components.assist_canonicalizer.candidate.wildcard_slot_names_sorted",
+        return_value=("shopping_list_item",),
+    ):
+        cands = [Candidate(text="add shopping_list_item", intent_name="dummy", language="en")]
+        # If wildcard_always_passes is not None but wildcard_token_to_indices is missing (None),
+        # we should fall back to on-the-fly scanning.
+        res = _prefilter_wildcard_candidates(
+            candidates=cands,
+            query_tokens=frozenset({"add"}),
+            wildcard_always_passes=frozenset(),
+            wildcard_variants_with_len=None,
+            wildcard_token_to_indices=None,
+        )
+        assert res == {0}
+
+
+def test_prefilter_wildcard_candidates_fallback_when_precompute_bundle_incomplete() -> None:
+    """Use on-the-fly wildcard filtering when any precomputed structure is missing."""
+    with patch(
+        "custom_components.assist_canonicalizer.candidate.wildcard_slot_names_sorted",
+        return_value=("shopping_list_item",),
+    ):
+        cands = [
+            Candidate(
+                text="add shopping_list_item",
+                intent_name="dummy",
+                language="en",
+                metadata={"literal_text": "add"},
+            )
+        ]
+        res = _prefilter_wildcard_candidates(
+            candidates=cands,
+            query_tokens=frozenset({"add"}),
+            wildcard_always_passes=frozenset(),
+            wildcard_variants_with_len={0: ((frozenset({"other"}), 1, 1),)},
+            wildcard_token_to_indices={"add": (0,)},
+            wildcard_literal_tokens_by_index=None,
+            wildcard_min_required_by_index={0: 1},
+        )
+
+    assert res == {0}
+
+
 def test_rehydrate_and_rescore_wildcard_no_replacements_stability() -> None:
     """Verify candidate rescoring returns original scores if query cannot align."""
     cand = Candidate(text="add shopping_list_item to list", intent_name="dummy", language="en")
@@ -284,7 +448,10 @@ def test_config_flow_available_fallback_agents_no_agents_stability() -> None:
         assert cf._available_fallback_agents(MagicMock(), None) == {}
 
 
-def test_config_flow_available_fallback_agents_filtering_stability() -> None:
+def test_config_flow_available_fallback_agents_filtering_stability(
+    fallback_agent_manager_factory: Any,
+    mock_conversation_entity_type: type,
+) -> None:
     """Verify fallback agent choices filter unavailable, entity, or excluded agents."""
     with patch("custom_components.assist_canonicalizer.config_flow._HAS_CONVERSATION_AGENTS", True):
 
@@ -337,24 +504,15 @@ def test_config_flow_available_fallback_agents_filtering_stability() -> None:
         ]
         hass.data = {cf.DATA_COMPONENT: entity_component}
 
-        manager = MagicMock()
-        manager.async_get_agent_info.return_value = [
-            SimpleNamespace(id=None, name="No ID"),
-            SimpleNamespace(id="conversation.excluded", name="Excluded"),
-            SimpleNamespace(id="conversation.entry_agent", name="Entry Agent"),
-            SimpleNamespace(id="conversation.entity_agent", name="Entity Agent"),
-        ]
-
-        class MockConversationEntity:
-            """Mock ConversationEntity for testing."""
-
-        def mock_get_agent(agent_id: str) -> MockConversationEntity | None:
-            """Mock retrieve callback for agent instance."""
-            if agent_id == "conversation.entity_agent":
-                return MockConversationEntity()
-            return None
-
-        manager.async_get_agent = mock_get_agent
+        manager = fallback_agent_manager_factory(
+            [
+                SimpleNamespace(id=None, name="No ID"),
+                SimpleNamespace(id="conversation.excluded", name="Excluded"),
+                SimpleNamespace(id="conversation.entry_agent", name="Entry Agent"),
+                SimpleNamespace(id="conversation.entity_agent", name="Entity Agent"),
+            ],
+            {"conversation.entity_agent": mock_conversation_entity_type()},
+        )
 
         with (
             patch(
@@ -363,7 +521,7 @@ def test_config_flow_available_fallback_agents_filtering_stability() -> None:
             ),
             patch(
                 "custom_components.assist_canonicalizer.config_flow.ConversationEntity",
-                MockConversationEntity,
+                mock_conversation_entity_type,
             ),
         ):
             choices = cf._available_fallback_agents(hass, "conversation.excluded")

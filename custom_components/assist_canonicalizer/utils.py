@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from functools import lru_cache
 from time import monotonic
 from typing import Any
@@ -61,7 +62,7 @@ def wildcard_slot_names(language: str | None = None) -> frozenset[str]:
         import home_assistant_intents as intents_module
     except ImportError:
         return frozenset()
-    try:
+    with contextlib.suppress(Exception):
         languages = [language] if language else intents_module.get_languages()
         for lang in languages:
             try:
@@ -76,8 +77,6 @@ def wildcard_slot_names(language: str | None = None) -> frozenset[str]:
             for name, config in lists.items():
                 if isinstance(config, dict) and config.get("wildcard"):
                     names.add(name)
-    except Exception:
-        pass
     return frozenset(names)
 
 

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
+import inspect
 from collections.abc import Callable, Mapping, Sequence, Set
 from dataclasses import dataclass, field
 from enum import Enum
@@ -14,7 +16,12 @@ import orjson
 
 from .builtin_intents import load_language_intent_sources
 from .candidate import Candidate, CandidateSource
-from .const import DEFAULT_MAX_CANDIDATES, DOMAIN, FallbackReason
+from .const import (
+    DEFAULT_MAX_CANDIDATES,
+    DEFAULT_MIN_CONFIDENCE,
+    DOMAIN,
+    FallbackReason,
+)
 from .diagnostics import CanonicalizerDiagnostics
 from .grammar_loader import (
     DynamicRegistryIntent,
@@ -25,7 +32,7 @@ from .grammar_loader import (
     compile_dynamic_registry_intents,
 )
 from .indexer import CanonicalIndex, build_index
-from .normalization import char_ngrams_normalized
+from .normalization import char_ngrams_normalized, normalize_text
 from .ranking import CharNGramIndex, RankedCandidate, rank_candidates
 from .utils import normalize_language
 
@@ -42,20 +49,15 @@ except (ImportError, RuntimeError):
 
 _STORE_HAS_SERIALIZE_IN_EVENT_LOOP = False
 if _HAS_STORAGE and storage is not None:
-    import inspect
-
-    try:
+    with contextlib.suppress(Exception):
         sig = inspect.signature(storage.Store.__init__)
         _STORE_HAS_SERIALIZE_IN_EVENT_LOOP = "serialize_in_event_loop" in sig.parameters
-    except Exception:
-        pass
-
-
 _INDEX_STORE_VERSION = 1
-_INDEX_BUILD_VERSION = 1
+_INDEX_BUILD_VERSION = 2
 _INDEX_STORE_PREFIX = f"{DOMAIN}.index_"
 _INDEX_MANIFEST_KEY = f"{DOMAIN}.index_manifest"
 _INDEX_MANIFEST_VERSION = 1
+_MAX_REBUILD_ATTEMPTS = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,11 +81,14 @@ class CanonicalizerRuntime:
     config_path: Callable[..., str] | None = None
     registry_slot_values: dict[str, tuple[str, ...]] = field(default_factory=dict)
     registry_slot_index: RegistrySlotIndex = field(default_factory=lambda: RegistrySlotIndex({}))
+    registry_slot_indexes: dict[str, RegistrySlotIndex] = field(default_factory=dict)
     dynamic_registry_intents: dict[str, tuple[DynamicRegistryIntent, ...]] = field(
         default_factory=dict
     )
     cleanup_callbacks: list[Callable[[], None]] = field(default_factory=list)
-    rebuild_tasks: dict[str, tuple[int, asyncio.Task[CanonicalIndex]]] = field(default_factory=dict)
+    rebuild_tasks: dict[str, tuple[int, asyncio.Task[CanonicalIndex | None]]] = field(
+        default_factory=dict
+    )
     index_generation: int = 0
     source_generation: int = 0
     rebuild_timer_cancel: Callable[[], None] | None = None
@@ -101,7 +106,7 @@ class CanonicalizerRuntime:
             index_version=index.version,
         )
 
-    async def async_rebuild_index(self, hass: Any, language: str) -> CanonicalIndex:
+    async def async_rebuild_index(self, hass: Any, language: str) -> CanonicalIndex | None:
         """Rebuild one language index once while concurrent callers await it."""
         language = normalize_language(language)
         task_state = self.rebuild_tasks.get(language)
@@ -113,43 +118,13 @@ class CanonicalizerRuntime:
 
         generation = self.index_generation
 
-        async def run_rebuild() -> CanonicalIndex:
-            """Build from a stable source generation and persist the matching fingerprint."""
-            while True:
-                source_generation = self.source_generation
-                build_inputs = self._capture_build_inputs()
-                snapshot = await hass.async_add_executor_job(
-                    _create_build_snapshot,
-                    language,
-                    *build_inputs,
-                )
-                index = await hass.async_add_executor_job(_build_index_from_snapshot, snapshot)
-                if self.index_generation != generation:
-                    return index
-                if self.source_generation != source_generation:
-                    continue
-
-                self.language_intent_sources[language] = snapshot.intent_sources
-                self.set_index(index)
-                saved = await self.async_save_index_to_store(
-                    hass,
-                    index,
-                    snapshot.fingerprint,
-                    expected_index_generation=generation,
-                    expected_source_generation=source_generation,
-                )
-                if self.index_generation != generation:
-                    return index
-                if self.source_generation != source_generation or not saved:
-                    continue
-                return index
-
-        task = hass.async_create_task(run_rebuild())
+        task = hass.async_create_task(_run_rebuild(self, hass, language, generation))
         self.rebuild_tasks[language] = (generation, task)
         try:
             return await task
         finally:
-            if self.rebuild_tasks.get(language) == (generation, task):
+            task_state = self.rebuild_tasks.get(language)
+            if task_state and task_state[1] is task:
                 self.rebuild_tasks.pop(language, None)
 
     async def async_load_index_from_store(self, hass: Any, language: str) -> CanonicalIndex | None:
@@ -286,36 +261,63 @@ class CanonicalizerRuntime:
         max_candidates: int = DEFAULT_MAX_CANDIDATES,
         *,
         slot_preferences: set[tuple[str, str]] | None = None,
+        min_confidence: float = DEFAULT_MIN_CONFIDENCE,
     ) -> tuple[RankedCandidate, ...]:
         """Rank cached index candidates plus query-scoped registry expansions."""
         language = normalize_language(language)
-        ranked = index.rank(query, max_candidates=max_candidates, slot_preferences=slot_preferences)
+        ranked = index.rank(
+            query,
+            max_candidates=max_candidates,
+            slot_preferences=slot_preferences,
+            min_confidence=min_confidence,
+        )
         self.update_diagnostics(dynamic_candidate_count=0)
+        if _is_perfect_rank_result(ranked):
+            return ranked
+        registry_slot_values, registry_slot_index = self._registry_slot_snapshot_for_language(
+            language
+        )
         dynamic_candidates = build_query_registry_candidates(
             language,
             self._intent_sources_for_query(language),
-            self.registry_slot_values,
+            registry_slot_values,
             query,
-            registry_slot_index=self.registry_slot_index,
+            registry_slot_index=registry_slot_index,
             compiled_intents=self._dynamic_registry_intents_for_query(language),
+            include_literal_only_templates=False,
+            include_area_only_templates=False,
         )
         if not dynamic_candidates:
             return ranked
         self.update_diagnostics(dynamic_candidate_count=len(dynamic_candidates))
+        exact_normalized_lookup = _dynamic_exact_normalized_lookup(query, dynamic_candidates)
+        if exact_normalized_lookup is not None:
+            matches = next(iter(exact_normalized_lookup.values()))
+            if len(matches) > 1:
+                exact_normalized_lookup = None
+        dynamic_char_index = (
+            None
+            if exact_normalized_lookup is not None
+            else CharNGramIndex.from_grams(
+                tuple(
+                    char_ngrams_normalized(candidate.normalized_text)
+                    for candidate in dynamic_candidates
+                )
+            )
+        )
         dynamic_ranked = rank_candidates(
             query,
             dynamic_candidates,
             max_candidates=max_candidates,
             reference_bm25_index=index.bm25_index,
-            candidate_char_index=CharNGramIndex.from_grams(
-                tuple(
-                    char_ngrams_normalized(candidate.normalized_text)
-                    for candidate in dynamic_candidates
-                )
-            ),
+            candidate_char_index=dynamic_char_index,
+            exact_normalized_lookup=exact_normalized_lookup,
             language=language,
             slot_preferences=slot_preferences,
+            min_confidence=min_confidence,
         )
+        if _is_perfect_rank_result(dynamic_ranked):
+            return dynamic_ranked
         return _merge_ranked_candidates(ranked, dynamic_ranked, max_candidates)
 
     def clear_index(self, language: str | None = None) -> None:
@@ -346,7 +348,8 @@ class CanonicalizerRuntime:
         if updated_values == self.registry_slot_values:
             return
         self.registry_slot_values = updated_values
-        self.registry_slot_index = build_registry_slot_index(self.registry_slot_values)
+        self.registry_slot_index = build_registry_slot_index(updated_values)
+        self.registry_slot_indexes.clear()
         self._invalidate_source_dependent_indexes(clear_sources=False)
 
     def update_intent_sources(self, intents_update: Mapping[Any, Mapping[str, Any]]) -> None:
@@ -378,9 +381,7 @@ class CanonicalizerRuntime:
         """Return cached intent sources for query-time candidate expansion."""
         language = normalize_language(language)
         cached = self.language_intent_sources.get(language)
-        if cached is not None:
-            return cached
-        return self._all_intent_sources(language)
+        return cached if cached is not None else self._all_intent_sources(language)
 
     def _dynamic_registry_intents_for_query(
         self, language: str
@@ -391,10 +392,34 @@ class CanonicalizerRuntime:
         if cached is not None:
             return cached
         compiled = compile_dynamic_registry_intents(
-            self._intent_sources_for_query(language), language
+            self._intent_sources_for_query(language),
+            language,
+            include_literal_only_templates=False,
+            include_area_only_templates=False,
         )
         self.dynamic_registry_intents[language] = compiled
         return compiled
+
+    def _registry_slot_index_for_language(self, language: str) -> RegistrySlotIndex:
+        """Return registry slot records normalized for the query language."""
+        return self._registry_slot_snapshot_for_language(language)[1]
+
+    def _registry_slot_snapshot_for_language(
+        self,
+        language: str,
+    ) -> tuple[dict[str, tuple[str, ...]], RegistrySlotIndex]:
+        """Return one registry values snapshot with its matching language index."""
+        language = normalize_language(language)
+        registry_slot_values = {
+            key: tuple(values) for key, values in self.registry_slot_values.items()
+        }
+        cached = self.registry_slot_indexes.get(language)
+        if cached is not None and registry_slot_values == self.registry_slot_values:
+            return registry_slot_values, cached
+        built = build_registry_slot_index(registry_slot_values, language)
+        if registry_slot_values == self.registry_slot_values:
+            self.registry_slot_indexes[language] = built
+        return registry_slot_values, built
 
     def _all_intent_sources(self, language: str) -> dict[str, Mapping[str, Any]]:
         """Return built-in, custom, and subscribed intent sources."""
@@ -529,6 +554,45 @@ class CanonicalizerRuntime:
         )
 
 
+async def _run_rebuild(
+    runtime: CanonicalizerRuntime,
+    hass: Any,
+    language: str,
+    generation: int,
+) -> CanonicalIndex | None:
+    """Build from a stable source generation and persist the matching fingerprint."""
+    for _ in range(_MAX_REBUILD_ATTEMPTS):
+        source_generation = runtime.source_generation
+        build_inputs = runtime._capture_build_inputs()
+        snapshot = await hass.async_add_executor_job(
+            _create_build_snapshot,
+            language,
+            *build_inputs,
+        )
+        index = await hass.async_add_executor_job(_build_index_from_snapshot, snapshot)
+        if runtime.index_generation != generation:
+            return None
+        if runtime.source_generation != source_generation:
+            continue
+
+        saved = await runtime.async_save_index_to_store(
+            hass,
+            index,
+            snapshot.fingerprint,
+            expected_index_generation=generation,
+            expected_source_generation=source_generation,
+        )
+        if runtime.index_generation != generation:
+            return None
+        if runtime.source_generation != source_generation or not saved:
+            continue
+
+        runtime.language_intent_sources[language] = snapshot.intent_sources
+        runtime.set_index(index)
+        return index
+    return None
+
+
 def _create_build_snapshot(
     language: str,
     config_path: Callable[..., str] | None,
@@ -643,6 +707,7 @@ def _serialize_candidate(candidate: Candidate) -> dict[str, Any]:
         "source": str(candidate.source),
         "language": candidate.language,
         "metadata": dict(candidate.metadata),
+        "slot_values": list(candidate.slot_values),
         "normalized_text": candidate.normalized_text,
     }
 
@@ -658,6 +723,7 @@ def _deserialize_candidates(data: dict[str, Any]) -> list[Candidate] | None:
         source = candidate_data.get("source")
         language = candidate_data.get("language")
         metadata = candidate_data.get("metadata")
+        slot_values = candidate_data.get("slot_values", ())
         normalized_text = candidate_data.get("normalized_text")
         if (
             not isinstance(text, str)
@@ -665,6 +731,8 @@ def _deserialize_candidates(data: dict[str, Any]) -> list[Candidate] | None:
             or not isinstance(source, str)
             or (language is not None and not isinstance(language, str))
             or not isinstance(metadata, Mapping)
+            or not isinstance(slot_values, list | tuple)
+            or not all(isinstance(value, str) for value in slot_values)
             or not isinstance(normalized_text, str)
             or not normalized_text
         ):
@@ -677,6 +745,7 @@ def _deserialize_candidates(data: dict[str, Any]) -> list[Candidate] | None:
                     source=CandidateSource(source),
                     language=language,
                     metadata=metadata,
+                    slot_values=tuple(slot_values),
                     normalized_text=normalized_text,
                 )
             )
@@ -710,6 +779,36 @@ def _merge_ranked_candidates(
     return tuple(ranked[:max_candidates])
 
 
+def _is_perfect_rank_result(ranked: tuple[RankedCandidate, ...]) -> bool:
+    """Return whether ranking found only exact lexical matches."""
+    if not ranked:
+        return False
+    for item in ranked:
+        scores = item.scores
+        if (
+            scores.rapidfuzz_score != 1.0
+            or scores.char_ngram_score != 1.0
+            or scores.bm25_score != 1.0
+            or scores.intent_score != 1.0
+            or scores.final_score != 1.0
+            or scores.penalty != 0.0
+        ):
+            return False
+    return True
+
+
+def _dynamic_exact_normalized_lookup(
+    query: str,
+    candidates: tuple[Candidate, ...],
+) -> dict[str, list[Candidate]] | None:
+    """Return an exact normalized lookup for dynamic candidates matching a query."""
+    normalized_query = normalize_text(query)
+    exact_matches = [
+        candidate for candidate in candidates if candidate.normalized_text == normalized_query
+    ]
+    return {normalized_query: exact_matches} if exact_matches else None
+
+
 def _ranked_candidate_sort_key(ranked_candidate: RankedCandidate) -> tuple[float, int]:
     """Return a deterministic ranking key for merged candidates."""
     return (
@@ -722,14 +821,10 @@ def _updated_optional_text(current: str | None, value: str | None, *, clear: boo
     """Return an updated optional diagnostics string."""
     if clear:
         return value
-    if value is None:
-        return current
-    return value
+    return current if value is None else value
 
 
 def _source_key(source: Any) -> str:
     """Return a stable string key for a Home Assistant intent source."""
     name = getattr(source, "name", None)
-    if isinstance(name, str):
-        return name.lower()
-    return str(source).lower()
+    return name.lower() if isinstance(name, str) else str(source).lower()

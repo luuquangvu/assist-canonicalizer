@@ -22,6 +22,16 @@ def test_bm25_validation_errors() -> None:
         BM25Index([], b=1.1)
 
 
+def test_bm25_custom_documents_validate_params_before_fast_paths() -> None:
+    """Verify custom-document scoring validates parameters before empty-index returns."""
+    index = BM25Index([])
+
+    with pytest.raises(ValueError, match="k1 must be positive"):
+        index.score_custom_documents_tokens(("hello",), ["hello"], k1=0)
+    with pytest.raises(ValueError, match="b must be between 0 and 1"):
+        index.score_custom_documents_tokens(("hello",), ["hello"], b=1.1)
+
+
 def test_bm25_index_size() -> None:
     """Verify size property matches document count."""
     doc1 = BM25Document(text="hello", tokens=("hello",))
@@ -131,3 +141,20 @@ def test_bm25_score_custom_documents_with_candidates_and_cache() -> None:
     assert res_str_cached == res_str
     info_doc_after = _analyze_document.cache_info()
     assert info_doc_after.hits == 2
+
+
+def test_bm25_score_custom_documents_falls_back_to_normalized_text() -> None:
+    """Candidate-like objects may expose normalized_text without cached tokens."""
+    index = BM25Index.from_texts(["Hello World", "Testing BM25"])
+
+    class TextOnlyCandidate:
+        """Dummy Candidate-like object without normalized_tokens."""
+
+        def __init__(self, normalized_text: str) -> None:
+            """Initialize the normalized text."""
+            self.normalized_text = normalized_text
+
+    assert index.score_custom_documents(
+        "World",
+        [TextOnlyCandidate("hello world")],
+    ) == index.score_custom_documents("World", ["hello world"])

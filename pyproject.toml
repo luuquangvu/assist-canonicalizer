@@ -64,11 +64,15 @@ indent-style = "space"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 pythonpath = ["."]
 testpaths = ["tests"]
 filterwarnings = [
   "ignore::DeprecationWarning",
   "ignore::pytest.PytestDeprecationWarning",
+]
+markers = [
+  "current_intents: tests that assert the current home-assistant-intents corpus or metadata",
 ]
 addopts = [
   "--quiet",
@@ -76,6 +80,7 @@ addopts = [
   "--cov-fail-under=90",
   "--cov-branch",
   "--timeout=60",
+  "--strict-markers",
 ]
 
 [tool.pyright]

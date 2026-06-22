@@ -66,6 +66,8 @@ class BM25Index:
             for token, idf in self._inverse_document_frequencies.items()
         }
         self._postings = self._build_postings()
+        n = len(self._documents)
+        self._default_idf: float = log(1 + (n + 0.5) / 0.5) if n else 0.0
 
     @classmethod
     def from_texts(cls, texts: Sequence[str], k1: float = 1.5, b: float = 0.75) -> BM25Index:
@@ -104,7 +106,7 @@ class BM25Index:
         if max_score <= 0:
             return (0.0,) * doc_count
         inv_max = 1.0 / max_score
-        return tuple([score * inv_max for score in raw_scores])
+        return tuple(score * inv_max for score in raw_scores)
 
     def _build_document_frequencies(self) -> dict[str, int]:
         """Build document frequency counts for indexed tokens."""
@@ -138,6 +140,47 @@ class BM25Index:
                 precomputed = (idf_mult * frequency) / denominator
                 postings[token].append((document_index, precomputed))
         return {token: tuple(values) for token, values in postings.items()}
+
+    @staticmethod
+    def _validate_bm25_params(k1: float, b: float) -> None:
+        """Raise ValueError if k1 or b are out of the valid BM25 range."""
+        if k1 <= 0:
+            raise ValueError("k1 must be positive")
+        if not 0 <= b <= 1:
+            raise ValueError("b must be between 0 and 1")
+
+    def _build_temp_postings(
+        self,
+        documents: Sequence[str | Any],
+        k1: float,
+        b: float,
+    ) -> tuple[list[Counter[str]], dict[str, list[tuple[int, float]]]]:
+        """Build temporary per-document counters and posting lists for a runtime document set."""
+        avg_len = self._average_length
+        one_minus_b = 1.0 - b
+        b_over_avg = b / avg_len
+
+        doc_token_counters: list[Counter[str]] = []
+        temp_postings: dict[str, list[tuple[int, float]]] = {}
+
+        for doc_idx, doc in enumerate(documents):
+            if isinstance(doc, str):
+                tokens, counter, length = _analyze_document(doc)
+            else:
+                tokens = getattr(doc, "normalized_tokens", None)
+                if tokens is None:
+                    tokens, counter, length = _analyze_document(doc.normalized_text)
+                else:
+                    counter, length = _analyze_tokens(tokens)
+
+            doc_token_counters.append(counter)
+            len_factor = k1 * (one_minus_b + b_over_avg * length)
+            for token, frequency in counter.items():
+                temp_postings.setdefault(token, []).append(
+                    (doc_idx, frequency / (frequency + len_factor))
+                )
+
+        return doc_token_counters, temp_postings
 
     def _score_documents(self, query_tokens: tuple[str, ...]) -> list[float]:
         """Return unnormalized BM25 scores using precomputed posting contributions."""
@@ -178,53 +221,18 @@ class BM25Index:
         b: float | None = None,
     ) -> tuple[float, ...]:
         """Score custom documents using pre-tokenized query tokens."""
-        if not query_tokens or not documents:
-            return tuple(0.0 for _ in documents)
-
-        avg_len = self._average_length
-        if avg_len == 0:
-            return tuple(0.0 for _ in documents)
-
-        document_count = len(self._documents)
-        default_idf = log(1 + (document_count - 0 + 0.5) / (0 + 0.5)) if document_count else 0.0
-
         use_k1 = k1 if k1 is not None else self._k1
         use_b = b if b is not None else self._b
-        if use_k1 <= 0:
-            raise ValueError("k1 must be positive")
-        if not 0 <= use_b <= 1:
-            raise ValueError("b must be between 0 and 1")
+        self._validate_bm25_params(use_k1, use_b)
+
+        if not query_tokens or not documents:
+            return tuple(0.0 for _ in documents)
+        if self._average_length == 0:
+            return tuple(0.0 for _ in documents)
+
+        _, temp_postings = self._build_temp_postings(documents, use_k1, use_b)
+
         use_k1_plus_1 = use_k1 + 1
-        one_minus_b = 1.0 - use_b
-        b_over_avg = use_b / avg_len
-
-        doc_token_counters: list[Counter[str]] = []
-        doc_len_factors: list[float] = []
-        temp_postings: dict[str, list[tuple[int, float]]] = {}
-
-        for doc_idx, doc in enumerate(documents):
-            text: str
-            tokens: tuple[str, ...] | None
-            if isinstance(doc, str):
-                text = doc
-                tokens = None
-            else:
-                text = doc.normalized_text
-                tokens = doc.normalized_tokens
-
-            if tokens is None:
-                tokens, counter, length = _analyze_document(text)
-            else:
-                counter, length = _analyze_tokens(tokens)
-
-            doc_token_counters.append(counter)
-            len_factor = use_k1 * (one_minus_b + b_over_avg * length)
-            doc_len_factors.append(len_factor)
-            for token, frequency in counter.items():
-                temp_postings.setdefault(token, []).append(
-                    (doc_idx, frequency / (frequency + len_factor))
-                )
-
         raw_scores = [0.0] * len(documents)
         seen_tokens: set[str] = set()
         for token in query_tokens:
@@ -234,9 +242,7 @@ class BM25Index:
             postings = temp_postings.get(token)
             if postings is None:
                 continue
-            idf = self._inverse_document_frequencies.get(token)
-            if idf is None:
-                idf = default_idf
+            idf = self._inverse_document_frequencies.get(token, self._default_idf)
             idf_k1_plus_1 = idf * use_k1_plus_1
             for doc_idx, precomputed in postings:
                 raw_scores[doc_idx] += idf_k1_plus_1 * precomputed
@@ -272,8 +278,7 @@ class BM25Index:
         length = len(doc_tokens)
         len_factor = k1 * (one_minus_b + b_over_avg * length)
 
-        document_count = len(self._documents)
-        default_idf = log(1 + (document_count - 0 + 0.5) / (0 + 0.5)) if document_count else 0.0
+        default_idf = self._default_idf
 
         raw_score = 0.0
         seen_tokens: set[str] = set()

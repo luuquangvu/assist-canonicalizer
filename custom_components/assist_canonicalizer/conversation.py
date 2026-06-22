@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
 from homeassistant.components import conversation
@@ -27,13 +29,12 @@ from .const import (
     CONF_FALLBACK_AGENT_ID,
     DATA_RUNTIME,
     DEFAULT_MAX_CANDIDATES,
-    DEFAULT_VALIDATION_CANDIDATES,
     DOMAIN,
     NAME,
     FallbackReason,
 )
 from .grammar_loader import rehydrate_wildcard_text
-from .ranking import accepted_candidate
+from .ranking import RankedCandidate, accepted_candidate, confidence_gate_rejection_reason
 from .runtime import CanonicalizerRuntime
 from .utils import elapsed_ms, normalize_language, resolve_entry_thresholds
 
@@ -109,8 +110,8 @@ class AssistCanonicalizerConversationEntity(
             index = self._runtime.get_index(language)
             if index is None:
                 index = await self._runtime.async_load_index_from_store(self.hass, language)
-                if index is None:
-                    await self._runtime.async_rebuild_index(self.hass, language)
+            if index is None:
+                await self._runtime.async_rebuild_index(self.hass, language)
 
     async def async_reload(self, language: str | None = None) -> None:
         """Reload cached indexes for a language."""
@@ -130,24 +131,27 @@ class AssistCanonicalizerConversationEntity(
                 self.hass,
                 language,
             )
-            if index is None:
-                index = await self._runtime.async_rebuild_index(
-                    self.hass,
-                    language,
-                )
-        if index is None or index.candidate_count == 0:
+        if index is None:
+            index = await self._runtime.async_rebuild_index(
+                self.hass,
+                language,
+            )
+        if index is None:
             self._runtime.update_diagnostics(last_fallback_reason=FallbackReason.EMPTY_INDEX)
             return await self._delegate_raw_text(user_input)
 
         try:
+            min_confidence, min_margin = resolve_entry_thresholds(self._entry)
             ranked = await self.hass.async_add_executor_job(
-                self._runtime.rank_with_dynamic_candidates,
+                partial(
+                    self._runtime.rank_with_dynamic_candidates,
+                    min_confidence=min_confidence,
+                ),
                 language,
                 index,
                 user_input.text,
                 DEFAULT_MAX_CANDIDATES,
             )
-            min_confidence, min_margin = resolve_entry_thresholds(self._entry)
             selected = accepted_candidate(
                 ranked,
                 min_confidence=min_confidence,
@@ -161,47 +165,76 @@ class AssistCanonicalizerConversationEntity(
             return await self._delegate_raw_text(user_input)
 
         if selected is None:
-            self._runtime.update_diagnostics(last_fallback_reason=FallbackReason.RANKING_FAILED)
+            self._runtime.update_diagnostics(
+                last_fallback_reason=confidence_gate_rejection_reason(
+                    ranked,
+                    min_confidence=min_confidence,
+                    min_margin=min_margin,
+                )
+            )
             return await self._delegate_raw_text(user_input)
 
-        validation_result = await self._async_validate_ranked_candidates(ranked, user_input)
-        if validation_result is not None:
-            return validation_result
+        for ranked_candidate in self._ranked_validation_candidates(
+            ranked,
+            selected,
+            min_confidence,
+        ):
+            validation_result = await self._async_validate_ranked_candidate(
+                ranked_candidate,
+                user_input,
+            )
+            if validation_result is not None:
+                self._runtime.update_diagnostics(clear_last_error=True)
+                return validation_result
 
         self._runtime.update_diagnostics(last_fallback_reason=FallbackReason.VALIDATION_FAILED)
         return await self._delegate_raw_text(user_input)
 
-    async def _async_validate_ranked_candidates(
+    async def _async_validate_ranked_candidate(
         self,
-        ranked: tuple[Any, ...],
+        ranked_candidate: RankedCandidate,
         user_input: ConversationInput,
     ) -> ConversationResult | None:
-        """Validate ranked canonical candidates through the primary Hassil agent.
+        """Validate one accepted canonical candidate through the primary Hassil agent.
 
         Wildcard placeholders (e.g. ``shopping_list_item``) in candidate text
         are rehydrated from the original query before delegation so that the
         downstream agent receives real free-text values.
         """
-        for ranked_candidate in ranked[:DEFAULT_VALIDATION_CANDIDATES]:
-            candidate = ranked_candidate.candidate
-            candidate_text = candidate.text
-            rehydrated = rehydrate_wildcard_text(
-                candidate_text, user_input.text, user_input.language
-            )
-            if candidate.has_wildcard and rehydrated == candidate_text:
-                continue
+        candidate = ranked_candidate.candidate
+        candidate_text = candidate.text
+        rehydrated = rehydrate_wildcard_text(candidate_text, user_input.text, user_input.language)
+        if candidate.has_wildcard and rehydrated == candidate_text:
+            return None
+        try:
             validation_result = await self._delegate_text(
                 rehydrated,
                 user_input,
                 primary=True,
             )
-            if not self._result_has_error(validation_result):
-                return validation_result
-        return None
+        except Exception as err:
+            self._runtime.update_diagnostics(last_error=str(err))
+            return None
+        return None if self._result_has_error(validation_result) else validation_result
 
     async def _delegate_raw_text(self, user_input: ConversationInput) -> ConversationResult:
         """Delegate the original user text to the configured fallback path."""
         return await self._delegate_text(user_input.text, user_input, primary=False)
+
+    @staticmethod
+    def _ranked_validation_candidates(
+        ranked: Sequence[RankedCandidate],
+        selected: RankedCandidate,
+        min_confidence: float,
+    ) -> tuple[RankedCandidate, ...]:
+        """Return ranked candidates to validate, preferring the selected candidate."""
+        candidates = [selected]
+        candidates.extend(
+            candidate
+            for candidate in ranked
+            if candidate is not selected and candidate.scores.final_score >= min_confidence
+        )
+        return tuple(candidates)
 
     async def _delegate_text(
         self,

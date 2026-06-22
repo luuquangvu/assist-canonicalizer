@@ -6,7 +6,7 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from homeassistant.core import ServiceCall
+from homeassistant.core import ServiceCall, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
 from voluptuous import Invalid
 
@@ -17,6 +17,7 @@ from custom_components.assist_canonicalizer.const import (
     DATA_RUNTIME,
     DOMAIN,
     SERVICE_CLEAR_INDEX,
+    SERVICE_DIAGNOSTICS,
     SERVICE_DUMP_CANDIDATES,
     SERVICE_REBUILD_INDEX,
     SERVICE_TEST_MATCH,
@@ -24,6 +25,11 @@ from custom_components.assist_canonicalizer.const import (
 from custom_components.assist_canonicalizer.indexer import build_index
 from custom_components.assist_canonicalizer.runtime import CanonicalizerRuntime
 from custom_components.assist_canonicalizer.services import (
+    CLEAR_INDEX_SCHEMA,
+    DIAGNOSTICS_SCHEMA,
+    DUMP_CANDIDATES_SCHEMA,
+    REBUILD_INDEX_SCHEMA,
+    TEST_MATCH_SCHEMA,
     _handle_clear_index,
     _handle_diagnostics,
     _handle_dump_candidates,
@@ -35,6 +41,14 @@ from custom_components.assist_canonicalizer.services import (
     async_unload_services,
     validate_supported_language,
 )
+
+_EXPECTED_SERVICE_SCHEMAS = {
+    SERVICE_TEST_MATCH: TEST_MATCH_SCHEMA,
+    SERVICE_REBUILD_INDEX: REBUILD_INDEX_SCHEMA,
+    SERVICE_CLEAR_INDEX: CLEAR_INDEX_SCHEMA,
+    SERVICE_DIAGNOSTICS: DIAGNOSTICS_SCHEMA,
+    SERVICE_DUMP_CANDIDATES: DUMP_CANDIDATES_SCHEMA,
+}
 
 
 class MockConfig:
@@ -80,6 +94,30 @@ class MockConfigEntry:
         """Initialize options and data properties."""
         self.options = options
         self.data = data
+
+
+class _ServiceRegistrationRecorder:
+    """Record service callbacks registered by async_setup_services."""
+
+    def __init__(self) -> None:
+        """Initialize service callback storage."""
+        self.registered_services: dict[str, Any] = {}
+        self.registration_kwargs: dict[str, dict[str, Any]] = {}
+
+    def __call__(
+        self,
+        domain: str,
+        service: str,
+        callback: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """Mock service registration callback."""
+        assert domain == DOMAIN, f"Expected domain {DOMAIN}, got {domain}"
+        assert kwargs.get("schema") is _EXPECTED_SERVICE_SCHEMAS[service]
+        assert kwargs.get("supports_response") is SupportsResponse.ONLY
+        self.registered_services[service] = callback
+        self.registration_kwargs[service] = dict(kwargs)
 
 
 def test_service_language_normalizes_cache_keys() -> None:
@@ -244,16 +282,11 @@ def test_runtime_from_hass_skips_invalid_runtime() -> None:
 async def test_async_services_dispatch() -> None:
     """Test that registered service callbacks dispatch successfully to handlers."""
     hass = MagicMock()
-    registered_services = {}
-
-    def mock_register(domain: str, service: str, callback: Any, *args: Any, **kwargs: Any) -> None:
-        """Mock service registration callback."""
-        registered_services[service] = callback
-
-    hass.services.async_register = mock_register
+    recorder = _ServiceRegistrationRecorder()
+    hass.services.async_register = recorder
 
     async_setup_services(hass)
-    assert len(registered_services) == 5
+    assert len(recorder.registered_services) == 5
 
     # Mock corresponding handlers called inside callbacks
     with (
@@ -273,27 +306,36 @@ async def test_async_services_dispatch() -> None:
             "custom_components.assist_canonicalizer.services._handle_clear_index",
             AsyncMock(return_value={"status": "cleared"}),
         ) as mock_clear,
+        patch(
+            "custom_components.assist_canonicalizer.services._handle_diagnostics",
+            MagicMock(return_value={"status": "diagnosed"}),
+        ) as mock_diagnostics,
     ):
         call = MockServiceCall({})
 
         # Test handle_test_match
-        res_test = await registered_services[SERVICE_TEST_MATCH](call)
+        res_test = await recorder.registered_services[SERVICE_TEST_MATCH](call)
         assert res_test == {"status": "tested"}
         mock_test.assert_called_once_with(hass, call)
 
         # Test handle_rebuild_index
-        res_rebuild = await registered_services[SERVICE_REBUILD_INDEX](call)
+        res_rebuild = await recorder.registered_services[SERVICE_REBUILD_INDEX](call)
         assert res_rebuild == {"status": "rebuilt"}
         mock_rebuild.assert_called_once_with(hass, call)
 
-        res_clear = await registered_services[SERVICE_CLEAR_INDEX](call)
+        res_clear = await recorder.registered_services[SERVICE_CLEAR_INDEX](call)
         assert res_clear == {"status": "cleared"}
         mock_clear.assert_called_once_with(hass, call)
 
         # Test handle_dump_candidates
-        res_dump = await registered_services[SERVICE_DUMP_CANDIDATES](call)
+        res_dump = await recorder.registered_services[SERVICE_DUMP_CANDIDATES](call)
         assert res_dump == {"status": "dumped"}
         mock_dump.assert_called_once_with(hass, call)
+
+        # Test handle_diagnostics
+        res_diagnostics = recorder.registered_services[SERVICE_DIAGNOSTICS](call)
+        assert res_diagnostics == {"status": "diagnosed"}
+        mock_diagnostics.assert_called_once_with(hass, call)
 
 
 def test_validate_supported_language() -> None:
