@@ -17,7 +17,8 @@
       "expected_canonical": "keuken lamp aan",
       "category": "exact_match",
       "expected_slots": {
-        "area": "keuken"
+        "area": "keuken",
+        "domain": "light"
       }
     },
     {
@@ -27,7 +28,8 @@
       "expected_canonical": "woonkamer lamp aan",
       "category": "exact_match",
       "expected_slots": {
-        "area": "woonkamer"
+        "area": "woonkamer",
+        "domain": "light"
       }
     },
     {
@@ -130,11 +132,10 @@
       "query": "Schakel kueken lamp in",
       "language": "nl",
       "expected_intent": "HassTurnOn",
-      "expected_canonical": "Schakel keuken lamp in",
+      "expected_canonical": "Schakel keukenlamp in",
       "category": "spelling_mistake",
       "expected_slots": {
-        "area": "keuken",
-        "domain": "light"
+        "name": "keukenlamp"
       }
     },
     {
@@ -175,11 +176,10 @@
       "query": "wil je alsjeblieft de keuken lamp aandoen",
       "language": "nl",
       "expected_intent": "HassTurnOn",
-      "expected_canonical": "keuken lamp aan",
+      "expected_canonical": "keukenlamp aan",
       "category": "extra_words",
       "expected_slots": {
-        "area": "keuken",
-        "domain": "light"
+        "name": "keukenlamp"
       }
     },
     {
@@ -307,10 +307,10 @@
       "category": "complex_distortion"
     },
     {
-      "query": "maak de keuken verlicht",
+      "query": "zet de keuken in het licht",
       "language": "nl",
       "expected_intent": "HassTurnOn",
-      "expected_canonical": "keuken lamp aan",
+      "expected_canonical": "licht in de keuken aan",
       "category": "synonym_paraphrase",
       "expected_slots": {
         "area": "keuken",
@@ -321,7 +321,7 @@
       "query": "zet de woonkamer in het licht",
       "language": "nl",
       "expected_intent": "HassTurnOn",
-      "expected_canonical": "woonkamer lamp aan",
+      "expected_canonical": "licht in de woonkamer aan",
       "category": "synonym_paraphrase",
       "expected_slots": {
         "area": "woonkamer",
@@ -339,7 +339,7 @@
       }
     },
     {
-      "query": "doe de tv uit",
+      "query": "zet de televisie op stand-by",
       "language": "nl",
       "expected_intent": "HassTurnOff",
       "expected_canonical": "televisie uit",
@@ -382,14 +382,17 @@
       "query": "het is te warm hier binnen",
       "language": "nl",
       "expected_intent": "HassClimateSetTemperature",
-      "expected_canonical": "zet de temperatuur naar 0",
-      "category": "semantic_challenge"
+      "expected_canonical": "zet de temperatuur naar 20",
+      "category": "semantic_challenge",
+      "expected_slots": {
+        "temperature": "20"
+      }
     },
     {
       "query": "ik zie niks meer in de keuken",
       "language": "nl",
       "expected_intent": "HassTurnOn",
-      "expected_canonical": "keuken lamp aan",
+      "expected_canonical": "licht in de keuken aan",
       "category": "semantic_challenge",
       "expected_slots": {
         "area": "keuken",

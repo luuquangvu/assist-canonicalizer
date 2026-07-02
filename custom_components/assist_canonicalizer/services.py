@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from functools import partial
 from typing import Any
 
 import voluptuous as vol
@@ -55,10 +56,9 @@ def validate_supported_language(value: Any) -> str:
         return lang
 
     get_languages = intents_module.get_languages
-    matches = language_module.matches(lang, set(get_languages()))
-    if not matches:
-        raise vol.Invalid(f"Language '{lang}' is not supported by Home Assistant")
-    return matches[0]
+    if matches := language_module.matches(lang, set(get_languages())):
+        return matches[0]
+    raise vol.Invalid(f"Language '{lang}' is not supported by Home Assistant")
 
 
 TEST_MATCH_SCHEMA = vol.Schema(
@@ -81,48 +81,31 @@ DUMP_CANDIDATES_SCHEMA = vol.Schema(
 
 def async_setup_services(hass: Any) -> None:
     """Register Assist Canonicalizer services."""
-
-    async def handle_test_match(call: ServiceCall) -> dict[str, Any]:
-        """Handle test_match service calls."""
-        return await _handle_test_match(hass, call)
-
-    async def handle_rebuild_index(call: ServiceCall) -> dict[str, Any]:
-        """Handle rebuild_index service calls."""
-        return await _handle_rebuild_index(hass, call)
-
-    async def handle_dump_candidates(call: ServiceCall) -> dict[str, Any]:
-        """Handle dump_candidates service calls."""
-        return await _handle_dump_candidates(hass, call)
-
-    async def handle_clear_index(call: ServiceCall) -> dict[str, Any]:
-        """Handle clear_index service calls."""
-        return await _handle_clear_index(hass, call)
-
     hass.services.async_register(
         DOMAIN,
         SERVICE_TEST_MATCH,
-        handle_test_match,
+        partial(_dispatch_test_match, hass),
         schema=TEST_MATCH_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN,
         SERVICE_REBUILD_INDEX,
-        handle_rebuild_index,
+        partial(_dispatch_rebuild_index, hass),
         schema=REBUILD_INDEX_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN,
         SERVICE_CLEAR_INDEX,
-        handle_clear_index,
+        partial(_dispatch_clear_index, hass),
         schema=CLEAR_INDEX_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN,
         SERVICE_DIAGNOSTICS,
-        lambda call: _handle_diagnostics(hass, call),
+        partial(_dispatch_diagnostics, hass),
         schema=DIAGNOSTICS_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
@@ -130,10 +113,35 @@ def async_setup_services(hass: Any) -> None:
     hass.services.async_register(
         DOMAIN,
         SERVICE_DUMP_CANDIDATES,
-        handle_dump_candidates,
+        partial(_dispatch_dump_candidates, hass),
         schema=DUMP_CANDIDATES_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
+
+
+async def _dispatch_test_match(hass: Any, call: ServiceCall) -> dict[str, Any]:
+    """Dispatch test_match service calls."""
+    return await _handle_test_match(hass, call)
+
+
+async def _dispatch_rebuild_index(hass: Any, call: ServiceCall) -> dict[str, Any]:
+    """Dispatch rebuild_index service calls."""
+    return await _handle_rebuild_index(hass, call)
+
+
+async def _dispatch_clear_index(hass: Any, call: ServiceCall) -> dict[str, Any]:
+    """Dispatch clear_index service calls."""
+    return await _handle_clear_index(hass, call)
+
+
+def _dispatch_diagnostics(hass: Any, call: ServiceCall) -> dict[str, Any]:
+    """Dispatch diagnostics service calls."""
+    return _handle_diagnostics(hass, call)
+
+
+async def _dispatch_dump_candidates(hass: Any, call: ServiceCall) -> dict[str, Any]:
+    """Dispatch dump_candidates service calls."""
+    return await _handle_dump_candidates(hass, call)
 
 
 def async_unload_services(hass: Any) -> None:
@@ -147,27 +155,22 @@ def async_unload_services(hass: Any) -> None:
 
 async def _handle_test_match(hass: Any, call: ServiceCall) -> dict[str, Any]:
     """Return ranked candidates for a text input with lexical scoring and custom thresholds."""
-    runtime = _runtime_from_hass(hass)
+    runtime, entry = _runtime_entry_from_hass(hass)
     language = _service_language(hass, call)
     text = call.data[ATTR_TEXT]
     index = await _index_for_language(hass, runtime, language, rebuild_if_missing=True)
     if index is None:
         raise HomeAssistantError("Assist Canonicalizer index could not be built")
+    min_confidence, min_margin = resolve_entry_thresholds(entry)
+
     ranked = await hass.async_add_executor_job(
-        runtime.rank_with_dynamic_candidates,
+        partial(
+            runtime.rank_with_dynamic_candidates,
+            min_confidence=min_confidence,
+        ),
         language,
         index,
         text,
-    )
-    domain_data = hass.data.get(DOMAIN, {})
-    entry = None
-    for entry_data in domain_data.values():
-        if entry_data.get(DATA_RUNTIME) is runtime:
-            entry = entry_data.get("entry")
-            break
-
-    min_confidence, min_margin = (
-        resolve_entry_thresholds(entry) if entry else resolve_entry_thresholds(None)
     )
 
     selected = accepted_candidate(
@@ -195,6 +198,8 @@ async def _handle_rebuild_index(hass: Any, call: ServiceCall) -> dict[str, Any]:
     language = _service_language(hass, call)
     started_at = time.monotonic()
     index = await _rebuild_index(hass, runtime, language)
+    if index is None:
+        raise HomeAssistantError("Index rebuild failed or was cancelled")
     return {
         ATTR_LANGUAGE: language,
         ATTR_CANDIDATE_COUNT: index.candidate_count,
@@ -303,18 +308,24 @@ async def _rebuild_index(
     hass: Any,
     runtime: CanonicalizerRuntime,
     language: str,
-) -> CanonicalIndex:
+) -> CanonicalIndex | None:
     """Rebuild an index once outside the Home Assistant event loop."""
     return await runtime.async_rebuild_index(hass, language)
 
 
 def _runtime_from_hass(hass: Any) -> CanonicalizerRuntime:
     """Return the active runtime object."""
+    runtime, _entry = _runtime_entry_from_hass(hass)
+    return runtime
+
+
+def _runtime_entry_from_hass(hass: Any) -> tuple[CanonicalizerRuntime, Any]:
+    """Return the active runtime object and its config entry."""
     domain_data = hass.data.get(DOMAIN, {})
     for entry_data in domain_data.values():
         runtime = entry_data.get(DATA_RUNTIME)
         if isinstance(runtime, CanonicalizerRuntime):
-            return runtime
+            return runtime, entry_data.get("entry")
     raise HomeAssistantError("Assist Canonicalizer is not loaded")
 
 

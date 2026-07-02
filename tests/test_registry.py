@@ -71,12 +71,13 @@ def test_entity_names_extraction() -> None:
     hass = MagicMock()
     er = MagicMock()
 
-    er.async_get_entity_aliases = MagicMock(return_value=["Alias1", "Alias2"])
+    er.async_get_entity_aliases = MagicMock(return_value=[" Alias1 ", "Alias2"])
     entry = SimpleNamespace(name="My Device", original_name="Orig Device")
     state = SimpleNamespace(name="State Device")
 
     names = list(_entity_names(hass, er, entry, state))
     assert "Alias1" in names
+    assert " Alias1 " not in names
     assert "My Device" in names
 
     er.async_get_entity_aliases = MagicMock(side_effect=AttributeError)
@@ -85,6 +86,15 @@ def test_entity_names_extraction() -> None:
 
     names = list(_entity_names(hass, er, None, state))
     assert "State Device" in names
+
+    er.async_get_entity_aliases = MagicMock(return_value=[])
+    entry_without_names = SimpleNamespace(name=None, original_name=None)
+    names = list(_entity_names(hass, er, entry_without_names, state))
+    assert names == ["State Device"]
+
+    entry_with_blank_name = SimpleNamespace(name="   ", original_name=" Orig Device ")
+    names = list(_entity_names(hass, er, entry_with_blank_name, state))
+    assert names == ["Orig Device"]
 
 
 def test_registry_names_missing_registries(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -177,23 +187,7 @@ def test_exposed_entity_names_by_domain_normal() -> None:
         patch.object(registry.fr, "async_get", return_value=mock_floor_registry),
         patch.object(registry, "async_should_expose", return_value=True),
     ):
-        # Test exposed_entity_names
-        exposed = _exposed_entity_names_by_domain(hass)
-        assert "light" in exposed
-        assert "switch" in exposed
-        assert "alias_kitchen" in exposed["light"]
-        assert "Bedroom Switch" in exposed["switch"]
-
-        # Test area_names
-        areas = _area_names(hass)
-        assert "Kitchen Area" in areas
-        assert "kitchen_alias_1" in areas
-
-        # Test floor_names
-        floors = _floor_names(hass)
-        assert "Ground Floor" in floors
-        assert "floor_alias_1" in floors
-
+        _test_exposed_entity_names_by_domain_normal(hass)
     # Test AttributeError/RuntimeError handling in registries
     with (
         patch.object(registry, "_HAS_HA_REGISTRIES", True),
@@ -212,3 +206,23 @@ def test_exposed_entity_names_by_domain_normal() -> None:
         patch.object(registry, "async_should_expose", side_effect=KeyError),
     ):
         assert _exposed_entity_names_by_domain(hass) == {}
+
+
+def _test_exposed_entity_names_by_domain_normal(hass: Any) -> None:
+    """Test _exposed_entity_names_by_domain with normal mock registries."""
+    # Test exposed_entity_names
+    exposed = _exposed_entity_names_by_domain(hass)
+    assert "light" in exposed
+    assert "switch" in exposed
+    assert "alias_kitchen" in exposed["light"]
+    assert "Bedroom Switch" in exposed["switch"]
+
+    # Test area_names
+    areas = _area_names(hass)
+    assert "Kitchen Area" in areas
+    assert "kitchen_alias_1" in areas
+
+    # Test floor_names
+    floors = _floor_names(hass)
+    assert "Ground Floor" in floors
+    assert "floor_alias_1" in floors

@@ -18,22 +18,15 @@ from custom_components.assist_canonicalizer.config_flow import (
 
 def test_available_fallback_agents_includes_conversation_entities(
     monkeypatch: pytest.MonkeyPatch,
+    fallback_agent_manager_factory: Any,
 ) -> None:
     """Include ConversationEntity agent ids alongside config-entry agents."""
     data_component_key = object()
+    manager = fallback_agent_manager_factory(
+        [SimpleNamespace(id="entry-agent-id", name="Entry Agent")]
+    )
 
-    class FakeManager:
-        """Fake Home Assistant conversation agent manager."""
-
-        def async_get_agent_info(self) -> list[SimpleNamespace]:
-            """Return config-entry conversation agent metadata."""
-            return [SimpleNamespace(id="entry-agent-id", name="Entry Agent")]
-
-    def get_agent_manager(hass: Any) -> FakeManager:
-        """Return the fake conversation agent manager."""
-        return FakeManager()
-
-    monkeypatch.setattr(config_flow, "get_agent_manager", get_agent_manager)
+    monkeypatch.setattr(config_flow, "get_agent_manager", lambda hass: manager)
     monkeypatch.setattr(config_flow, "DATA_COMPONENT", data_component_key)
     monkeypatch.setattr(config_flow, "HOME_ASSISTANT_AGENT", "conversation.home_assistant")
     monkeypatch.setattr(config_flow, "_HAS_CONVERSATION_AGENTS", True)
@@ -65,41 +58,24 @@ def test_available_fallback_agents_includes_conversation_entities(
 
 def test_available_fallback_agents_excludes_own_agent_and_entity(
     monkeypatch: pytest.MonkeyPatch,
+    fallback_agent_manager_factory: Any,
+    mock_conversation_entity_type: type,
 ) -> None:
     """Exclude the canonicalizer's own entity and agent from fallback choices."""
     data_component_key = object()
+    manager = fallback_agent_manager_factory(
+        [
+            SimpleNamespace(id="entry-agent-id", name="Entry Agent"),
+            SimpleNamespace(id="canonicalizer-config-entry-id", name="Assist Canonicalizer Agent"),
+        ],
+        {"canonicalizer-config-entry-id": mock_conversation_entity_type()},
+    )
 
-    # Create a dummy ConversationEntity mock class
-    class MockConversationEntity:
-        """Mock conversation entity for isinstance checks."""
-
-    class FakeManager:
-        """Fake conversation manager with get_agent and get_agent_info."""
-
-        def async_get_agent_info(self) -> list[SimpleNamespace]:
-            """Return list of agent metadata."""
-            return [
-                SimpleNamespace(id="entry-agent-id", name="Entry Agent"),
-                SimpleNamespace(
-                    id="canonicalizer-config-entry-id", name="Assist Canonicalizer Agent"
-                ),
-            ]
-
-        def async_get_agent(self, agent_id: str) -> Any:
-            """Return the agent if found."""
-            if agent_id == "canonicalizer-config-entry-id":
-                return MockConversationEntity()
-            return None
-
-    def get_agent_manager(hass: Any) -> FakeManager:
-        """Return the fake conversation agent manager."""
-        return FakeManager()
-
-    monkeypatch.setattr(config_flow, "get_agent_manager", get_agent_manager)
+    monkeypatch.setattr(config_flow, "get_agent_manager", lambda hass: manager)
     monkeypatch.setattr(config_flow, "DATA_COMPONENT", data_component_key)
     monkeypatch.setattr(config_flow, "HOME_ASSISTANT_AGENT", "conversation.home_assistant")
     monkeypatch.setattr(config_flow, "_HAS_CONVERSATION_AGENTS", True)
-    monkeypatch.setattr(config_flow, "ConversationEntity", MockConversationEntity)
+    monkeypatch.setattr(config_flow, "ConversationEntity", mock_conversation_entity_type)
 
     class MockRegistryEntry:
         """Mock registry entry containing config_entry_id."""

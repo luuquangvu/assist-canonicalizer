@@ -18,6 +18,7 @@ REPO_ROOT: Final[Path] = Path(__file__).resolve().parent.parent
 REPORT_JSON_PATH: Final[Path] = REPO_ROOT / "benchmark" / "performance_benchmark_report.json"
 README_EN_PATH: Final[Path] = REPO_ROOT / "README.md"
 README_VI_PATH: Final[Path] = REPO_ROOT / "README.vi.md"
+BENCHMARK_DEPENDENCIES: Final[tuple[str, ...]] = ("homeassistant", "home-assistant-intents")
 
 OVERALL_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"(<!-- BENCHMARK_OVERALL_START -->)(.*?)(<!-- BENCHMARK_OVERALL_END -->)", re.DOTALL
@@ -25,6 +26,16 @@ OVERALL_PATTERN: Final[re.Pattern[str]] = re.compile(
 LANGS_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"(<!-- BENCHMARK_LANGS_START -->)(.*?)(<!-- BENCHMARK_LANGS_END -->)", re.DOTALL
 )
+
+
+def _format_md_table_row(
+    row: tuple[str, ...],
+    aligns: list[str],
+    widths: list[int],
+) -> str:
+    """Return one Markdown table row."""
+    parts = [f" {c:{a}{w}} " for c, a, w in zip(row, aligns, widths, strict=True)]
+    return "|" + "|".join(parts) + "|"
 
 
 def _render_md_table(
@@ -65,11 +76,7 @@ def _render_md_table(
             aligns.extend([aligns[-1]] * (ncols - len(aligns)))
         aligns = aligns[:ncols]
 
-    def _fmt(row: tuple[str, ...]) -> str:
-        parts = [f" {c:{a}{w}} " for c, a, w in zip(row, aligns, widths, strict=True)]
-        return "|" + "|".join(parts) + "|"
-
-    hdr = _fmt(headers)
+    hdr = _format_md_table_row(headers, aligns, widths)
 
     # Markdown separator with alignment colons (colon uses 1 char of width)
     sep_parts: list[str] = []
@@ -81,7 +88,7 @@ def _render_md_table(
             sep_parts.append(f" :{'-' * dashes} ")
     sep = "|" + "|".join(sep_parts) + "|"
 
-    data = [_fmt(row) for row in rows]
+    data = [_format_md_table_row(row, aligns, widths) for row in rows]
     return "\n".join([hdr, sep, *data])
 
 
@@ -152,13 +159,38 @@ def _get_languages(report: dict[str, Any]) -> list[str]:
     if not isinstance(languages_section, dict) or not languages_section:
         raise KeyError("Missing or empty 'languages' section in report")
 
-    keys = [k for k in languages_section if isinstance(k, str)]
-    if not keys:
-        raise KeyError("No valid string language keys found in 'languages' section")
+    if keys := [k for k in languages_section if isinstance(k, str)]:
+        return sorted(
+            keys,
+            key=lambda lang: "0_en" if lang.lower() == "en" else f"1_{lang.lower()}",
+        )
+    raise KeyError("No valid string language keys found in 'languages' section")
 
-    return sorted(
-        keys,
-        key=lambda lang: "0_en" if lang.lower() == "en" else f"1_{lang.lower()}",
+
+def _get_dependency_versions(report: dict[str, Any]) -> dict[str, str]:
+    """Return benchmark dependency versions from the report metadata."""
+    raw_versions = report.get("dependency_versions", {})
+    versions = raw_versions if isinstance(raw_versions, dict) else {}
+    result: dict[str, str] = {}
+    for package_name in BENCHMARK_DEPENDENCIES:
+        value = versions.get(package_name)
+        result[package_name] = value if isinstance(value, str) and value.strip() else "not recorded"
+    return result
+
+
+def _generate_versions_note(report: dict[str, Any], is_vi: bool) -> str:
+    """Generate a localized dependency-version note for benchmark results."""
+    versions = _get_dependency_versions(report)
+    ha_version = versions["homeassistant"]
+    intents_version = versions["home-assistant-intents"]
+    if is_vi:
+        return (
+            f"> Phiên bản phụ thuộc benchmark: `homeassistant` {ha_version}, "
+            f"`home-assistant-intents` {intents_version}."
+        )
+    return (
+        f"> Benchmark dependency versions: `homeassistant` {ha_version}, "
+        f"`home-assistant-intents` {intents_version}."
     )
 
 
@@ -211,7 +243,8 @@ def _generate_overall_section(report: dict[str, Any], is_vi: bool) -> str:
         )
 
     table = _render_md_table(headers, data_rows, alignments="<>")
-    return f"\n\n{table}\n\n{summary_sentence}\n\n"
+    versions_note = _generate_versions_note(report, is_vi=is_vi)
+    return f"\n\n{versions_note}\n\n{table}\n\n{summary_sentence}\n\n"
 
 
 def _generate_langs_section(report: dict[str, Any], is_vi: bool) -> str:
@@ -255,19 +288,24 @@ def _generate_langs_section(report: dict[str, Any], is_vi: bool) -> str:
 
         lang_upper = lang.upper()
 
-        data_rows.append(
-            (lang_upper, "`hassil`", f"{hass_acc:.1f}%", f"{hass_mis:.1f}%", f"{hass_fall:.1f}%")
-        )
-        data_rows.append(
+        data_rows.extend(
             (
-                lang_upper,
-                "`lexical`",
-                f"**{lex_acc:.1f}%**",
-                f"**{lex_mis:.1f}%**",
-                f"**{lex_fall:.1f}%**",
+                (
+                    lang_upper,
+                    "`hassil`",
+                    f"{hass_acc:.1f}%",
+                    f"{hass_mis:.1f}%",
+                    f"{hass_fall:.1f}%",
+                ),
+                (
+                    lang_upper,
+                    "`lexical`",
+                    f"**{lex_acc:.1f}%**",
+                    f"**{lex_mis:.1f}%**",
+                    f"**{lex_fall:.1f}%**",
+                ),
             )
         )
-
     table = _render_md_table(headers, data_rows, alignments="<<>")
     return "\n\n" + table + "\n\n"
 
@@ -310,20 +348,25 @@ def main() -> None:
     try:
         report = _load_report(REPORT_JSON_PATH)
 
-        overall_en = _generate_overall_section(report, is_vi=False)
-        langs_en = _generate_langs_section(report, is_vi=False)
-        _update_file(README_EN_PATH, overall_content=overall_en, langs_content=langs_en)
-
-        overall_vi = _generate_overall_section(report, is_vi=True)
-        langs_vi = _generate_langs_section(report, is_vi=True)
-        _update_file(README_VI_PATH, overall_content=overall_vi, langs_content=langs_vi)
-
+        _update_readme_benchmark(report, False, README_EN_PATH)
+        _update_readme_benchmark(report, True, README_VI_PATH)
         print("Benchmark updates completed successfully.")
 
     except Exception as err:
         print(f"Error updating README files: {err}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
         raise SystemExit(1) from err
+
+
+def _update_readme_benchmark(
+    report: dict[str, Any],
+    is_vi: bool,
+    file_path: Path,
+) -> None:
+    """Update benchmark content for the target README file."""
+    overall = _generate_overall_section(report, is_vi=is_vi)
+    langs = _generate_langs_section(report, is_vi=is_vi)
+    _update_file(file_path, overall_content=overall, langs_content=langs)
 
 
 if __name__ == "__main__":

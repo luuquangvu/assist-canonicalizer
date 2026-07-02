@@ -2,8 +2,16 @@
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Iterable, Mapping
 from typing import Any, cast
+
+from .const import (
+    AREA_SLOT_NAMES,
+    ASSISTANT_CONVERSATION,
+    ENTITY_SLOT_NAMES,
+    FLOOR_SLOT_NAMES,
+)
 
 async_should_expose: Any = cast(Any, None)
 ar: Any = cast(Any, None)
@@ -29,11 +37,6 @@ except (ImportError, RuntimeError):
     er = cast(Any, None)
     fr = cast(Any, None)
     _HAS_HA_REGISTRIES = False
-
-ASSISTANT_CONVERSATION = "conversation"
-ENTITY_SLOT_NAMES = ("name", "entity", "entity_name")
-AREA_SLOT_NAMES = ("area", "area_name")
-FLOOR_SLOT_NAMES = ("floor", "floor_name")
 
 
 def async_registry_slot_values(hass: Any) -> dict[str, tuple[str, ...]]:
@@ -129,13 +132,15 @@ def _entity_names(hass: Any, er: Any, entry: Any, state: Any) -> Iterable[str]:
     """Yield spoken entity names from registry aliases or state names."""
     has_yielded = False
     if entry is not None:
-        try:
-            yield from er.async_get_entity_aliases(hass, entry, allow_empty=False)
-            has_yielded = True
-        except (AttributeError, RuntimeError, ValueError):
-            pass
-        name = getattr(entry, "name", None) or getattr(entry, "original_name", None)
-        if isinstance(name, str):
+        with contextlib.suppress(AttributeError, RuntimeError, ValueError):
+            for alias in er.async_get_entity_aliases(hass, entry, allow_empty=False):
+                if isinstance(alias, str) and (cleaned_alias := alias.strip()):
+                    yield cleaned_alias
+                    has_yielded = True
+        name = _stripped_or_none(getattr(entry, "name", None)) or _stripped_or_none(
+            getattr(entry, "original_name", None)
+        )
+        if name is not None:
             yield name
             has_yielded = True
     if not has_yielded:
@@ -154,6 +159,14 @@ def _area_names(hass: Any) -> tuple[str, ...]:
     except (AttributeError, RuntimeError):
         return ()
     return tuple(_deduplicate_texts(_entry_names_and_aliases(areas)))
+
+
+def _stripped_or_none(value: Any) -> str | None:
+    """Return stripped text when non-empty, otherwise None."""
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
 
 
 def _floor_names(hass: Any) -> tuple[str, ...]:

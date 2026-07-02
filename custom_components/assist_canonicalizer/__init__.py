@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import logging
+from functools import partial
 from typing import Any, cast
 
 from homeassistant.const import Platform
 
 from .const import (
+    ASSISTANT_CONVERSATION,
     DATA_RUNTIME,
     DOMAIN,
 )
@@ -96,15 +98,10 @@ async def async_setup_entry(
     runtime = CanonicalizerRuntime()
     runtime.configure_config_path(hass.config.path)
 
-    def intent_updates_callback(intents_update: Any) -> None:
-        """Update intent sources and trigger background rebuilds for active languages."""
-        active_languages = list(runtime.indexes)
-        runtime.update_intent_sources(intents_update)
-        for language in active_languages:
-            hass.add_job(runtime.async_rebuild_index, hass, language)
-
     runtime.add_cleanup_callback(
-        agent_manager.get_agent_manager(hass).subscribe_intents(intent_updates_callback)
+        agent_manager.get_agent_manager(hass).subscribe_intents(
+            partial(_handle_intent_updates, hass, runtime)
+        )
     )
     _refresh_registry_slot_values(hass, runtime)
     _subscribe_registry_updates(hass, runtime)
@@ -155,25 +152,13 @@ def _refresh_registry_slot_values(
 
 def _subscribe_registry_updates(hass: HomeAssistantInstance, runtime: CanonicalizerRuntime) -> None:
     """Subscribe to Home Assistant registry metadata changes."""
-
-    def debounced_rebuild(now: Any = None) -> None:
-        """Refresh registry slot values and rebuild active indexes."""
-        runtime.rebuild_timer_cancel = None
-        active_languages = list(runtime.indexes)
-        _refresh_registry_slot_values(hass, runtime)
-        for language in active_languages:
-            hass.add_job(runtime.async_rebuild_index, hass, language)
-
-    def refresh_from_event(event: Any = None) -> None:
-        """Schedule a debounced refresh after a registry update."""
-        if runtime.rebuild_timer_cancel is not None:
-            runtime.rebuild_timer_cancel()
-            runtime.rebuild_timer_cancel = None
-        runtime.rebuild_timer_cancel = ha_event.async_call_later(
-            hass,
-            5,
-            debounced_rebuild,
-        )
+    debounced_rebuild = partial(_debounced_registry_rebuild, hass, runtime)
+    refresh_from_event = partial(
+        _schedule_registry_refresh,
+        hass,
+        runtime,
+        debounced_rebuild,
+    )
 
     runtime.add_cleanup_callback(
         hass.bus.async_listen(entity_registry.EVENT_ENTITY_REGISTRY_UPDATED, refresh_from_event)
@@ -185,7 +170,51 @@ def _subscribe_registry_updates(hass: HomeAssistantInstance, runtime: Canonicali
         hass.bus.async_listen(floor_registry.EVENT_FLOOR_REGISTRY_UPDATED, refresh_from_event)
     )
     runtime.add_cleanup_callback(
-        exposed_entities.async_listen_entity_updates(hass, "conversation", refresh_from_event)
+        exposed_entities.async_listen_entity_updates(
+            hass, ASSISTANT_CONVERSATION, refresh_from_event
+        )
+    )
+
+
+def _handle_intent_updates(
+    hass: HomeAssistantInstance,
+    runtime: CanonicalizerRuntime,
+    intents_update: Any,
+) -> None:
+    """Update intent sources and trigger background rebuilds for active languages."""
+    active_languages = list(runtime.indexes)
+    runtime.update_intent_sources(intents_update)
+    for language in active_languages:
+        hass.add_job(runtime.async_rebuild_index, hass, language)
+
+
+def _debounced_registry_rebuild(
+    hass: HomeAssistantInstance,
+    runtime: CanonicalizerRuntime,
+    now: Any = None,
+) -> None:
+    """Refresh registry slot values and rebuild active indexes."""
+    runtime.rebuild_timer_cancel = None
+    active_languages = list(runtime.indexes)
+    _refresh_registry_slot_values(hass, runtime)
+    for language in active_languages:
+        hass.add_job(runtime.async_rebuild_index, hass, language)
+
+
+def _schedule_registry_refresh(
+    hass: HomeAssistantInstance,
+    runtime: CanonicalizerRuntime,
+    debounced_rebuild: Any,
+    event: Any = None,
+) -> None:
+    """Schedule a debounced refresh after a registry update."""
+    if runtime.rebuild_timer_cancel is not None:
+        runtime.rebuild_timer_cancel()
+        runtime.rebuild_timer_cancel = None
+    runtime.rebuild_timer_cancel = ha_event.async_call_later(
+        hass,
+        5,
+        debounced_rebuild,
     )
 
 

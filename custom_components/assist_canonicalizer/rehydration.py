@@ -31,6 +31,67 @@ def _get_rehydration_candidate(candidate_text: str, language: str | None) -> Can
     return Candidate(text=candidate_text, intent_name="dummy", language=language)
 
 
+def _find_rehydration_boundaries(
+    candidate_tokens: tuple[str, ...],
+    wc_idx: int,
+    query_tokens: tuple[str, ...],
+) -> tuple[int, int] | None:
+    """Find query token indices for wildcard prefix and suffix boundaries."""
+    q_len = len(query_tokens)
+
+    if c_prefix := candidate_tokens[:wc_idx]:
+        prefix_boundary = _align_prefix_boundary(c_prefix, query_tokens)
+        if prefix_boundary == -1:
+            c_suffix = candidate_tokens[wc_idx + 1 :]
+            if len(c_prefix) > 1 or not c_suffix:
+                return None
+            max_prefix_search = q_len - len(c_suffix)
+            prefix_boundary = min(len(c_prefix), max(0, max_prefix_search - 1))
+    else:
+        prefix_boundary = 0
+
+    if c_suffix := candidate_tokens[wc_idx + 1 :]:
+        suffix_boundary = _align_suffix_boundary(c_suffix, query_tokens, prefix_boundary)
+        if suffix_boundary == -1:
+            return None
+    else:
+        suffix_boundary = q_len
+
+    if prefix_boundary >= suffix_boundary:
+        return None
+
+    return prefix_boundary, suffix_boundary
+
+
+def _extract_wc_value(
+    query: str,
+    query_tokens: tuple[str, ...],
+    prefix_boundary: int,
+    suffix_boundary: int,
+) -> str | None:
+    """Extract wildcard value substring from the original query."""
+    wc_value = _extract_original_span(query, prefix_boundary, suffix_boundary)
+    if not wc_value:
+        if wc_value_tokens := query_tokens[prefix_boundary:suffix_boundary]:
+            wc_value = " ".join(wc_value_tokens)
+        else:
+            return None
+    return wc_value
+
+
+def _trim_wildcard_overlaps(wc_value: str, c_tok: str, matched_wc: str) -> str:
+    """Trim partial prefix and suffix overlaps of the wildcard placeholder token from wc_value."""
+    wc_pos = c_tok.find(matched_wc)
+    if wc_pos != -1:
+        c_prefix_part = c_tok[:wc_pos]
+        c_suffix_part = c_tok[wc_pos + len(matched_wc) :]
+        if c_prefix_part and wc_value.lower().startswith(c_prefix_part.lower()):
+            wc_value = wc_value[len(c_prefix_part) :]
+        if c_suffix_part and wc_value.lower().endswith(c_suffix_part.lower()):
+            wc_value = wc_value[: -len(c_suffix_part)]
+    return wc_value
+
+
 def get_wildcard_rehydration(
     candidate: Candidate,
     query: str,
@@ -45,50 +106,17 @@ def get_wildcard_rehydration(
     if query_tokens is None:
         _, query_tokens = _normalize_and_split(query)
 
-    candidate_tokens = candidate.normalized_tokens
-    c_prefix = candidate_tokens[:wc_idx]
-    q_len = len(query_tokens)
+    boundaries = _find_rehydration_boundaries(candidate.normalized_tokens, wc_idx, query_tokens)
+    if boundaries is None:
+        return candidate.text, {}
+    prefix_boundary, suffix_boundary = boundaries
 
-    if c_prefix:
-        prefix_boundary = _align_prefix_boundary(c_prefix, query_tokens)
-        if prefix_boundary == -1:
-            if len(c_prefix) <= 1:
-                c_suffix = candidate_tokens[wc_idx + 1 :]
-                max_prefix_search = q_len - len(c_suffix)
-                prefix_boundary = min(len(c_prefix), max(0, max_prefix_search - 1))
-            else:
-                return candidate.text, {}
-    else:
-        prefix_boundary = 0
-
-    c_suffix = candidate_tokens[wc_idx + 1 :]
-
-    if c_suffix:
-        suffix_boundary = _align_suffix_boundary(c_suffix, query_tokens, prefix_boundary)
-        if suffix_boundary == -1:
-            return candidate.text, {}
-    else:
-        suffix_boundary = q_len
-
-    if prefix_boundary >= suffix_boundary:
+    wc_value = _extract_wc_value(query, query_tokens, prefix_boundary, suffix_boundary)
+    if not wc_value:
         return candidate.text, {}
 
-    wc_value = _extract_original_span(query, prefix_boundary, suffix_boundary)
-    if not wc_value:
-        wc_value_tokens = query_tokens[prefix_boundary:suffix_boundary]
-        if not wc_value_tokens:
-            return candidate.text, {}
-        wc_value = " ".join(wc_value_tokens)
-
-    c_tok = candidate_tokens[wc_idx]
-    wc_pos = c_tok.find(matched_wc)
-    if wc_pos != -1:
-        c_prefix_part = c_tok[:wc_pos]
-        c_suffix_part = c_tok[wc_pos + len(matched_wc) :]
-        if c_prefix_part and wc_value.lower().startswith(c_prefix_part.lower()):
-            wc_value = wc_value[len(c_prefix_part) :]
-        if c_suffix_part and wc_value.lower().endswith(c_suffix_part.lower()):
-            wc_value = wc_value[: -len(c_suffix_part)]
+    c_tok = candidate.normalized_tokens[wc_idx]
+    wc_value = _trim_wildcard_overlaps(wc_value, c_tok, matched_wc)
 
     if not wc_value.strip():
         return candidate.text, {}
@@ -122,7 +150,7 @@ def rehydrate_wildcard_text(candidate_text: str, query: str, language: str | Non
     Performance: O(T) per call where T = total tokens in candidate + query.
     """
     wildcards = wildcard_slot_names(language)
-    if not wildcards or not any(wc in candidate_text for wc in wildcards):
+    if not wildcards or all(wc not in candidate_text for wc in wildcards):
         return candidate_text
     candidate = _get_rehydration_candidate(candidate_text, language)
     text, _ = get_wildcard_rehydration(candidate, query)
@@ -136,7 +164,7 @@ def rehydrate_wildcard_slots(
     if not slots:
         return slots
     wildcards = wildcard_slot_names(language)
-    if not wildcards or not any(wc in candidate_text for wc in wildcards):
+    if not wildcards or all(wc not in candidate_text for wc in wildcards):
         return slots
     candidate = _get_rehydration_candidate(candidate_text, language)
     _, replacements = get_wildcard_rehydration(candidate, query)
@@ -235,8 +263,8 @@ def _token_similarity(c_tok: str, q_tok: str) -> float:
         return 1.0
     len_c = len(c_tok)
     len_q = len(q_tok)
-    min_len = len_c if len_c < len_q else len_q
-    max_len = len_c if len_c > len_q else len_q
+    min_len = min(len_c, len_q)
+    max_len = max(len_c, len_q)
     if min_len == 0 or max_len >= MAX_TOKEN_LENGTH_RATIO * min_len:
         return 0.0
     return float(fuzz.ratio(c_tok, q_tok)) / 100.0
@@ -297,7 +325,7 @@ def _align_prefix_boundary(
             i = 0
             score = 0.0
 
-    return best_boundary if best_boundary <= q_len else q_len
+    return min(best_boundary, q_len)
 
 
 def _align_suffix_boundary(
@@ -358,6 +386,12 @@ def _align_suffix_boundary(
     return best_boundary if best_boundary >= prefix_boundary else -1
 
 
+@lru_cache(maxsize=256)
+def _get_escaped_pattern(text: str) -> re.Pattern[str]:
+    """Compile and return an escaped case-insensitive regex pattern."""
+    return re.compile(re.escape(text), re.IGNORECASE)
+
+
 def _replace_wildcard_in_original(
     original_text: str,
     wildcard_normalized_index: int,
@@ -383,9 +417,8 @@ def _replace_wildcard_in_original(
             < normalized_index + len(o_tok_norm_tokens)
         ):
             sub_idx = wildcard_normalized_index - normalized_index
-            target_placeholder = matched_wc if matched_wc else o_tok_norm_tokens[sub_idx]
-            match = re.search(re.escape(target_placeholder), o_tok, re.IGNORECASE)
-            if match:
+            target_placeholder = matched_wc or o_tok_norm_tokens[sub_idx]
+            if match := _get_escaped_pattern(target_placeholder).search(o_tok):
                 start, end = match.span()
                 original_tokens[oi] = o_tok[:start] + replacement + o_tok[end:]
                 return " ".join(original_tokens)
@@ -401,13 +434,67 @@ def wildcard_variants_analysis(
     variants = candidate.literal_variants
     wc_info = candidate.wildcard_info
     wc_name = wc_info[1] if wc_info else None
+    return _wildcard_variants_analysis_cached(variants, wc_name)
 
+
+@lru_cache(maxsize=2048)
+def _wildcard_variants_analysis_cached(
+    variants: tuple[frozenset[str], ...],
+    wc_name: str | None,
+) -> tuple[tuple[tuple[frozenset[str], int, int], ...], frozenset[str]]:
+    """Return wildcard literal coverage data for a literal variant/wildcard pair."""
     var_with_len = []
+    seen_variants: set[tuple[frozenset[str], int]] = set()
     all_tokens_set = set()
+    all_variant_tokens = {tok for var in variants for tok in var} if wc_name is not None else set()
+    variant_set = frozenset(variants) if wc_name is not None else frozenset()
     for var in variants:
-        clean_var = frozenset(tok for tok in var if tok != wc_name) if wc_name else var
+        clean_var = (
+            frozenset(
+                tok
+                for tok in var
+                if not _is_wildcard_literal_token(
+                    tok,
+                    wc_name,
+                    all_variant_tokens,
+                    var,
+                    variant_set,
+                )
+            )
+            if wc_name is not None
+            else var
+        )
         length = len(clean_var)
         req = ceil(length * WILDCARD_LITERAL_COVERAGE_THRESHOLD)
+        variant_key = (clean_var, req)
+        if variant_key in seen_variants:
+            continue
+        seen_variants.add(variant_key)
         var_with_len.append((clean_var, length, req))
         all_tokens_set.update(clean_var)
     return tuple(var_with_len), frozenset(all_tokens_set)
+
+
+def _is_wildcard_literal_token(
+    token: str,
+    wc_name: str,
+    all_variant_tokens: set[str],
+    variant: frozenset[str],
+    variants: frozenset[frozenset[str]],
+) -> bool:
+    """Return whether a literal token still carries a wildcard placeholder."""
+    if token == wc_name:
+        return True
+    if wc_name not in token:
+        return False
+    if "_" in wc_name:
+        return True
+
+    idx = token.find(wc_name)
+    prefix = token[:idx]
+    suffix = token[idx + len(wc_name) :]
+
+    if (prefix in all_variant_tokens) or (suffix in all_variant_tokens):
+        return True
+    variant_without_token = variant - {token}
+    return bool(variant_without_token and variant_without_token in variants)

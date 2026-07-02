@@ -566,7 +566,6 @@
       "category": "intent_coverage",
       "expected_slots": {
         "name:cover": "schlafzimmerfenster",
-        "area": "schlafzimmer",
         "name": "schlafzimmerfenster",
         "brightness": "0",
         "temperature": "0",

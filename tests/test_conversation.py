@@ -73,6 +73,20 @@ class MockIntentResponse:
         self.error_code = code
 
 
+async def _executor_job_returning_empty_snapshot_index(target: Any, *args: Any, **kwargs: Any):
+    """Mock executor work and return an empty index for snapshot builds."""
+    if getattr(target, "__name__", None) == "_build_index_from_snapshot":
+        return build_index("vi", [])
+    return target(*args, **kwargs)
+
+
+async def _executor_job_returning_empty_build_index(target: Any, *args: Any, **kwargs: Any):
+    """Mock executor work and return an empty index for direct index builds."""
+    if getattr(target, "__name__", None) == "build_index":
+        return build_index("vi", [])
+    return target(*args, **kwargs)
+
+
 @pytest.mark.asyncio
 async def test_async_setup_entry() -> None:
     """Test setting up the conversation platform entry."""
@@ -207,15 +221,11 @@ async def test_async_process_with_runtime_flows() -> None:
     runtime = CanonicalizerRuntime()
     entity = AssistCanonicalizerConversationEntity(entry, runtime)
 
-    async def mock_async_add_executor_job(target, *args, **kwargs):
-        """Mock executor work and return an empty index for the snapshot build."""
-        if getattr(target, "__name__", None) == "_build_index_from_snapshot":
-            return build_index("vi", [])
-        return target(*args, **kwargs)
-
     hass = MagicMock()
     hass.async_create_task = lambda coro: asyncio.create_task(coro)
-    hass.async_add_executor_job = AsyncMock(side_effect=mock_async_add_executor_job)
+    hass.async_add_executor_job = AsyncMock(
+        side_effect=_executor_job_returning_empty_snapshot_index
+    )
     entity.hass = hass
 
     user_input = MockConversationInput("tắt đèn bếp", "vi")
@@ -223,7 +233,7 @@ async def test_async_process_with_runtime_flows() -> None:
     with patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw_delegated")):
         res = await entity._async_process_with_runtime(user_input)
         assert res == "raw_delegated"
-        assert runtime.diagnostics.last_fallback_reason == FallbackReason.EMPTY_INDEX
+        assert runtime.diagnostics.last_fallback_reason == FallbackReason.LOW_CONFIDENCE
 
     runtime.indexes["vi"] = MagicMock(candidate_count=5)
     with (
@@ -244,7 +254,39 @@ async def test_async_process_with_runtime_flows() -> None:
     ):
         res = await entity._async_process_with_runtime(user_input)
         assert res == "raw_delegated"
-        assert runtime.diagnostics.last_fallback_reason == FallbackReason.RANKING_FAILED
+        assert runtime.diagnostics.last_fallback_reason == FallbackReason.LOW_CONFIDENCE
+
+    rc_low_margin_top = RankedCandidate(
+        candidate=Candidate(text="tắt đèn bếp", intent_name="HassTurnOff"),
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.8,
+            char_ngram_score=0.8,
+            bm25_score=0.8,
+            intent_score=1.0,
+            final_score=0.8,
+        ),
+    )
+    rc_low_margin_competitor = RankedCandidate(
+        candidate=Candidate(text="bật đèn bếp", intent_name="HassTurnOn"),
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.79,
+            char_ngram_score=0.79,
+            bm25_score=0.79,
+            intent_score=1.0,
+            final_score=0.79,
+        ),
+    )
+    with (
+        patch.object(
+            CanonicalizerRuntime,
+            "rank_with_dynamic_candidates",
+            return_value=(rc_low_margin_top, rc_low_margin_competitor),
+        ),
+        patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw_delegated")),
+    ):
+        res = await entity._async_process_with_runtime(user_input)
+        assert res == "raw_delegated"
+        assert runtime.diagnostics.last_fallback_reason == FallbackReason.LOW_MARGIN
 
     rc = RankedCandidate(
         candidate=Candidate(text="tắt đèn bếp", intent_name="HassTurnOff"),
@@ -283,6 +325,296 @@ async def test_async_process_with_runtime_flows() -> None:
 
 
 @pytest.mark.asyncio
+async def test_empty_static_index_still_uses_dynamic_ranking() -> None:
+    """Try dynamic ranking even when the cached static index has no candidates."""
+    entry = MagicMock()
+    entry.options = {"min_confidence": 0.60, "min_margin": 0.05}
+    entry.entry_id = "test_entry"
+    runtime = CanonicalizerRuntime()
+    runtime.indexes["en"] = build_index("en", [])
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    hass = MagicMock()
+    hass.async_add_executor_job = AsyncMock(side_effect=lambda target, *args: target(*args))
+    entity.hass = hass
+
+    ranked = RankedCandidate(
+        candidate=Candidate(text="turn on kitchen light", intent_name="HassTurnOn"),
+        scores=ScoreBreakdown(
+            rapidfuzz_score=1.0,
+            char_ngram_score=1.0,
+            bm25_score=1.0,
+            intent_score=1.0,
+            final_score=1.0,
+        ),
+    )
+    validation_ok_res = MagicMock()
+    validation_ok_res.response.error_code = None
+    user_input = MockConversationInput("turn on kitchen light", "en")
+
+    with (
+        patch.object(
+            CanonicalizerRuntime,
+            "rank_with_dynamic_candidates",
+            return_value=(ranked,),
+        ) as rank,
+        patch.object(entity, "_delegate_text", AsyncMock(return_value=validation_ok_res)),
+        patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw_delegated")) as raw,
+    ):
+        res = await entity._async_process_with_runtime(user_input)
+
+    assert res == validation_ok_res
+    rank.assert_called_once()
+    raw.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_validation_only_delegates_accepted_candidate() -> None:
+    """Do not validate lower-ranked candidates that failed confidence gates."""
+    entry = MagicMock()
+    entry.options = {"min_confidence": 0.60, "min_margin": 0.05}
+    entry.entry_id = "test_entry"
+    runtime = CanonicalizerRuntime()
+    runtime.indexes["en"] = MagicMock(candidate_count=2)
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    hass = MagicMock()
+    hass.async_add_executor_job = AsyncMock(side_effect=lambda target, *args: target(*args))
+    entity.hass = hass
+
+    accepted = RankedCandidate(
+        candidate=Candidate(text="turn on kitchen light", intent_name="HassTurnOn"),
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.9,
+            char_ngram_score=0.9,
+            bm25_score=0.9,
+            intent_score=1.0,
+            final_score=0.9,
+        ),
+    )
+    rejected = RankedCandidate(
+        candidate=Candidate(text="turn off kitchen light", intent_name="HassTurnOff"),
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.1,
+            char_ngram_score=0.1,
+            bm25_score=0.1,
+            intent_score=0.1,
+            final_score=0.1,
+        ),
+    )
+    validation_err_res = MagicMock()
+    validation_err_res.response.error_code = "error"
+    validation_ok_res = MagicMock()
+    validation_ok_res.response.error_code = None
+    user_input = MockConversationInput("turn kitchen light", "en")
+
+    with (
+        patch.object(
+            CanonicalizerRuntime,
+            "rank_with_dynamic_candidates",
+            return_value=(accepted, rejected),
+        ),
+        patch.object(
+            entity,
+            "_delegate_text",
+            AsyncMock(side_effect=[validation_err_res, validation_ok_res]),
+        ) as mock_del_text,
+        patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw_delegated")),
+    ):
+        res = await entity._async_process_with_runtime(user_input)
+
+    assert res == "raw_delegated"
+    mock_del_text.assert_awaited_once_with("turn on kitchen light", user_input, primary=True)
+    assert runtime.diagnostics.last_fallback_reason == FallbackReason.VALIDATION_FAILED
+
+
+@pytest.mark.asyncio
+async def test_validation_tries_remaining_confident_ranked_candidates() -> None:
+    """Try the next confident ranked candidate before falling back to raw text."""
+    entry = MagicMock()
+    entry.options = {"min_confidence": 0.60, "min_margin": 0.05}
+    entry.entry_id = "test_entry"
+    runtime = CanonicalizerRuntime()
+    runtime.indexes["en"] = MagicMock(candidate_count=2)
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    hass = MagicMock()
+    hass.async_add_executor_job = AsyncMock(side_effect=lambda target, *args: target(*args))
+    entity.hass = hass
+
+    accepted = RankedCandidate(
+        candidate=Candidate(text="turn on kitchen light", intent_name="HassTurnOn"),
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.9,
+            char_ngram_score=0.9,
+            bm25_score=0.9,
+            intent_score=1.0,
+            final_score=0.9,
+        ),
+    )
+    next_ranked = RankedCandidate(
+        candidate=Candidate(text="turn on kitchen lamp", intent_name="HassTurnOn"),
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.8,
+            char_ngram_score=0.8,
+            bm25_score=0.8,
+            intent_score=1.0,
+            final_score=0.8,
+        ),
+    )
+    validation_err_res = MagicMock()
+    validation_err_res.response.error_code = "error"
+    validation_ok_res = MagicMock()
+    validation_ok_res.response.error_code = None
+    user_input = MockConversationInput("turn kitchen light", "en")
+
+    with (
+        patch.object(
+            CanonicalizerRuntime,
+            "rank_with_dynamic_candidates",
+            return_value=(accepted, next_ranked),
+        ),
+        patch.object(
+            entity,
+            "_delegate_text",
+            AsyncMock(side_effect=[validation_err_res, validation_ok_res]),
+        ) as mock_del_text,
+        patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw_delegated")) as raw,
+    ):
+        res = await entity._async_process_with_runtime(user_input)
+
+    assert res == validation_ok_res
+    assert mock_del_text.await_args_list[0].args == ("turn on kitchen light", user_input)
+    assert mock_del_text.await_args_list[0].kwargs == {"primary": True}
+    assert mock_del_text.await_args_list[1].args == ("turn on kitchen lamp", user_input)
+    assert mock_del_text.await_args_list[1].kwargs == {"primary": True}
+    raw.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_validation_delegate_exception_tries_remaining_candidates() -> None:
+    """Treat primary-agent validation exceptions as one candidate failing validation."""
+    entry = MagicMock()
+    entry.options = {"min_confidence": 0.60, "min_margin": 0.05}
+    entry.entry_id = "test_entry"
+    runtime = CanonicalizerRuntime()
+    runtime.indexes["en"] = MagicMock(candidate_count=2)
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    hass = MagicMock()
+    hass.async_add_executor_job = AsyncMock(side_effect=lambda target, *args: target(*args))
+    entity.hass = hass
+
+    accepted = RankedCandidate(
+        candidate=Candidate(text="turn on kitchen light", intent_name="HassTurnOn"),
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.9,
+            char_ngram_score=0.9,
+            bm25_score=0.9,
+            intent_score=1.0,
+            final_score=0.9,
+        ),
+    )
+    next_ranked = RankedCandidate(
+        candidate=Candidate(text="turn on kitchen lamp", intent_name="HassTurnOn"),
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.8,
+            char_ngram_score=0.8,
+            bm25_score=0.8,
+            intent_score=1.0,
+            final_score=0.8,
+        ),
+    )
+    validation_ok_res = MagicMock()
+    validation_ok_res.response.error_code = None
+    user_input = MockConversationInput("turn kitchen light", "en")
+
+    with (
+        patch.object(
+            CanonicalizerRuntime,
+            "rank_with_dynamic_candidates",
+            return_value=(accepted, next_ranked),
+        ),
+        patch.object(
+            entity,
+            "_delegate_text",
+            AsyncMock(side_effect=[RuntimeError("primary failed"), validation_ok_res]),
+        ) as mock_del_text,
+        patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw_delegated")) as raw,
+    ):
+        res = await entity._async_process_with_runtime(user_input)
+
+    assert res == validation_ok_res
+    assert mock_del_text.await_args_list[0].args == ("turn on kitchen light", user_input)
+    assert mock_del_text.await_args_list[0].kwargs == {"primary": True}
+    assert mock_del_text.await_args_list[1].args == ("turn on kitchen lamp", user_input)
+    assert mock_del_text.await_args_list[1].kwargs == {"primary": True}
+    raw.assert_not_awaited()
+    assert runtime.diagnostics.last_error is None
+
+
+@pytest.mark.asyncio
+async def test_validation_delegate_exceptions_fallback_keep_last_error() -> None:
+    """Keep the last validation exception when every candidate fails validation."""
+    entry = MagicMock()
+    entry.options = {"min_confidence": 0.60, "min_margin": 0.05}
+    entry.entry_id = "test_entry"
+    runtime = CanonicalizerRuntime()
+    runtime.indexes["en"] = MagicMock(candidate_count=2)
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    hass = MagicMock()
+    hass.async_add_executor_job = AsyncMock(side_effect=lambda target, *args: target(*args))
+    entity.hass = hass
+
+    accepted = RankedCandidate(
+        candidate=Candidate(text="turn on kitchen light", intent_name="HassTurnOn"),
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.9,
+            char_ngram_score=0.9,
+            bm25_score=0.9,
+            intent_score=1.0,
+            final_score=0.9,
+        ),
+    )
+    next_ranked = RankedCandidate(
+        candidate=Candidate(text="turn on kitchen lamp", intent_name="HassTurnOn"),
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.8,
+            char_ngram_score=0.8,
+            bm25_score=0.8,
+            intent_score=1.0,
+            final_score=0.8,
+        ),
+    )
+    user_input = MockConversationInput("turn kitchen light", "en")
+
+    with (
+        patch.object(
+            CanonicalizerRuntime,
+            "rank_with_dynamic_candidates",
+            return_value=(accepted, next_ranked),
+        ),
+        patch.object(
+            entity,
+            "_delegate_text",
+            AsyncMock(
+                side_effect=[
+                    RuntimeError("first primary failed"),
+                    RuntimeError("second primary failed"),
+                ]
+            ),
+        ) as mock_del_text,
+        patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw_delegated")) as raw,
+    ):
+        res = await entity._async_process_with_runtime(user_input)
+
+    assert res == "raw_delegated"
+    assert mock_del_text.await_args_list[0].args == ("turn on kitchen light", user_input)
+    assert mock_del_text.await_args_list[0].kwargs == {"primary": True}
+    assert mock_del_text.await_args_list[1].args == ("turn on kitchen lamp", user_input)
+    assert mock_del_text.await_args_list[1].kwargs == {"primary": True}
+    raw.assert_awaited_once_with(user_input)
+    assert runtime.diagnostics.last_fallback_reason == FallbackReason.VALIDATION_FAILED
+    assert runtime.diagnostics.last_error == "second primary failed"
+
+
+@pytest.mark.asyncio
 async def test_conversation_delegate_and_fallback_agent_logic() -> None:
     """Test delegation and fallback agent ID selection branch options."""
     entry = MagicMock()
@@ -293,13 +625,7 @@ async def test_conversation_delegate_and_fallback_agent_logic() -> None:
     entity = AssistCanonicalizerConversationEntity(entry, runtime)
     hass = MagicMock()
 
-    async def mock_async_add_executor_job(target, *args, **kwargs):
-        """Mock async_add_executor_job; intercept _build_index to return an empty index."""
-        if getattr(target, "__name__", None) == "_build_index":
-            return build_index("vi", [])
-        return target(*args, **kwargs)
-
-    hass.async_add_executor_job = AsyncMock(side_effect=mock_async_add_executor_job)
+    hass.async_add_executor_job = AsyncMock(side_effect=_executor_job_returning_empty_build_index)
     entity.hass = hass
 
     user_input = MockConversationInput("tắt đèn bếp", "vi")

@@ -1,14 +1,111 @@
 """Tests for automatic conversation intent candidate loading."""
 
+import re
+from collections.abc import Mapping
+from typing import Any
 from unittest.mock import patch
 
+import hassil
+import hassil.errors
+import orjson
+import pytest
+
 from custom_components.assist_canonicalizer import grammar_loader as gl
+from custom_components.assist_canonicalizer.builtin_intents import load_language_intent_sources
 from custom_components.assist_canonicalizer.candidate import CandidateSource
 from custom_components.assist_canonicalizer.grammar_loader import (
     build_candidates_from_intent_sources,
+    build_query_registry_candidates,
+    build_registry_slot_index,
+    compile_dynamic_registry_intents,
     expand_sentence_template,
     is_fixed_sentence,
 )
+from custom_components.assist_canonicalizer.normalization import normalize_text
+
+_HASSIL_MISSING_LIST_RE = re.compile(r"\{([^}]+)\}")
+
+
+def _make_hassil_slot_lists(slots: Mapping[str, tuple[str, ...]]) -> dict[str, Any]:
+    """Build HassIL slot lists from registry slot values."""
+    return {
+        slot_name: hassil.TextSlotList(
+            name=slot_name,
+            values=[
+                hassil.TextSlotValue(
+                    text_in=hassil.parse_sentence(value).expression,
+                    value_out=value,
+                )
+                for value in values
+            ],
+        )
+        for slot_name, values in slots.items()
+    }
+
+
+def _run_hassil_recognize_all(
+    query: str,
+    intents: hassil.intents.Intents,
+    slot_lists: Mapping[str, Any],
+) -> list[Any]:
+    """Run HassIL recognition while stubbing unrelated missing lists."""
+    working_lists = dict(slot_lists)
+    stubbed = set()
+    while True:
+        try:
+            return list(hassil.recognize_all(query, intents, slot_lists=working_lists))
+        except hassil.errors.MissingListError as err:
+            match = _HASSIL_MISSING_LIST_RE.search(str(err))
+            if match is None:
+                raise
+            list_name = match.group(1)
+            if list_name in stubbed:
+                raise
+            stubbed.add(list_name)
+            working_lists[list_name] = hassil.TextSlotList(list_name, [])
+
+
+def test_registry_slot_index_inverted_cache_validates_tuple_identity() -> None:
+    """Do not reuse an inverted lookup built for a different records tuple."""
+    index = build_registry_slot_index(
+        {
+            "name": ("kitchen light",),
+            "entity": ("bathroom fan",),
+        },
+        "en",
+    )
+    name_records = index["name"]
+    entity_records = index["entity"]
+    stale_lookup = index.get_inverted_for_records(name_records)
+    index._inverted_cache[id(entity_records)] = (name_records, stale_lookup)
+
+    lookup = index.get_inverted_for_records(entity_records)
+
+    assert lookup is not stale_lookup
+    assert [record.text for record in lookup["bathroom"]] == ["bathroom fan"]
+    assert "kitchen" not in lookup
+
+
+def test_registry_slot_index_skips_inverted_cache_for_scoped_records() -> None:
+    """Do not retain query-scoped registry record tuples in the index cache."""
+    index = build_registry_slot_index(
+        {
+            "name:light": tuple(
+                f"kitchen light {position}"
+                for position in range(gl.DEFAULT_MAX_CANDIDATES_PER_INTENT + 1)
+            ),
+        },
+        "en",
+    )
+    indexed_records = index["name:light"]
+    scoped_records = indexed_records[: gl.DEFAULT_MAX_CANDIDATES_PER_INTENT]
+
+    assert scoped_records is not indexed_records
+
+    lookup = index.get_inverted_for_records(scoped_records)
+
+    assert "kitchen" in lookup
+    assert id(scoped_records) not in index._inverted_cache
 
 
 def test_is_fixed_sentence_rejects_hassil_templates() -> None:
@@ -65,6 +162,28 @@ def test_expand_sentence_template_uses_lists_optional_groups_and_alternatives() 
     }
 
 
+def test_expand_sentence_template_deduplicates_cleaned_whitespace() -> None:
+    """Deduplicate equivalent template expansions after whitespace normalization."""
+    expanded = expand_sentence_template(
+        "(turn  on|turn on) {name}",
+        {"name": ("lamp",)},
+        {},
+        max_expansions=10,
+    )
+
+    assert expanded == ("turn on lamp",)
+
+
+def test_expand_sentence_template_treats_stray_closers_as_literals() -> None:
+    """Preserve unmatched optional and group closers as literal text."""
+    assert expand_sentence_template("turn ] light", {}, {}, max_expansions=10) == ("turn ] light",)
+    assert expand_sentence_template("turn ) light", {}, {}, max_expansions=10) == ("turn ) light",)
+    assert expand_sentence_template("[turn )] light", {}, {}, max_expansions=10) == (
+        "light",
+        "turn ) light",
+    )
+
+
 def test_build_candidates_from_intent_sources_expands_template_lists() -> None:
     """Build candidates from sentence templates when list inputs are available."""
     candidates = build_candidates_from_intent_sources(
@@ -91,14 +210,16 @@ def test_build_candidates_from_intent_sources_expands_template_lists() -> None:
             }
         },
     )
-    assert [candidate.text for candidate in candidates] == [
-        "turn kitchen light on",
-        "turn desk lamp on",
-        "turn office lamp on",
-        "turn the kitchen light on",
-        "turn the desk lamp on",
-        "turn the office lamp on",
-    ]
+    assert sorted(candidate.text for candidate in candidates) == sorted(
+        [
+            "turn kitchen light on",
+            "turn desk lamp on",
+            "turn office lamp on",
+            "turn the kitchen light on",
+            "turn the desk lamp on",
+            "turn the office lamp on",
+        ]
+    )
     assert {candidate.source for candidate in candidates} == {CandidateSource.BUILT_IN}
 
 
@@ -152,6 +273,88 @@ def test_build_candidates_does_not_cross_product_registry_area_and_entity() -> N
     assert candidates == ()
 
 
+def test_build_candidates_keep_required_area_for_explicit_entity_slot() -> None:
+    """Keep required location slots when entity text comes from template data."""
+    candidates = build_candidates_from_intent_sources(
+        "en",
+        {
+            "builtin": {
+                "intents": {
+                    "HassTurnOn": {
+                        "data": [
+                            {
+                                "sentences": ["turn on {name} in {area}"],
+                                "lists": {"name": {"values": ["light"]}},
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+        {
+            "name": ("kitchen light",),
+            "area": ("kitchen",),
+        },
+    )
+
+    assert [candidate.text for candidate in candidates] == ["turn on light in kitchen"]
+    slots = orjson.loads(candidates[0].metadata["slots"])
+    assert slots["name"] == "light"
+    assert slots["area"] == "kitchen"
+
+
+def test_build_candidates_skip_mixed_registry_entity_location_static_path() -> None:
+    """Avoid expanding registry entity/location combinations into the static index."""
+    candidates = build_candidates_from_intent_sources(
+        "en",
+        {
+            "builtin": {
+                "intents": {
+                    "HassTurnOn": {
+                        "data": [
+                            {
+                                "sentences": ["turn on {name} in {area}"],
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+        {
+            "name": ("kitchen light",),
+            "area": ("kitchen", "office"),
+        },
+    )
+
+    assert candidates == ()
+
+
+def test_build_candidates_prioritizes_entity_slot_alias_templates() -> None:
+    """Treat all entity slot aliases as name-priority templates."""
+    candidates = build_candidates_from_intent_sources(
+        "en",
+        {
+            "builtin": {
+                "intents": {
+                    "HassTurnOn": {
+                        "data": [
+                            {"sentences": ["turn on {area}"]},
+                            {"sentences": ["turn on {entity}"]},
+                        ]
+                    }
+                }
+            }
+        },
+        {
+            "area": ("kitchen",),
+            "entity": ("kitchen light",),
+        },
+        max_candidates=1,
+    )
+
+    assert [candidate.text for candidate in candidates] == ["turn on kitchen light"]
+
+
 def test_build_candidates_uses_domain_scoped_registry_names() -> None:
     """Use Hassil domain context to choose entity slot values."""
     candidates = build_candidates_from_intent_sources(
@@ -178,6 +381,8 @@ def test_build_candidates_uses_domain_scoped_registry_names() -> None:
     )
 
     assert [candidate.text for candidate in candidates] == ["dừng Loa phòng khách"]
+    slots = orjson.loads(candidates[0].metadata["slots"])
+    assert slots == {"name": "Loa phòng khách"}
 
 
 def test_build_candidates_from_intent_sources_stops_at_total_cap() -> None:
@@ -225,10 +430,12 @@ def test_build_candidates_uses_multi_domain_context_scoped_registry_names() -> N
         },
     )
 
-    assert [candidate.text for candidate in candidates] == [
-        "bật Quạt thông gió phòng tắm to",
-        "bật Đèn phòng tắm to",
-    ]
+    assert sorted(candidate.text for candidate in candidates) == sorted(
+        [
+            "bật Quạt thông gió phòng tắm to",
+            "bật Đèn phòng tắm to",
+        ]
+    )
 
 
 def test_build_candidates_stores_localized_template_literals() -> None:
@@ -417,6 +624,7 @@ class TestRehydrateWildcardText:
         )
         assert result == "milk on my list"
 
+    @pytest.mark.current_intents
     def test_todo_list_item_rehydration(self) -> None:
         """Rehydrate todo_list_item wildcard."""
         result = gl.rehydrate_wildcard_text(
@@ -452,15 +660,19 @@ class TestRehydrateWildcardText:
         ):
             gl.wildcard_slot_names.cache_clear()
             try:
-                names = gl.wildcard_slot_names()
-                assert "shopping_list_item" in names
-                assert "todo_list_item" in names
-                assert "timer_name" in names
-                assert "message" in names
-                # Entity slots that have registry values should NOT be wildcards
-                assert "color" not in names
+                self._test_wildcard_slot_names_populated()
             finally:
                 gl.wildcard_slot_names.cache_clear()
+
+    def _test_wildcard_slot_names_populated(self) -> None:
+        """Test that wildcard_slot_names() returns only wildcards, not entities."""
+        names = gl.wildcard_slot_names()
+        assert "shopping_list_item" in names
+        assert "todo_list_item" in names
+        assert "timer_name" in names
+        assert "message" in names
+        # Entity slots that have registry values should NOT be wildcards
+        assert "color" not in names
 
     def test_multiple_wildcards_falls_back_safely(self) -> None:
         """Fall back to original when suffix contains an unresolvable wildcard."""
@@ -473,6 +685,7 @@ class TestRehydrateWildcardText:
         # Safe fallback suffix contains todo_list_item that can't align
         assert result == "add shopping_list_item to my todo_list_item list"
 
+    @pytest.mark.current_intents
     def test_original_case_preservation(self) -> None:
         """Verify that capitalization and punctuation in wildcard values are preserved."""
         result = gl.rehydrate_wildcard_text(
@@ -487,6 +700,7 @@ class TestRehydrateWildcardText:
         )
         assert result == "broadcast dinner's ready"
 
+    @pytest.mark.current_intents
     def test_compound_wildcard_token(self) -> None:
         """Verify that wildcard names inside compound tokens match and rehydrate."""
         result = gl.rehydrate_wildcard_text(
@@ -545,3 +759,815 @@ class TestRehydrateWildcardText:
             "nl",
         )
         assert result == "wie is in de shopping_list_item"
+
+
+def test_build_candidates_preserves_static_slots_and_does_round_robin() -> None:
+    """Verify that static slots are preserved and candidate generation is round-robin."""
+    candidates = build_candidates_from_intent_sources(
+        "vi",
+        {
+            "builtin": {
+                "intents": {
+                    "HassTurnOff": {
+                        "data": [
+                            {
+                                "sentences": ["tắt {name}"],
+                                "lists": {
+                                    "name": {
+                                        "values": [
+                                            "đèn phòng khách 1",
+                                            "đèn phòng khách 2",
+                                            "đèn phòng khách 3",
+                                        ]
+                                    }
+                                },
+                            },
+                            {
+                                "sentences": ["tắt quạt ở {area}"],
+                                "slots": {"domain": "fan", "name": "all"},
+                            },
+                        ]
+                    }
+                }
+            }
+        },
+        {"area": ("phòng khách",)},
+        max_candidates=3,
+    )
+    texts = [c.text for c in candidates]
+    assert "tắt đèn phòng khách 1" in texts
+    assert "tắt quạt ở phòng khách" in texts
+
+    fan_candidate = next(c for c in candidates if "tắt quạt" in c.text)
+    slots = orjson.loads(fan_candidate.metadata["slots"])
+    assert slots == {"area": "phòng khách", "domain": "fan", "name": "all"}
+    assert fan_candidate.metadata["static_slots"] == "domain,name"
+
+
+def test_build_candidates_domain_area_template_ignores_unreferenced_entity_aliases() -> None:
+    """Domain-scoped location templates should not leak unrelated entity slots."""
+    candidates = build_candidates_from_intent_sources(
+        "en",
+        {
+            "builtin": {
+                "intents": {
+                    "HassTurnOn": {
+                        "data": [
+                            {
+                                "sentences": ["turn on {area} fan"],
+                                "slots": {"domain": "fan", "name": "all"},
+                            },
+                        ]
+                    }
+                }
+            }
+        },
+        {
+            "area": ("bathroom",),
+            "name": ("bathroom fan",),
+            "name:fan": ("bathroom fan",),
+            "entity": ("bathroom fan",),
+            "entity:fan": ("bathroom fan",),
+        },
+    )
+
+    assert [candidate.text for candidate in candidates] == ["turn on bathroom fan"]
+    slots = orjson.loads(candidates[0].metadata["slots"])
+    assert slots == {"area": "bathroom", "domain": "fan", "name": "all"}
+
+
+def test_compile_dynamic_registry_intents_tracks_only_unresolved_query_slots() -> None:
+    """Template-provided entity/location slots should not require query registry matches."""
+    compiled = compile_dynamic_registry_intents(
+        {
+            "builtin": {
+                "intents": {
+                    "HassTurnOn": {
+                        "data": [
+                            {
+                                "sentences": ["turn on {name} in {area} on {floor}"],
+                                "lists": {"area": {"values": ["kitchen"]}},
+                                "slots": {"domain": "light", "name": "all"},
+                            },
+                        ]
+                    }
+                }
+            }
+        },
+        "en",
+    )
+
+    template = compiled[0].templates[0]
+    assert template.entity_slots == ()
+    assert template.query_slots == ("floor",)
+
+
+def test_query_registry_candidates_allow_static_slot_without_registry_match() -> None:
+    """Static template slots can expand even when registry values do not match the query."""
+    candidates = build_query_registry_candidates(
+        "en",
+        {
+            "builtin": {
+                "intents": {
+                    "HassTurnOn": {
+                        "data": [
+                            {
+                                "sentences": ["turn on {name}"],
+                                "slots": {"name": "all"},
+                            },
+                        ]
+                    }
+                }
+            }
+        },
+        {"name": ("kitchen light",)},
+        "turn on all",
+    )
+
+    assert [candidate.text for candidate in candidates] == ["turn on all"]
+
+
+def test_query_registry_candidates_match_compound_slot_spacing() -> None:
+    """Match query words to compact registry slot values without language-specific rules."""
+    candidates = build_query_registry_candidates(
+        "en",
+        {
+            "builtin": {
+                "intents": {
+                    "HassTurnOn": {
+                        "data": [{"sentences": ["turn on {name}"]}],
+                    }
+                }
+            }
+        },
+        {"name": ("kitchenlight",)},
+        "turn on kitchen light",
+    )
+
+    assert [candidate.text for candidate in candidates] == ["turn on kitchenlight"]
+
+
+def test_query_registry_candidates_collapse_domain_scoped_entity_slots() -> None:
+    """Keep scoped registry values under the template slot name in candidate metadata."""
+    candidates = build_query_registry_candidates(
+        "en",
+        {
+            "builtin": {
+                "intents": {
+                    "HassTurnOn": {
+                        "data": [
+                            {
+                                "sentences": ["turn on {name}"],
+                                "requires_context": {"domain": "fan"},
+                            },
+                        ]
+                    }
+                }
+            }
+        },
+        {
+            "name": ("speaker", "bathroom fan"),
+            "name:fan": ("bathroom fan",),
+            "name:media_player": ("speaker",),
+        },
+        "turn on bathroom fan",
+    )
+
+    assert [candidate.text for candidate in candidates] == ["turn on bathroom fan"]
+    slots = orjson.loads(candidates[0].metadata["slots"])
+    assert slots == {"name": "bathroom fan"}
+
+
+def test_query_registry_candidates_build_mixed_entity_area_dynamically() -> None:
+    """Build mixed registry entity/location candidates only for matching queries."""
+    candidates = build_query_registry_candidates(
+        "en",
+        {
+            "builtin": {
+                "intents": {
+                    "HassTurnOn": {
+                        "data": [{"sentences": ["turn on {name} in {area}"]}],
+                    }
+                }
+            }
+        },
+        {
+            "name": ("kitchen light",),
+            "area": ("kitchen", "office"),
+        },
+        "turn on kitchen light in kitchen",
+    )
+
+    assert candidates
+    assert candidates[0].text == "turn on kitchen light in kitchen"
+    slots = orjson.loads(candidates[0].metadata["slots"])
+    assert slots["name"] == "kitchen light"
+    assert slots["area"] == "kitchen"
+
+
+def test_query_registry_candidates_global_cap_keeps_later_exact_match() -> None:
+    """Keep the best dynamic candidate even when earlier templates fill the cap."""
+    candidates = build_query_registry_candidates(
+        "en",
+        {
+            "builtin": {
+                "intents": {
+                    "HassTurn": {
+                        "data": [
+                            {"sentences": ["turn {name} off"]},
+                            {"sentences": ["turn {name} on"]},
+                        ]
+                    }
+                }
+            }
+        },
+        {"name": ("tail light",)},
+        "turn tail light on",
+        max_candidates=1,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].normalized_text == "turn tail light on"
+
+
+def test_query_registry_candidates_keep_exact_entity_when_partial_slots_hit_cap() -> None:
+    """Keep exact text when an earlier entity/location branch fills the dynamic cap."""
+    query = "tắt điều hòa phòng ngủ to"
+    candidates = build_query_registry_candidates(
+        "vi",
+        {
+            "builtin": {
+                "intents": {
+                    "HassTurnOff": {
+                        "data": [{"sentences": ["tắt [cái] ({area} {name}|{name} [{area}])[đi]"]}]
+                    }
+                }
+            }
+        },
+        {
+            "name": (
+                "Điều hòa phòng ngủ to",
+                *(f"Điều hòa phòng ngủ {index}" for index in range(1, 25)),
+            ),
+            "area": (
+                "Phòng ngủ to",
+                *(f"Phòng ngủ {index}" for index in range(1, 25)),
+            ),
+        },
+        query,
+        max_candidates=1,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].normalized_text == query
+    assert orjson.loads(candidates[0].metadata["slots"]) == {"name": "Điều hòa phòng ngủ to"}
+
+
+def test_query_registry_candidates_keep_exact_entity_or_area_domain_match() -> None:
+    """Prefer exact entity or exact area/domain candidates over mixed slot noise."""
+    query = "turn on living room fan"
+    candidates = build_query_registry_candidates(
+        "en",
+        {
+            "builtin": {
+                "intents": {
+                    "HassTurnOn": {
+                        "data": [
+                            {"sentences": ["turn on ({area} {name}|{name} [in {area}])"]},
+                            {
+                                "sentences": ["turn on {area} fan"],
+                                "slots": {"domain": "fan", "name": "all"},
+                            },
+                        ]
+                    }
+                }
+            }
+        },
+        {
+            "name": (
+                "living room fan",
+                *(f"living room device {index}" for index in range(1, 25)),
+                "fan",
+            ),
+            "name:fan": ("living room fan", "fan"),
+            "area": (
+                "living room",
+                *(f"living room {index}" for index in range(1, 25)),
+            ),
+        },
+        query,
+        max_candidates=1,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].normalized_text == query
+    slots = orjson.loads(candidates[0].metadata["slots"])
+    assert slots in [
+        {"name": "living room fan"},
+        {
+            "area": "living room",
+            "domain": "fan",
+            "name": "all",
+        },
+    ]
+
+
+def test_exact_slot_priority_requires_full_literal_match() -> None:
+    """Do not promote opposite-action candidates just because an entity is exact."""
+    query = "bring up the living room light"
+    query_normalized = normalize_text(query)
+    query_no_diac = gl.normalize_text_no_diacritics(query, "en")
+    sources = {
+        "builtin": {
+            "intents": {
+                "HassTurnOff": {
+                    "data": [
+                        {
+                            "sentences": ["<turn> off ({area} {name}|{name} [in {area}])"],
+                            "expansion_rules": {"turn": "turn|bring"},
+                        }
+                    ]
+                }
+            }
+        }
+    }
+    registry_slots = {
+        "name": ("living room light",),
+        "area": ("living room",),
+    }
+    template = compile_dynamic_registry_intents(sources, "en")[0].templates[0]
+    slot_values = gl._resolve_template_slot_values(
+        template,
+        registry_slots,
+        build_registry_slot_index(registry_slots, "en"),
+        query_normalized,
+        frozenset(query_normalized.split()),
+        {},
+        {},
+        query_no_diac=query_no_diac,
+        query_tokens_no_diac=frozenset(query_no_diac.split()),
+    )
+
+    assert slot_values is not None
+    assert (
+        gl._exact_slot_preferred_value_maps(
+            template,
+            slot_values,
+            query_normalized,
+            frozenset(query_normalized.split()),
+            query_no_diac,
+            "en",
+        )
+        == ()
+    )
+
+
+def test_query_registry_candidates_keep_compact_script_exact_entity() -> None:
+    """Keep exact entity candidates for languages that commonly omit spaces."""
+    query = "打开一楼主卧室床头阅读灯"
+    candidates = build_query_registry_candidates(
+        "zh",
+        {
+            "builtin": {
+                "intents": {
+                    "HassTurnOn": {
+                        "data": [{"sentences": ["打开{name}"]}],
+                    }
+                }
+            }
+        },
+        {
+            "name": (
+                "一楼主卧室床头阅读灯",
+                "客厅灯",
+            )
+        },
+        query,
+        max_candidates=1,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].normalized_text == query
+    assert orjson.loads(candidates[0].metadata["slots"]) == {"name": "一楼主卧室床头阅读灯"}
+
+
+def test_registry_slot_values_for_slots_preserves_requested_order() -> None:
+    """Deduplicate requested slots without losing deterministic insertion order."""
+    selected = gl._registry_slot_values_for_slots(
+        {
+            "area": ("kitchen",),
+            "floor": ("upstairs",),
+            "name": ("speaker",),
+            "name:fan": ("bathroom fan",),
+        },
+        ("floor", "name", "area", "name"),
+        domains=("fan",),
+    )
+
+    assert list(selected) == ["floor", "name", "area"]
+    assert selected["name"] == ("bathroom fan",)
+
+
+def test_query_registry_candidates_allow_slot_only_optional_literal_template() -> None:
+    """Match a template when the query uses its slot-only optional-literal form."""
+    candidates = build_query_registry_candidates(
+        "en",
+        {
+            "builtin": {
+                "intents": {
+                    "HassTurnOn": {
+                        "data": [{"sentences": ["{name} [please]"]}],
+                    }
+                }
+            }
+        },
+        {"name": ("kitchen light",)},
+        "kitchen light",
+    )
+
+    assert "kitchen light" in [candidate.text for candidate in candidates]
+
+
+def test_query_registry_candidates_include_area_only_templates() -> None:
+    """Build query-scoped candidates for registry templates with no entity slot."""
+    candidates = build_query_registry_candidates(
+        "en",
+        {
+            "builtin": {
+                "intents": {
+                    "HassTurnOn": {
+                        "data": [{"sentences": ["turn on {area} light"]}],
+                    }
+                }
+            }
+        },
+        {"area": ("kitchen",)},
+        "turn on kitchen light",
+    )
+
+    assert [candidate.text for candidate in candidates] == ["turn on kitchen light"]
+
+
+def test_query_registry_candidates_deduplicate_text_intent_pairs() -> None:
+    """Return one dynamic candidate for duplicate text within the same intent."""
+    candidates = build_query_registry_candidates(
+        "en",
+        {
+            "builtin": {
+                "intents": {
+                    "HassTurnOn": {
+                        "data": [
+                            {"sentences": ["turn on {name}", "turn on {entity}"]},
+                        ]
+                    }
+                }
+            }
+        },
+        {
+            "name": ("kitchen light",),
+            "entity": ("kitchen light",),
+        },
+        "turn on kitchen light",
+    )
+
+    assert [(candidate.intent_name, candidate.text) for candidate in candidates] == [
+        ("HassTurnOn", "turn on kitchen light")
+    ]
+
+
+def test_query_registry_candidates_prefer_hassil_domain_area_duplicate() -> None:
+    """Prefer the production HassIL domain-area parse for same-source duplicates."""
+    candidates = build_query_registry_candidates(
+        "en",
+        {
+            "builtin": {
+                "intents": {
+                    "HassTurnOn": {
+                        "data": [
+                            {
+                                "sentences": ["turn on {area} fan"],
+                                "slots": {"domain": "fan", "name": "all"},
+                            },
+                            {"sentences": ["turn on {name}"]},
+                        ]
+                    }
+                }
+            }
+        },
+        {
+            "name": ("bathroom fan",),
+            "name:fan": ("bathroom fan",),
+            "area": ("bathroom",),
+        },
+        "turn on bathroom fan",
+        include_literal_only_templates=False,
+        include_area_only_templates=False,
+    )
+
+    matching = [
+        candidate
+        for candidate in candidates
+        if candidate.intent_name == "HassTurnOn"
+        and candidate.normalized_text == "turn on bathroom fan"
+    ]
+    assert len(matching) == 1
+
+    slots = orjson.loads(matching[0].metadata["slots"])
+    assert slots == {"area": "bathroom", "domain": "fan", "name": "all"}
+
+
+@pytest.mark.current_intents
+def test_query_registry_duplicate_preference_matches_hassil_builtin_order() -> None:
+    """Keep exact dynamic duplicate selection aligned with HassIL built-in parsing."""
+    examples = (
+        (
+            "en",
+            "turn on bathroom fan",
+            {
+                "name": ("bathroom fan",),
+                "name:fan": ("bathroom fan",),
+                "area": ("bathroom",),
+            },
+        ),
+        (
+            "vi",
+            "bật quạt phòng khách",
+            {
+                "name": ("quạt phòng khách",),
+                "name:fan": ("quạt phòng khách",),
+                "area": ("phòng khách",),
+            },
+        ),
+    )
+
+    for language, query, slots in examples:
+        sources = load_language_intent_sources(language)
+        merged_intents: dict[str, Any] = {}
+        for source in sources.values():
+            hassil.merge_dict(merged_intents, source)
+        hassil_results = _run_hassil_recognize_all(
+            query,
+            hassil.intents.Intents.from_dict(merged_intents),
+            _make_hassil_slot_lists(slots),
+        )
+        assert hassil_results
+        hassil_result = hassil_results[0]
+        hassil_slots = {name: entity.value for name, entity in hassil_result.entities.items()}
+
+        candidates = build_query_registry_candidates(
+            language,
+            sources,
+            slots,
+            query,
+            registry_slot_index=build_registry_slot_index(slots, language),
+            compiled_intents=compile_dynamic_registry_intents(sources, language),
+        )
+        matching = [
+            candidate
+            for candidate in candidates
+            if candidate.intent_name == hassil_result.intent.name
+            and candidate.normalized_text == normalize_text(query)
+        ]
+        assert len(matching) == 1
+        candidate_slots = orjson.loads(matching[0].metadata["slots"])
+
+        assert {
+            slot_name: candidate_slots.get(slot_name) for slot_name in hassil_slots
+        } == hassil_slots
+
+
+def test_query_registry_candidates_keep_custom_source_priority() -> None:
+    """Prefer custom dynamic candidates before structural duplicate preferences."""
+    candidates = build_query_registry_candidates(
+        "en",
+        {
+            "built_in": {
+                "intents": {
+                    "HassTurnOn": {
+                        "data": [
+                            {
+                                "sentences": ["turn on {area} fan"],
+                                "slots": {"domain": "fan", "name": "all"},
+                            },
+                        ]
+                    }
+                }
+            },
+            "custom_sentence": {
+                "intents": {
+                    "HassTurnOn": {
+                        "data": [
+                            {"sentences": ["turn on {name}"]},
+                        ]
+                    }
+                }
+            },
+        },
+        {
+            "name": ("bathroom fan",),
+            "name:fan": ("bathroom fan",),
+            "area": ("bathroom",),
+        },
+        "turn on bathroom fan",
+        include_literal_only_templates=False,
+        include_area_only_templates=False,
+    )
+
+    matching = [
+        candidate
+        for candidate in candidates
+        if candidate.intent_name == "HassTurnOn"
+        and candidate.normalized_text == "turn on bathroom fan"
+    ]
+    assert len(matching) == 1
+    assert matching[0].source == CandidateSource.CUSTOM_SENTENCE
+
+
+def test_query_registry_candidates_reject_domain_area_action_typos() -> None:
+    """Avoid domain-area rescues when the action literal is not fully present."""
+    sources = {
+        "builtin": {
+            "intents": {
+                "HassTurnOn": {
+                    "data": [
+                        {
+                            "sentences": ["turn on {area} fan"],
+                            "slots": {"domain": "fan", "name": "all"},
+                        },
+                    ]
+                }
+            }
+        }
+    }
+    slots = {"area": ("bathroom",)}
+
+    exact = build_query_registry_candidates(
+        "en",
+        sources,
+        slots,
+        "turn on bathroom fan",
+        include_literal_only_templates=False,
+        include_area_only_templates=False,
+    )
+    fuzzy = build_query_registry_candidates(
+        "en",
+        sources,
+        slots,
+        "trun on bathroom fan",
+        include_literal_only_templates=False,
+        include_area_only_templates=False,
+    )
+
+    assert [candidate.text for candidate in exact] == ["turn on bathroom fan"]
+    assert fuzzy == ()
+
+
+def test_compile_dynamic_registry_intents_keeps_domain_area_templates_when_disabled() -> None:
+    """Keep domain-scoped area templates while excluding generic area-only templates."""
+    compiled = gl.compile_dynamic_registry_intents(
+        {
+            "builtin": {
+                "intents": {
+                    "HassTurnOn": {
+                        "data": [
+                            {
+                                "sentences": ["turn on fan {area}"],
+                                "slots": {"domain": "fan", "name": "all"},
+                            },
+                            {"sentences": ["turn on {area}"]},
+                        ]
+                    }
+                }
+            }
+        },
+        "en",
+        include_literal_only_templates=False,
+        include_area_only_templates=False,
+    )
+
+    sentences = [template.sentence for intent in compiled for template in intent.templates]
+    assert sentences == ["turn on fan {area}"]
+
+
+def test_query_registry_candidates_floor_slot() -> None:
+    """Build query-scoped candidates for registry templates with a floor slot."""
+    candidates = build_query_registry_candidates(
+        "en",
+        {
+            "builtin": {
+                "intents": {
+                    "HassTurnOn": {
+                        "data": [{"sentences": ["turn on {floor} lights"]}],
+                    }
+                }
+            }
+        },
+        {"floor": ("upstairs",)},
+        "turn on upstairs lights",
+    )
+
+    assert [candidate.text for candidate in candidates] == ["turn on upstairs lights"]
+
+
+def test_query_registry_candidates_excludes_floor_only_when_disabled() -> None:
+    """Suppress floor-only templates when include_area_only_templates is False."""
+    candidates = build_query_registry_candidates(
+        "en",
+        {
+            "builtin": {
+                "intents": {
+                    "HassTurnOn": {
+                        "data": [{"sentences": ["turn on {floor} lights"]}],
+                    }
+                }
+            }
+        },
+        {"floor": ("upstairs",)},
+        "turn on upstairs lights",
+        include_literal_only_templates=False,
+        include_area_only_templates=False,
+    )
+
+    assert candidates == ()
+
+
+def test_query_registry_candidates_domain_floor_rescue() -> None:
+    """Domain-scoped floor template is rescued as exact match when area-only is disabled."""
+    candidates = build_query_registry_candidates(
+        "en",
+        {
+            "builtin": {
+                "intents": {
+                    "HassTurnOn": {
+                        "data": [
+                            {
+                                "sentences": ["turn on {floor} fan"],
+                                "slots": {"domain": "fan", "name": "all"},
+                            },
+                        ]
+                    }
+                }
+            }
+        },
+        {"floor": ("upstairs",)},
+        "turn on upstairs fan",
+        include_literal_only_templates=False,
+        include_area_only_templates=False,
+    )
+
+    assert [candidate.text for candidate in candidates] == ["turn on upstairs fan"]
+    slots = orjson.loads(candidates[0].metadata["slots"])
+    assert slots["domain"] == "fan"
+    assert slots["floor"] == "upstairs"
+
+
+def test_compile_dynamic_registry_intents_keeps_domain_floor_templates_when_disabled() -> None:
+    """Keep domain-scoped floor templates while excluding generic floor-only templates."""
+    compiled = gl.compile_dynamic_registry_intents(
+        {
+            "builtin": {
+                "intents": {
+                    "HassTurnOn": {
+                        "data": [
+                            {
+                                "sentences": ["turn on fan {floor}"],
+                                "slots": {"domain": "fan", "name": "all"},
+                            },
+                            {"sentences": ["turn on {floor}"]},
+                        ]
+                    }
+                }
+            }
+        },
+        "en",
+        include_literal_only_templates=False,
+        include_area_only_templates=False,
+    )
+
+    sentences = [template.sentence for intent in compiled for template in intent.templates]
+    assert sentences == ["turn on fan {floor}"]
+
+
+def test_query_registry_candidates_mixed_entity_floor_prunes_floor_values() -> None:
+    """Mixed entity+floor template does not generate O(entities x floors) candidates."""
+    candidates = build_query_registry_candidates(
+        "en",
+        {
+            "builtin": {
+                "intents": {
+                    "HassTurnOn": {
+                        "data": [{"sentences": ["turn on {name} on {floor}"]}],
+                    }
+                }
+            }
+        },
+        {
+            "name": ("kitchen light", "bedroom light"),
+            "floor": ("upstairs", "downstairs"),
+        },
+        "turn on kitchen light",
+    )
+
+    # Floor values are pruned from constrained, and because {floor} is a required slot the
+    # template produces no candidates at all — no O(entities x floors) cross-product occurs.
+    assert candidates == ()

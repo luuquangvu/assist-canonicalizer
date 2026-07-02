@@ -143,12 +143,14 @@ The ranking engine was benchmarked against the default Home Assistant Hassil int
 
 <!-- BENCHMARK_OVERALL_START -->
 
-| Mode      | Intent/Slot | Mismatch | Fallback |
-| :-------- | ----------: | -------: | -------: |
-| `hassil`  |       34.0% |     5.3% |    60.7% |
-| `lexical` |   **83.7%** | **8.9%** | **7.4%** |
+> Benchmark dependency versions: `homeassistant` 2026.6.4, `home-assistant-intents` 2026.6.1.
 
-> Intent/slot accuracy jumped from **34.0% to 83.7%**. The combined error rate (mismatch + fallback) dropped from **66.0% to 16.3%**.
+| Mode      | Intent/Slot | Mismatch |  Fallback |
+| :-------- | ----------: | -------: | --------: |
+| `hassil`  |       45.9% |     0.0% |     54.1% |
+| `lexical` |   **86.2%** | **2.3%** | **11.5%** |
+
+> Intent/slot accuracy jumped from **45.9% to 86.2%**. The combined error rate (mismatch + fallback) dropped from **54.1% to 13.8%**.
 
 <!-- BENCHMARK_OVERALL_END -->
 
@@ -156,18 +158,18 @@ The ranking engine was benchmarked against the default Home Assistant Hassil int
 
 <!-- BENCHMARK_LANGS_START -->
 
-| Language | Mode      | Intent/Slot |  Mismatch |  Fallback |
-| :------- | :-------- | ----------: | --------: | --------: |
-| EN       | `hassil`  |       37.8% |      6.3% |     55.9% |
-| EN       | `lexical` |   **88.3%** |  **6.3%** |  **5.4%** |
-| DE       | `hassil`  |       36.8% |      8.0% |     55.2% |
-| DE       | `lexical` |   **89.7%** |  **3.4%** |  **6.9%** |
-| FR       | `hassil`  |       36.5% |      5.9% |     57.6% |
-| FR       | `lexical` |   **85.9%** |  **5.9%** |  **8.2%** |
-| NL       | `hassil`  |       34.3% |      4.8% |     61.0% |
-| NL       | `lexical` |   **74.3%** | **15.2%** | **10.5%** |
-| VI       | `hassil`  |       22.9% |      1.2% |     75.9% |
-| VI       | `lexical` |   **80.7%** | **13.3%** |  **6.0%** |
+| Language | Mode      | Intent/Slot | Mismatch |  Fallback |
+| :------- | :-------- | ----------: | -------: | --------: |
+| EN       | `hassil`  |       51.4% |     0.0% |     48.6% |
+| EN       | `lexical` |   **90.1%** | **2.7%** |  **7.2%** |
+| DE       | `hassil`  |       50.6% |     0.0% |     49.4% |
+| DE       | `lexical` |   **86.2%** | **2.3%** | **11.5%** |
+| FR       | `hassil`  |       49.4% |     0.0% |     50.6% |
+| FR       | `lexical` |   **88.2%** | **1.2%** | **10.6%** |
+| NL       | `hassil`  |       44.8% |     0.0% |     55.2% |
+| NL       | `lexical` |   **82.9%** | **1.9%** | **15.2%** |
+| VI       | `hassil`  |       31.3% |     0.0% |     68.7% |
+| VI       | `lexical` |   **83.1%** | **3.6%** | **13.3%** |
 
 <!-- BENCHMARK_LANGS_END -->
 

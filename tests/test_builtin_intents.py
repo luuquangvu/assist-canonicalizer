@@ -3,6 +3,7 @@
 import os
 import sys
 import tempfile
+from functools import partial
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -17,6 +18,18 @@ from custom_components.assist_canonicalizer.builtin_intents import (
     load_language_intent_sources,
 )
 from custom_components.assist_canonicalizer.runtime import CanonicalizerRuntime
+
+
+def _config_path_in_tmpdir(tmpdir: str, key: str, lang: str) -> str:
+    """Return a test config path inside a temporary directory."""
+    return os.path.join(tmpdir, key, lang)
+
+
+def _mock_get_intents_json_load_fallback(lang: str, json_load: Any = None) -> Any:
+    """Mock get_intents that rejects the json_load keyword once."""
+    if json_load is not None:
+        raise TypeError("json_load not supported")
+    return {"built_in_key": "built_in_val"}
 
 
 def test_runtime_merges_language_sources_with_subscribed_sources() -> None:
@@ -81,10 +94,7 @@ def test_load_custom_sentences_with_yaml() -> None:
         with open(yaml_file, "w", encoding="utf-8") as f:
             f.write(yaml_content)
 
-        def mock_config_path(key: str, lang: str) -> str:
-            return os.path.join(tmpdir, key, lang)
-
-        res = _load_custom_sentences("vi", mock_config_path)
+        res = _load_custom_sentences("vi", partial(_config_path_in_tmpdir, tmpdir))
         assert "intents" in res
         assert res["intents"]["HassTurnOn"]["data"][0]["sentences"] == ["bật {name}"]
 
@@ -106,12 +116,7 @@ def test_load_built_in_intents_type_error() -> None:
     mock_module = MagicMock()
 
     # first call raises TypeError, second call succeeds
-    def mock_get_intents(lang: str, json_load: Any = None) -> Any:
-        if json_load is not None:
-            raise TypeError("json_load not supported")
-        return {"built_in_key": "built_in_val"}
-
-    mock_module.get_intents = mock_get_intents
+    mock_module.get_intents = _mock_get_intents_json_load_fallback
 
     with patch.dict(sys.modules, {"home_assistant_intents": mock_module}):
         assert _load_built_in_intents("vi") == {"built_in_key": "built_in_val"}
@@ -155,10 +160,7 @@ def test_load_custom_sentences_yaml_types_and_recursive_merge() -> None:
         with open(os.path.join(sub_dir, "test3.yaml"), "w", encoding="utf-8") as f:
             f.write(yaml_content_3)
 
-        def mock_config_path(key: str, lang: str) -> str:
-            return os.path.join(tmpdir, key, lang)
-
-        res = _load_custom_sentences("vi", mock_config_path)
+        res = _load_custom_sentences("vi", partial(_config_path_in_tmpdir, tmpdir))
         assert "intents" in res
         assert res["intents"]["HassTurnOn"]["data"][0]["sentences"] == ["bật {name}"]
         assert res["intents"]["HassTurnOn"]["other_data"] == 123

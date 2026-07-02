@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import sys
 from collections.abc import Mapping
 from types import ModuleType
@@ -25,9 +26,11 @@ from custom_components.assist_canonicalizer.candidate import Candidate, Candidat
 from custom_components.assist_canonicalizer.const import DEFAULT_MAX_CANDIDATES_PER_TEMPLATE
 from custom_components.assist_canonicalizer.grammar_loader import (
     build_candidates_from_intent_sources,
+    build_registry_slot_index,
 )
 from custom_components.assist_canonicalizer.indexer import CanonicalIndex, build_index
 from custom_components.assist_canonicalizer.runtime import (
+    _INDEX_BUILD_VERSION,
     CanonicalizerRuntime,
     _build_index_from_snapshot,
     _canonical_fingerprint_value,
@@ -55,18 +58,16 @@ class FakeHass:
         return func(*args)
 
 
-async def test_async_rebuild_index_coalesces_concurrent_language_jobs(monkeypatch: Any) -> None:
-    """Coalesce equivalent language variants into one rebuild job."""
-    monkeypatch.setattr(homeassistant.helpers.storage, "Store", MockStore)
-    MockStore.reset()
+class _SnapshotBuildCounter:
+    """Count snapshot index builds and return a small index."""
 
-    runtime = CanonicalizerRuntime()
-    calls = 0
+    def __init__(self) -> None:
+        """Initialize the call counter."""
+        self.calls = 0
 
-    def fake_build_index(snapshot: Any) -> CanonicalIndex:
+    def __call__(self, snapshot: Any) -> CanonicalIndex:
         """Count rebuild calls and return a small index."""
-        nonlocal calls
-        calls += 1
+        self.calls += 1
         return build_index(
             snapshot.language,
             [
@@ -78,21 +79,214 @@ async def test_async_rebuild_index_coalesces_concurrent_language_jobs(monkeypatc
             ],
         )
 
-    async def scenario() -> tuple[CanonicalIndex, CanonicalIndex]:
-        """Start overlapping rebuild requests for the same language."""
-        hass = FakeHass()
-        first_task = asyncio.create_task(runtime.async_rebuild_index(hass, "en"))
-        await hass.job_started.wait()
-        second_task = asyncio.create_task(runtime.async_rebuild_index(hass, "en-US"))
-        await asyncio.sleep(0)
-        hass.release_job.set()
-        return await asyncio.gather(first_task, second_task)
 
-    monkeypatch.setattr(runtime_module, "_build_index_from_snapshot", fake_build_index)
-    first, second = await scenario()
+async def _run_coalesced_rebuild_scenario(
+    runtime: CanonicalizerRuntime,
+) -> tuple[CanonicalIndex | None, CanonicalIndex | None]:
+    """Start overlapping rebuild requests for the same language."""
+    hass = FakeHass()
+    first_task = asyncio.create_task(runtime.async_rebuild_index(hass, "en"))
+    await hass.job_started.wait()
+    second_task = asyncio.create_task(runtime.async_rebuild_index(hass, "en-US"))
+    await asyncio.sleep(0)
+    hass.release_job.set()
+    return await asyncio.gather(first_task, second_task)
+
+
+def _fail_dynamic_registry_build(*args: Any, **kwargs: Any) -> tuple[Candidate, ...]:
+    """Fail if exact static matches still trigger dynamic generation."""
+    raise AssertionError("dynamic candidates should not be built for static exact matches")
+
+
+class _DynamicBuildCounter:
+    """Count dynamic candidate generation calls."""
+
+    def __init__(self, original_build: Any) -> None:
+        """Initialize with the original build callable."""
+        self.original_build = original_build
+        self.calls = 0
+
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple[Candidate, ...]:
+        """Count dynamic candidate generation calls."""
+        self.calls += 1
+        return self.original_build(*args, **kwargs)
+
+
+class _DynamicBuildRecorder:
+    """Record dynamic candidate generation inputs."""
+
+    def __init__(self) -> None:
+        """Initialize the recorded input store."""
+        self.registry_slot_values: Mapping[str, tuple[str, ...]] | None = None
+        self.registry_slot_index_name_values: tuple[str, ...] = ()
+
+    def __call__(
+        self,
+        _language: str,
+        _intent_sources: Mapping[str, Mapping[str, Any]],
+        registry_slot_values: Mapping[str, tuple[str, ...]],
+        _query: str,
+        **kwargs: Any,
+    ) -> tuple[Candidate, ...]:
+        """Record registry inputs passed to query-scoped dynamic generation."""
+        self.registry_slot_values = registry_slot_values
+        registry_slot_index = kwargs["registry_slot_index"]
+        self.registry_slot_index_name_values = tuple(
+            record.text for record in registry_slot_index["name"]
+        )
+        return ()
+
+
+class _NormalizationTracker:
+    """Record registry values normalized while building the snapshot."""
+
+    def __init__(self, original_normalize_text: Any) -> None:
+        """Initialize with the original normalization function."""
+        self.original_normalize_text = original_normalize_text
+        self.normalized_values: list[str] = []
+
+    def __call__(self, text: str) -> str:
+        """Record registry values normalized while building the snapshot."""
+        self.normalized_values.append(text)
+        return self.original_normalize_text(text)
+
+
+class _SourceChangingBuild:
+    """Change registry inputs during the first index build."""
+
+    def __init__(self, runtime: CanonicalizerRuntime) -> None:
+        """Initialize with the runtime under test."""
+        self.runtime = runtime
+        self.calls = 0
+
+    def __call__(self, snapshot: Any) -> CanonicalIndex:
+        """Change registry inputs during the first index build."""
+        self.calls += 1
+        name = snapshot.registry_slot_values["name"][0]
+        if self.calls == 1:
+            self.runtime.update_registry_slot_values({"name": ("new lamp",)})
+        return build_index(
+            snapshot.language,
+            [Candidate(text=f"turn on {name}", intent_name="HassTurnOn")],
+        )
+
+
+class _AlwaysSourceChangingBuild:
+    """Change registry inputs during every index build."""
+
+    def __init__(self, runtime: CanonicalizerRuntime) -> None:
+        """Initialize with the runtime under test."""
+        self.runtime = runtime
+        self.calls = 0
+
+    def __call__(self, snapshot: Any) -> CanonicalIndex:
+        """Change registry inputs during every index build."""
+        self.calls += 1
+        self.runtime.update_registry_slot_values({"name": (f"lamp {self.calls}",)})
+        return build_index(
+            snapshot.language,
+            [Candidate(text=f"turn on lamp {self.calls}", intent_name="HassTurnOn")],
+        )
+
+
+class _IndexClearingBuild:
+    """Clear the language index during the first index build."""
+
+    def __init__(self, runtime: CanonicalizerRuntime) -> None:
+        """Initialize with the runtime under test."""
+        self.runtime = runtime
+        self.calls = 0
+
+    def __call__(self, snapshot: Any) -> CanonicalIndex:
+        """Clear the index generation and return a small index."""
+        self.calls += 1
+        if self.calls == 1:
+            self.runtime.clear_index(snapshot.language)
+        return build_index(
+            snapshot.language,
+            [
+                Candidate(
+                    text=f"sample {self.calls}",
+                    intent_name="Sample",
+                    language=snapshot.language,
+                )
+            ],
+        )
+
+
+class _DebouncedFakeTimer:
+    """Fake timer callback handle."""
+
+    def __init__(self, scheduled_callbacks: list[Any], callback: Any) -> None:
+        """Initialize fake timer."""
+        self.scheduled_callbacks = scheduled_callbacks
+        self.callback = callback
+
+    def __call__(self) -> None:
+        """Fire timer."""
+        self.scheduled_callbacks.remove(self)
+        self.callback(None)
+
+
+class _TimerCancellation:
+    """Callable cancellation handle for a fake timer."""
+
+    def __init__(self, scheduled_callbacks: list[Any], timer: _DebouncedFakeTimer) -> None:
+        """Initialize with the timer to remove."""
+        self.scheduled_callbacks = scheduled_callbacks
+        self.timer = timer
+
+    def __call__(self) -> None:
+        """Cancel the scheduled timer."""
+        self.scheduled_callbacks.remove(self.timer)
+
+
+class _AsyncCallLaterRecorder:
+    """Record delayed callback scheduling."""
+
+    def __init__(self, scheduled_callbacks: list[Any]) -> None:
+        """Initialize with shared scheduled callback storage."""
+        self.scheduled_callbacks = scheduled_callbacks
+
+    def __call__(self, hass: Any, delay: float, action: Any) -> Any:
+        """Mock scheduling timer."""
+        timer = _DebouncedFakeTimer(self.scheduled_callbacks, action)
+        self.scheduled_callbacks.append(timer)
+        return _TimerCancellation(self.scheduled_callbacks, timer)
+
+
+class _RebuildCounter:
+    """Count async rebuild calls while delegating to the original method."""
+
+    def __init__(self, original_rebuild: Any) -> None:
+        """Initialize with the original rebuild method."""
+        self.original_rebuild = original_rebuild
+        self.calls = 0
+
+
+_REBUILD_COUNTERS: dict[int, _RebuildCounter] = {}
+
+
+async def _mock_rebuild_counting(self: Any, h: Any, language: str) -> Any:
+    """Count rebuild calls for the runtime currently under test."""
+    counter = _REBUILD_COUNTERS[id(self)]
+    counter.calls += 1
+    return await counter.original_rebuild(self, h, language)
+
+
+async def test_async_rebuild_index_coalesces_concurrent_language_jobs(monkeypatch: Any) -> None:
+    """Coalesce equivalent language variants into one rebuild job."""
+    monkeypatch.setattr(homeassistant.helpers.storage, "Store", MockStore)
+    MockStore.reset()
+
+    runtime = CanonicalizerRuntime()
+    build_counter = _SnapshotBuildCounter()
+
+    monkeypatch.setattr(runtime_module, "_build_index_from_snapshot", build_counter)
+    first, second = await _run_coalesced_rebuild_scenario(runtime)
 
     assert first is second
-    assert calls == 1
+    assert build_counter.calls == 1
     assert runtime.get_index("en") is first
     assert runtime.rebuild_tasks == {}
 
@@ -138,6 +332,117 @@ async def test_rank_with_dynamic_candidates_includes_tail_registry_alias() -> No
 
     assert ranked[0].candidate.normalized_text == "tắt đèn tròn phòng khách"
     assert ranked[0].scores.final_score == 1.0
+
+
+def test_rank_with_dynamic_candidates_uses_language_specific_registry_index() -> None:
+    """Match registry values using language-specific transliteration rules."""
+    intent_sources: dict[str, Mapping[str, Any]] = {
+        "built_in": {
+            "intents": {
+                "HassTurnOn": {
+                    "data": [
+                        {
+                            "sentences": ["schalte {name} ein"],
+                        }
+                    ]
+                }
+            }
+        }
+    }
+    registry_slots = {"name": ("Küche Licht",)}
+    runtime = CanonicalizerRuntime()
+    runtime.update_registry_slot_values(registry_slots)
+    runtime.language_intent_sources["de"] = intent_sources
+    index = build_index("de", [Candidate(text="unrelated", intent_name="HassNevermind")])
+
+    ranked = runtime.rank_with_dynamic_candidates("de", index, "schalte kueche licht ein")
+
+    assert ranked[0].candidate.text == "schalte Küche Licht ein"
+    assert runtime.diagnostics.dynamic_candidate_count == 1
+    assert runtime.registry_slot_index["name"][0].normalized_no_diacritics == "kuche licht"
+    assert runtime.registry_slot_indexes["de"]["name"][0].normalized_no_diacritics == "kueche licht"
+
+
+def test_rank_with_dynamic_candidates_includes_capped_domain_area_alias() -> None:
+    """Rank a domain-area command even when static area expansion capped it."""
+    intent_sources: dict[str, Mapping[str, Any]] = {
+        "built_in": {
+            "intents": {
+                "HassTurnOn": {
+                    "data": [
+                        {
+                            "sentences": ["turn on fan {area}"],
+                            "slots": {"domain": "fan", "name": "all"},
+                        }
+                    ]
+                }
+            }
+        }
+    }
+    areas = (
+        *(f"area {index}" for index in range(DEFAULT_MAX_CANDIDATES_PER_TEMPLATE + 10)),
+        "living room",
+    )
+    registry_slots = {"area": areas, "area_name": areas}
+    indexed_candidates = build_candidates_from_intent_sources(
+        "en",
+        intent_sources,
+        registry_slots,
+    )
+    assert all(
+        candidate.normalized_text != "turn on fan living room" for candidate in indexed_candidates
+    )
+
+    runtime = CanonicalizerRuntime()
+    runtime.update_registry_slot_values(registry_slots)
+    runtime.language_intent_sources["en"] = intent_sources
+    ranked = runtime.rank_with_dynamic_candidates(
+        "en",
+        build_index("en", indexed_candidates),
+        "turn on fan living room",
+    )
+
+    assert len(ranked) == 1
+    assert ranked[0].candidate.normalized_text == "turn on fan living room"
+    assert ranked[0].scores.final_score == 1.0
+
+
+def test_rank_with_dynamic_candidates_keeps_generic_area_only_templates_disabled() -> None:
+    """Do not rescue broad generic area-only templates at query time."""
+    intent_sources: dict[str, Mapping[str, Any]] = {
+        "built_in": {
+            "intents": {
+                "HassTurnOn": {
+                    "data": [{"sentences": ["turn on {area}"]}],
+                }
+            }
+        }
+    }
+    areas = (
+        *(f"area {index}" for index in range(DEFAULT_MAX_CANDIDATES_PER_TEMPLATE + 10)),
+        "living room",
+    )
+    registry_slots = {"area": areas, "area_name": areas}
+    indexed_candidates = build_candidates_from_intent_sources(
+        "en",
+        intent_sources,
+        registry_slots,
+    )
+    assert all(
+        candidate.normalized_text != "turn on living room" for candidate in indexed_candidates
+    )
+
+    runtime = CanonicalizerRuntime()
+    runtime.update_registry_slot_values(registry_slots)
+    runtime.language_intent_sources["en"] = intent_sources
+    ranked = runtime.rank_with_dynamic_candidates(
+        "en",
+        build_index("en", indexed_candidates),
+        "turn on living room",
+    )
+
+    assert all(candidate.candidate.normalized_text != "turn on living room" for candidate in ranked)
+    assert runtime.diagnostics.dynamic_candidate_count == 0
 
 
 async def test_rank_with_dynamic_candidates_does_not_starve_later_intents() -> None:
@@ -193,23 +498,141 @@ async def test_rank_with_dynamic_candidates_does_not_starve_later_intents() -> N
     assert ranked[0].scores.final_score == 1.0
 
 
+def test_rank_with_dynamic_candidates_skips_dynamic_for_static_exact(
+    monkeypatch: Any,
+) -> None:
+    """Avoid query-scoped dynamic work when static ranking already matched exactly."""
+    runtime = CanonicalizerRuntime()
+    index = build_index(
+        "en",
+        [
+            Candidate(
+                text="turn on kitchen light",
+                intent_name="HassTurnOn",
+                language="en",
+            )
+        ],
+    )
+
+    monkeypatch.setattr(
+        runtime_module,
+        "build_query_registry_candidates",
+        _fail_dynamic_registry_build,
+    )
+
+    ranked = runtime.rank_with_dynamic_candidates("en", index, "turn on kitchen light")
+
+    assert len(ranked) == 1
+    assert ranked[0].candidate.normalized_text == "turn on kitchen light"
+    assert ranked[0].scores.final_score == 1.0
+    assert runtime.diagnostics.dynamic_candidate_count == 0
+
+
+def test_rank_with_dynamic_candidates_keeps_dynamic_for_non_exact_static(
+    monkeypatch: Any,
+) -> None:
+    """Still build exact dynamic candidates when static ranking is only fuzzy."""
+    intent_sources: dict[str, Mapping[str, Any]] = {
+        "built_in": {
+            "intents": {
+                "HassTurnOn": {
+                    "data": [
+                        {
+                            "sentences": ["turn on {name}"],
+                            "requires_context": {"domain": "light"},
+                        }
+                    ]
+                }
+            }
+        }
+    }
+    registry_slots = {"name": ("kitchen light",), "name:light": ("kitchen light",)}
+    runtime = CanonicalizerRuntime()
+    runtime.update_registry_slot_values(registry_slots)
+    runtime.language_intent_sources["en"] = intent_sources
+    index = build_index(
+        "en",
+        [
+            Candidate(
+                text="turn on kitchen lamp",
+                intent_name="HassTurnOn",
+                language="en",
+            )
+        ],
+    )
+    original_build = runtime_module.build_query_registry_candidates
+    build_counter = _DynamicBuildCounter(original_build)
+
+    monkeypatch.setattr(
+        runtime_module,
+        "build_query_registry_candidates",
+        build_counter,
+    )
+    monkeypatch.setattr(
+        runtime_module.CharNGramIndex,
+        "from_grams",
+        lambda *args, **kwargs: pytest.fail("dynamic exact matches should skip char index"),
+    )
+
+    ranked = runtime.rank_with_dynamic_candidates("en", index, "turn on kitchen light")
+
+    assert build_counter.calls == 1
+    assert ranked[0].candidate.normalized_text == "turn on kitchen light"
+    assert ranked[0].scores.final_score == 1.0
+
+
+def test_rank_with_dynamic_candidates_uses_single_registry_slot_snapshot(
+    monkeypatch: Any,
+) -> None:
+    """Pass matching registry values and index to query-scoped dynamic generation."""
+    runtime = CanonicalizerRuntime()
+    old_values = {"name": ("old lamp",)}
+    new_values = {"name": ("new lamp",)}
+    runtime.update_registry_slot_values(old_values)
+    runtime.language_intent_sources["en"] = {
+        "built_in": {
+            "intents": {
+                "HassTurnOn": {
+                    "data": [{"sentences": ["turn on {name}"]}],
+                }
+            }
+        }
+    }
+    index = build_index("en", [Candidate(text="unrelated", intent_name="HassNevermind")])
+    build_recorder = _DynamicBuildRecorder()
+
+    def mutate_before_legacy_index_lookup(_runtime: CanonicalizerRuntime, _language: str) -> Any:
+        runtime.update_registry_slot_values(new_values)
+        return build_registry_slot_index(new_values, "en")
+
+    monkeypatch.setattr(
+        CanonicalizerRuntime,
+        "_registry_slot_index_for_language",
+        mutate_before_legacy_index_lookup,
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "build_query_registry_candidates",
+        build_recorder,
+    )
+
+    runtime.rank_with_dynamic_candidates("en", index, "turn on old lamp")
+
+    assert build_recorder.registry_slot_values == old_values
+    assert build_recorder.registry_slot_index_name_values == ("old lamp",)
+
+
 def test_runtime_precomputes_and_shares_registry_slot_records(monkeypatch: Any) -> None:
     """Normalize identical registry slot tuples once when refreshing the snapshot."""
-    normalized_values: list[str] = []
-    original_normalize_text = grammar_loader.normalize_text
+    normalization_tracker = _NormalizationTracker(grammar_loader.normalize_text)
 
-    def track_normalization(text: str) -> str:
-        """Record registry values normalized while building the snapshot."""
-        normalized_values.append(text)
-        return original_normalize_text(text)
-
-    monkeypatch.setattr(grammar_loader, "normalize_text", track_normalization)
+    monkeypatch.setattr(grammar_loader, "normalize_text", normalization_tracker)
     values_1 = ("Kitchen Light", "Desk Lamp")
     values_2 = ("Kitchen Light", "Desk Lamp")
     runtime = CanonicalizerRuntime()
     runtime.update_registry_slot_values({"name": values_1, "entity": values_2})
 
-    assert normalized_values == list(values_1)
+    assert normalization_tracker.normalized_values == list(values_1)
     assert runtime.registry_slot_index["name"] is runtime.registry_slot_index["entity"]
     assert runtime.registry_slot_index["name"][0].normalized_text == "kitchen light"
     assert runtime.registry_slot_index["name"][0].tokens == ("kitchen", "light")
@@ -235,15 +658,25 @@ def test_runtime_registry_snapshot_update_replaces_dynamic_aliases() -> None:
     runtime.language_intent_sources["en"] = intent_sources
     index = build_index("en", [Candidate(text="unrelated", intent_name="HassNevermind")])
 
-    runtime.update_registry_slot_values({"name": ("old lamp",), "name:light": ("old lamp",)})
-    old_ranked = runtime.rank_with_dynamic_candidates("en", index, "turn on old lamp")
-    assert old_ranked[0].candidate.normalized_text == "turn on old lamp"
-
-    runtime.update_registry_slot_values({"name": ("new lamp",), "name:light": ("new lamp",)})
-    new_ranked = runtime.rank_with_dynamic_candidates("en", index, "turn on new lamp")
-
-    assert new_ranked[0].candidate.normalized_text == "turn on new lamp"
+    _test_runtime_registry_snapshot_update_replaces_dynamic_aliases(
+        runtime, "old lamp", index, "turn on old lamp"
+    )
+    _test_runtime_registry_snapshot_update_replaces_dynamic_aliases(
+        runtime, "new lamp", index, "turn on new lamp"
+    )
     assert all(record.text != "old lamp" for record in runtime.registry_slot_index["name"])
+
+
+def _test_runtime_registry_snapshot_update_replaces_dynamic_aliases(
+    runtime: CanonicalizerRuntime,
+    new_value: str,
+    index: CanonicalIndex,
+    query: str,
+) -> None:
+    """Helper for test_runtime_registry_snapshot_update_replaces_dynamic_aliases."""
+    runtime.update_registry_slot_values({"name": (new_value,), "name:light": (new_value,)})
+    ranked = runtime.rank_with_dynamic_candidates("en", index, query)
+    assert ranked[0].candidate.normalized_text == query
 
 
 def test_runtime_intent_update_invalidates_compiled_dynamic_templates() -> None:
@@ -267,6 +700,7 @@ def test_runtime_normalizes_language_cache_keys() -> None:
     assert sorted(runtime.indexes) == ["vi"]
 
 
+@pytest.mark.current_intents
 def test_normalize_language_preserves_supported_regional_variants() -> None:
     """Keep regional variants that have distinct Home Assistant language packs."""
     assert normalize_language("vi-VN") == "vi"
@@ -333,7 +767,7 @@ class HashableFakeHass:
 
     def add_job(self, target: Any, *args: Any) -> Any:
         """Mock add_job by calling target or creating a task."""
-        if asyncio.iscoroutinefunction(target):
+        if inspect.iscoroutinefunction(target):
             return asyncio.create_task(target(*args))
         return target(*args)
 
@@ -357,6 +791,7 @@ async def test_persistent_store_save_and_load(monkeypatch: Any) -> None:
             source=CandidateSource.BUILT_IN,
             language="vi",
             metadata={"sentence_template": "bật {name}"},
+            slot_values=("đèn",),
         )
     ]
     index = build_index("vi", candidates)
@@ -375,6 +810,7 @@ async def test_persistent_store_save_and_load(monkeypatch: Any) -> None:
         assert stored_candidates[0]["intent_name"] == "HassTurnOn"
         assert stored_candidates[0]["source"] == "built_in"
         assert stored_candidates[0]["metadata"]["sentence_template"] == "bật {name}"
+        assert stored_candidates[0]["slot_values"] == ["đèn"]
 
         clean_runtime = CanonicalizerRuntime()
         loaded_index = await clean_runtime.async_load_index_from_store(hass, "vi")
@@ -391,9 +827,33 @@ async def test_persistent_store_save_and_load(monkeypatch: Any) -> None:
         assert loaded_cand.intent_name == "HassTurnOn"
         assert loaded_cand.source == CandidateSource.BUILT_IN
         assert loaded_cand.metadata["sentence_template"] == "bật {name}"
+        assert loaded_cand.slot_values == ("đèn",)
         assert clean_runtime.get_index("vi") is loaded_index
     finally:
         MockStore.reset()
+
+
+async def test_persistent_store_rejects_old_build_version(monkeypatch: Any) -> None:
+    """Reject a persisted index produced by an older candidate build version."""
+    monkeypatch.setattr(homeassistant.helpers.storage, "Store", MockStore)
+    MockStore.reset()
+    hass = HashableFakeHass()
+    runtime = CanonicalizerRuntime()
+    snapshot = _create_build_snapshot("en", *runtime._capture_build_inputs())
+    index = build_index(
+        "en",
+        [Candidate(text="turn on light", intent_name="HassTurnOn", language="en")],
+    )
+    await runtime.async_save_index_to_store(hass, index, snapshot.fingerprint)
+    MockStore.stored_data["assist_canonicalizer.index_en"]["build_version"] = (
+        _INDEX_BUILD_VERSION - 1
+    )
+
+    loaded = await CanonicalizerRuntime().async_load_index_from_store(hass, "en")
+
+    assert loaded is None
+    assert "assist_canonicalizer.index_en" not in MockStore.stored_data
+    assert MockStore.stored_data["assist_canonicalizer.index_manifest"]["languages"] == []
 
 
 async def test_persistent_store_rejects_stale_fingerprint(monkeypatch: Any) -> None:
@@ -471,54 +931,69 @@ async def test_async_rebuild_retries_after_source_generation_changes(monkeypatch
     hass = HashableFakeHass(async_create_task=lambda coro: asyncio.create_task(coro))
     runtime = CanonicalizerRuntime()
     runtime.update_registry_slot_values({"name": ("old lamp",)})
-    build_calls = 0
+    build_counter = _SourceChangingBuild(runtime)
 
-    def build_and_change_source(snapshot: Any) -> CanonicalIndex:
-        """Change registry inputs during the first index build."""
-        nonlocal build_calls
-        build_calls += 1
-        name = snapshot.registry_slot_values["name"][0]
-        if build_calls == 1:
-            runtime.update_registry_slot_values({"name": ("new lamp",)})
-        return build_index(
-            snapshot.language,
-            [Candidate(text=f"turn on {name}", intent_name="HassTurnOn")],
-        )
-
-    monkeypatch.setattr(runtime_module, "_build_index_from_snapshot", build_and_change_source)
+    monkeypatch.setattr(runtime_module, "_build_index_from_snapshot", build_counter)
 
     index = await runtime.async_rebuild_index(hass, "en")
 
-    assert build_calls == 2
+    assert build_counter.calls == 2
+    assert index is not None
     assert index.candidates[0].text == "turn on new lamp"
     assert runtime.get_index("en") is index
     stored = MockStore.stored_data["assist_canonicalizer.index_en"]
     assert stored["candidates"][0]["text"] == "turn on new lamp"
 
 
+async def test_async_rebuild_stops_after_repeated_source_generation_changes(
+    monkeypatch: Any,
+) -> None:
+    """Bound rebuild retries when source inputs never stabilize."""
+    monkeypatch.setattr(homeassistant.helpers.storage, "Store", MockStore)
+    MockStore.reset()
+    hass = HashableFakeHass(async_create_task=lambda coro: asyncio.create_task(coro))
+    runtime = CanonicalizerRuntime()
+    runtime.update_registry_slot_values({"name": ("old lamp",)})
+    build_counter = _AlwaysSourceChangingBuild(runtime)
+
+    monkeypatch.setattr(runtime_module, "_build_index_from_snapshot", build_counter)
+
+    index = await runtime.async_rebuild_index(hass, "en")
+
+    assert build_counter.calls == runtime_module._MAX_REBUILD_ATTEMPTS
+    assert index is None
+    assert runtime.get_index("en") is None
+    assert "assist_canonicalizer.index_en" not in MockStore.stored_data
+
+
+async def test_async_rebuild_does_not_publish_after_index_clear(monkeypatch: Any) -> None:
+    """Do not repopulate memory or storage after clear_index invalidates a rebuild."""
+    monkeypatch.setattr(homeassistant.helpers.storage, "Store", MockStore)
+    MockStore.reset()
+    hass = HashableFakeHass(async_create_task=lambda coro: asyncio.create_task(coro))
+    runtime = CanonicalizerRuntime()
+    build_counter = _IndexClearingBuild(runtime)
+
+    monkeypatch.setattr(runtime_module, "_build_index_from_snapshot", build_counter)
+
+    index = await runtime.async_rebuild_index(hass, "en")
+
+    assert build_counter.calls == 1
+    assert index is None
+    assert runtime.get_index("en") is None
+    assert "assist_canonicalizer.index_en" not in MockStore.stored_data
+    assert runtime.rebuild_tasks == {}
+
+
 async def test_debounced_rebuild_coalesces_events(monkeypatch: Any) -> None:
     """Verify that multiple registry events are debounced and only rebuild once."""
     scheduled_callbacks = []
 
-    class FakeTimer:
-        """Fake timer mock."""
-
-        def __init__(self, callback: Any) -> None:
-            """Initialize fake timer."""
-            self.callback = callback
-
-        def __call__(self) -> None:
-            """Fire timer."""
-            scheduled_callbacks.remove(self)
-            self.callback(None)
-
-    def mock_async_call_later(hass: Any, delay: float, action: Any) -> Any:
-        """Mock scheduling timer."""
-        timer = FakeTimer(action)
-        scheduled_callbacks.append(timer)
-        return lambda: scheduled_callbacks.remove(timer)
-
-    monkeypatch.setattr(homeassistant.helpers.event, "async_call_later", mock_async_call_later)
+    monkeypatch.setattr(
+        homeassistant.helpers.event,
+        "async_call_later",
+        _AsyncCallLaterRecorder(scheduled_callbacks),
+    )
 
     runtime = CanonicalizerRuntime()
     runtime.indexes["en"] = build_index(
@@ -535,10 +1010,14 @@ async def test_debounced_rebuild_coalesces_events(monkeypatch: Any) -> None:
             listeners.append(callback)
             return lambda: None
 
+    async def async_add_executor_job_mock(func: Any, *args: Any) -> Any:
+        """Mock async_add_executor_job by executing the function synchronously."""
+        return func(*args)
+
     hass = HashableFakeHass(
         bus=FakeBus(),
         async_create_task=lambda coro: asyncio.create_task(coro),
-        async_add_executor_job=lambda func, *args: func(*args),
+        async_add_executor_job=async_add_executor_job_mock,
     )
 
     exposed_entities_module = ModuleType("homeassistant.components.homeassistant.exposed_entities")
@@ -560,34 +1039,31 @@ async def test_debounced_rebuild_coalesces_events(monkeypatch: Any) -> None:
         lambda h: {"name": ("light",)},
     )
 
-    rebuild_calls = 0
     original_rebuild = CanonicalizerRuntime.async_rebuild_index
+    rebuild_counter = _RebuildCounter(original_rebuild)
+    _REBUILD_COUNTERS[id(runtime)] = rebuild_counter
+    try:
+        monkeypatch.setattr(CanonicalizerRuntime, "async_rebuild_index", _mock_rebuild_counting)
 
-    async def mock_rebuild(self: Any, h: Any, language: str) -> Any:
-        """Count rebuild calls."""
-        nonlocal rebuild_calls
-        rebuild_calls += 1
-        return await original_rebuild(self, h, language)
+        _subscribe_registry_updates(hass, runtime)
 
-    monkeypatch.setattr(CanonicalizerRuntime, "async_rebuild_index", mock_rebuild)
+        # Trigger entity registry update
+        listeners[0]({})
+        assert len(scheduled_callbacks) == 1
 
-    _subscribe_registry_updates(hass, runtime)
+        # Trigger another entity registry update, should debounce
+        listeners[0]({})
+        assert len(scheduled_callbacks) == 1
 
-    # Trigger entity registry update
-    listeners[0]({})
-    assert len(scheduled_callbacks) == 1
+        # Fire debounced function
+        scheduled_callbacks[0]()
 
-    # Trigger another entity registry update, should debounce
-    listeners[0]({})
-    assert len(scheduled_callbacks) == 1
+        # Allow task to progress
+        await asyncio.sleep(0.01)
 
-    # Fire debounced function
-    scheduled_callbacks[0]()
-
-    # Allow task to progress
-    await asyncio.sleep(0.01)
-
-    assert rebuild_calls == 1
+        assert rebuild_counter.calls == 1
+    finally:
+        _REBUILD_COUNTERS.pop(id(runtime), None)
 
 
 def test_canonical_fingerprint_value_sorting() -> None:
@@ -704,6 +1180,73 @@ async def test_rank_with_dynamic_candidates_preserves_multiple_exact_matches() -
     assert all(r.scores.final_score == 1.0 for r in ranked)
 
 
+async def test_rank_dynamic_ambiguous_exact_slot_preferences() -> None:
+    """Verify that slot preferences resolve ties among multiple exact dynamic matches."""
+    intent_sources: dict[str, Mapping[str, Any]] = {
+        "built_in": {
+            "intents": {
+                "IntentA": {
+                    "data": [
+                        {
+                            "sentences": ["add {slot_a} to list"],
+                        }
+                    ]
+                },
+                "IntentB": {
+                    "data": [
+                        {
+                            "sentences": ["add {slot_b} to list"],
+                        }
+                    ]
+                },
+            }
+        }
+    }
+    registry_slots = {"slot_a": ("milk",), "slot_b": ("milk",)}
+
+    runtime = CanonicalizerRuntime()
+    # Mock known wildcard slot names so they are recognized as wildcards
+    with patch(
+        "custom_components.assist_canonicalizer.candidate.wildcard_slot_names_sorted",
+        return_value=("slot_a", "slot_b"),
+    ):
+        runtime.update_registry_slot_values(registry_slots)
+        runtime.language_intent_sources["en"] = intent_sources
+
+        indexed_candidates = [
+            Candidate(
+                text="add slot_a to list",
+                intent_name="IntentA",
+                source=CandidateSource.BUILT_IN,
+                language="en",
+                metadata={"literal_text": "add|to|list"},
+            ),
+            Candidate(
+                text="add slot_b to list",
+                intent_name="IntentB",
+                source=CandidateSource.BUILT_IN,
+                language="en",
+                metadata={"literal_text": "add|to|list"},
+            ),
+        ]
+        index = build_index("en", indexed_candidates)
+
+        # Call without preferences first. Default order from the index list (IntentA first)
+        ranked_no_prefs = runtime.rank_with_dynamic_candidates("en", index, "add milk to list")
+        assert len(ranked_no_prefs) == 2
+        assert ranked_no_prefs[0].candidate.intent_name == "IntentA"
+
+        # Call with preference for IntentB's slot
+        ranked_with_prefs = runtime.rank_with_dynamic_candidates(
+            "en",
+            index,
+            "add milk to list",
+            slot_preferences={("slot_b", "milk")},
+        )
+        assert len(ranked_with_prefs) == 2
+        assert ranked_with_prefs[0].candidate.intent_name == "IntentB"
+
+
 def test_rebuild_index_synchronous() -> None:
     """Verify that index building from snapshot constructs correct candidates."""
     runtime = CanonicalizerRuntime()
@@ -775,6 +1318,7 @@ async def test_async_rebuild_index_real_flow(monkeypatch: Any) -> None:
     ):
         index = await runtime.async_rebuild_index(hass, "vi")
 
+    assert index is not None
     assert index.language == "vi"
     assert index.candidate_count > 0
     assert index.candidates[0].text == "bật đèn"

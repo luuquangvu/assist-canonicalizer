@@ -143,12 +143,14 @@ Công cụ xếp hạng được đo kiểm (benchmark) so với bộ nhận di�
 
 <!-- BENCHMARK_OVERALL_START -->
 
+> Phiên bản phụ thuộc benchmark: `homeassistant` 2026.6.4, `home-assistant-intents` 2026.6.1.
+
 | Chế độ    | Đúng Intent/Slot | Nhận diện sai (Mismatch) | Dự phòng (Fallback) |
 | :-------- | ---------------: | -----------------------: | ------------------: |
-| `hassil`  |            34.0% |                     5.3% |               60.7% |
-| `lexical` |        **83.7%** |                 **8.9%** |            **7.4%** |
+| `hassil`  |            45.9% |                     0.0% |               54.1% |
+| `lexical` |        **86.2%** |                 **2.3%** |           **11.5%** |
 
-> Độ chính xác nhận diện Intent/Slot tăng từ **34.0% lên 83.7%**. Tổng tỷ lệ lỗi (nhận diện sai + chuyển sang dự phòng) giảm mạnh từ **66.0% xuống còn 16.3%**.
+> Độ chính xác nhận diện Intent/Slot tăng từ **45.9% lên 86.2%**. Tổng tỷ lệ lỗi (nhận diện sai + chuyển sang dự phòng) giảm mạnh từ **54.1% xuống còn 13.8%**.
 
 <!-- BENCHMARK_OVERALL_END -->
 
@@ -158,16 +160,16 @@ Công cụ xếp hạng được đo kiểm (benchmark) so với bộ nhận di�
 
 | Ngôn ngữ | Chế độ    | Đúng Intent/Slot | Nhận diện sai (Mismatch) | Dự phòng (Fallback) |
 | :------- | :-------- | ---------------: | -----------------------: | ------------------: |
-| EN       | `hassil`  |            37.8% |                     6.3% |               55.9% |
-| EN       | `lexical` |        **88.3%** |                 **6.3%** |            **5.4%** |
-| DE       | `hassil`  |            36.8% |                     8.0% |               55.2% |
-| DE       | `lexical` |        **89.7%** |                 **3.4%** |            **6.9%** |
-| FR       | `hassil`  |            36.5% |                     5.9% |               57.6% |
-| FR       | `lexical` |        **85.9%** |                 **5.9%** |            **8.2%** |
-| NL       | `hassil`  |            34.3% |                     4.8% |               61.0% |
-| NL       | `lexical` |        **74.3%** |                **15.2%** |           **10.5%** |
-| VI       | `hassil`  |            22.9% |                     1.2% |               75.9% |
-| VI       | `lexical` |        **80.7%** |                **13.3%** |            **6.0%** |
+| EN       | `hassil`  |            51.4% |                     0.0% |               48.6% |
+| EN       | `lexical` |        **90.1%** |                 **2.7%** |            **7.2%** |
+| DE       | `hassil`  |            50.6% |                     0.0% |               49.4% |
+| DE       | `lexical` |        **86.2%** |                 **2.3%** |           **11.5%** |
+| FR       | `hassil`  |            49.4% |                     0.0% |               50.6% |
+| FR       | `lexical` |        **88.2%** |                 **1.2%** |           **10.6%** |
+| NL       | `hassil`  |            44.8% |                     0.0% |               55.2% |
+| NL       | `lexical` |        **82.9%** |                 **1.9%** |           **15.2%** |
+| VI       | `hassil`  |            31.3% |                     0.0% |               68.7% |
+| VI       | `lexical` |        **83.1%** |                 **3.6%** |           **13.3%** |
 
 <!-- BENCHMARK_LANGS_END -->
 

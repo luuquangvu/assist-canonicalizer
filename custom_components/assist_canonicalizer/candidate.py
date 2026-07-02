@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
+from typing import Any
 
+import orjson
+
+from .const import ENTITY_SLOT_NAME_SET, LOCATION_SLOT_NAME_SET
 from .normalization import (
     literal_token_variants,
     normalize_text,
@@ -40,6 +44,7 @@ class Candidate:
     source: CandidateSource = CandidateSource.GENERATED_SAMPLE
     language: str | None = None
     metadata: Mapping[str, str] = field(default_factory=dict)
+    slot_values: tuple[str, ...] = field(default_factory=tuple)
     normalized_text: str = ""
     _normalized_text_no_diacritics: str | None = field(
         default=None, init=False, repr=False, compare=False
@@ -48,6 +53,9 @@ class Candidate:
         default=None, init=False, repr=False, compare=False
     )
     _normalized_tokens_set: frozenset[str] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _slot_tokens_set: frozenset[str] | None = field(
         default=None, init=False, repr=False, compare=False
     )
     _literal_variants: tuple[frozenset[str], ...] | None = field(
@@ -71,6 +79,7 @@ class Candidate:
         if not self.normalized_text:
             object.__setattr__(self, "normalized_text", normalize_text(self.text))
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
+        object.__setattr__(self, "slot_values", tuple(self.slot_values))
 
     def __hash__(self) -> int:
         """Return the hash code for Candidate."""
@@ -81,6 +90,7 @@ class Candidate:
                 self.source,
                 self.language,
                 frozenset(self.metadata.items()),
+                self.slot_values,
             )
         )
 
@@ -94,6 +104,7 @@ class Candidate:
             and self.source == other.source
             and self.language == other.language
             and self.metadata == other.metadata
+            and self.slot_values == other.slot_values
         )
 
     @property
@@ -124,6 +135,22 @@ class Candidate:
         return val
 
     @property
+    def slot_tokens_set(self) -> frozenset[str]:
+        """Return the set of normalized slot tokens."""
+        val = self._slot_tokens_set
+        if val is None:
+            slot_values = _non_static_slot_values(self.metadata)
+            if slot_values is None:
+                slot_values = self.slot_values
+            if slot_values:
+                cand_slot_text = normalize_text(" ".join(slot_values))
+                val = frozenset(cand_slot_text.split())
+            else:
+                val = frozenset()
+            object.__setattr__(self, "_slot_tokens_set", val)
+        return val
+
+    @property
     def normalized_text_sorted(self) -> str:
         """Return the sorted normalized tokens joined by space."""
         val = self._normalized_text_sorted
@@ -137,8 +164,18 @@ class Candidate:
         """Return the set of literal variants."""
         val = self._literal_variants
         if val is None:
-            literal_text = self.metadata.get("literal_text")
-            val = literal_token_variants(literal_text) if literal_text else ()
+            if variants_text := self.metadata.get("literal_variants"):
+                try:
+                    loaded = orjson.loads(variants_text)
+                    val = _literal_variants_from_loaded(loaded)
+                except orjson.JSONDecodeError:
+                    val = None
+                if val is None:
+                    literal_text = self.metadata.get("literal_text")
+                    val = literal_token_variants(literal_text) if literal_text else ()
+            else:
+                literal_text = self.metadata.get("literal_text")
+                val = literal_token_variants(literal_text) if literal_text else ()
             object.__setattr__(self, "_literal_variants", val)
         return val
 
@@ -196,6 +233,99 @@ class Candidate:
         return self.wildcard_info is not None
 
 
+def _non_static_slot_values(metadata: Mapping[str, str]) -> tuple[str, ...] | None:
+    """Return non-static slot values from serialized candidate metadata."""
+    slots_text = metadata.get("slots")
+    if not isinstance(slots_text, str) or not slots_text:
+        return None
+    try:
+        slots = orjson.loads(slots_text)
+    except orjson.JSONDecodeError:
+        return None
+    if not isinstance(slots, dict):
+        return None
+    static_slots_text = metadata.get("static_slots", "")
+    static_slots = (
+        {slot for slot in static_slots_text.split(",") if slot}
+        if isinstance(static_slots_text, str)
+        else set()
+    )
+    values: list[str] = []
+    for name, value in slots.items():
+        if not isinstance(name, str) or name in static_slots:
+            continue
+        if isinstance(value, str) and value:
+            values.append(value)
+    return tuple(values)
+
+
+def _literal_variants_from_loaded(loaded: object) -> tuple[frozenset[str], ...] | None:
+    """Return cached literal variants only when JSON shape is valid."""
+    if not isinstance(loaded, list):
+        return None
+    variants: list[frozenset[str]] = []
+    for variant in loaded:
+        if not isinstance(variant, list):
+            return None
+        tokens: list[str] = []
+        for token in variant:
+            if not isinstance(token, str):
+                return None
+            tokens.append(token)
+        variants.append(frozenset(tokens))
+    return tuple(variants)
+
+
+def _candidate_slot_map(candidate: Candidate) -> dict[str, Any]:
+    """Return decoded candidate slot metadata."""
+    slots_text = candidate.metadata.get("slots")
+    if not isinstance(slots_text, str) or not slots_text:
+        return {}
+    try:
+        decoded = orjson.loads(slots_text)
+    except orjson.JSONDecodeError:
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def slot_alias_values_by_key(
+    slots: Mapping[str, Any],
+    slot_mappings: Mapping[str, Iterable[str]] | None = None,
+) -> dict[str, tuple[Any, ...]]:
+    """Return slot values indexed by direct and aliased slot names."""
+    aliases: dict[str, list[Any]] = {}
+    slot_mappings = slot_mappings or {}
+    for slot_name, slot_value in slots.items():
+        candidate_keys = [slot_name]
+        if ":" in slot_name:
+            shared_slot_name = slot_name.split(":", 1)[0]
+            candidate_keys.append(shared_slot_name)
+            candidate_keys.extend(slot_mappings.get(shared_slot_name, ()))
+        candidate_keys.extend(slot_mappings.get(slot_name, ()))
+
+        seen_keys: set[str] = set()
+        for candidate_key in candidate_keys:
+            if candidate_key in seen_keys:
+                continue
+            seen_keys.add(candidate_key)
+            aliases.setdefault(candidate_key, []).append(slot_value)
+    return {slot_name: tuple(values) for slot_name, values in aliases.items()}
+
+
+def candidate_dedupe_preference_key(candidate: Candidate) -> tuple[int, int, int, int]:
+    """Return a source-first HassIL-aligned candidate dedupe key."""
+    slots = _candidate_slot_map(candidate)
+    has_generic_entity = bool(slots.keys() & ENTITY_SLOT_NAME_SET)
+    has_location = bool(slots.keys() & LOCATION_SLOT_NAME_SET)
+    has_domain = "domain" in slots
+    return (
+        -candidate.source_priority,
+        int(has_location and has_domain),
+        int(has_generic_entity),
+        int(not has_domain),
+    )
+
+
 def deduplicate_candidates(candidates: list[Candidate]) -> tuple[Candidate, ...]:
     """Deduplicate by (normalized text, intent name) preserving best source priority.
 
@@ -203,12 +333,17 @@ def deduplicate_candidates(candidates: list[Candidate]) -> tuple[Candidate, ...]
     HassIL validation loop resolves the intent based on real home context
     (requires_context / excludes_context).
     """
-    selected: dict[tuple[str, str], Candidate] = {}
+    selected: dict[tuple[str, str], tuple[Candidate, tuple[int, int, int, int]]] = {}
     for candidate in candidates:
         key = (candidate.normalized_text, candidate.intent_name)
-        existing = selected.get(key)
-        if existing is None or candidate.source_priority < existing.source_priority:
-            selected[key] = candidate
+        pref_key = candidate_dedupe_preference_key(candidate)
+        existing_info = selected.get(key)
+        if existing_info is None or pref_key > existing_info[1]:
+            selected[key] = (candidate, pref_key)
+
     return tuple(
-        sorted(selected.values(), key=lambda item: (item.source_priority, item.normalized_text))
+        sorted(
+            (item[0] for item in selected.values()),
+            key=lambda item: (item.source_priority, item.normalized_text),
+        )
     )

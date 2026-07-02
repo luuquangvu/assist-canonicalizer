@@ -72,17 +72,13 @@ def normalize_text_no_diacritics_from_normalized(
 def tokenize_text(text: str) -> tuple[str, ...]:
     """Return whitespace tokens from normalized text."""
     normalized = normalize_text(text)
-    if not normalized:
-        return ()
-    return tuple(normalized.split())
+    return tuple(normalized.split()) if normalized else ()
 
 
 @lru_cache(maxsize=65536)
 def tokenize_normalized(text: str) -> tuple[str, ...]:
     """Return whitespace tokens from already-normalized text."""
-    if not text:
-        return ()
-    return tuple(text.split())
+    return tuple(text.split()) if text else ()
 
 
 @lru_cache(maxsize=65536)
@@ -90,12 +86,15 @@ def char_ngrams_normalized(text: str, size: int = 3) -> frozenset[str]:
     """Return character n-grams from already-normalized text."""
     if size < 1:
         raise ValueError("N-gram size must be positive")
-    compact = text.replace(" ", "")
-    if not compact:
-        return frozenset()
-    if len(compact) <= size:
-        return frozenset({compact})
-    return frozenset(compact[index : index + size] for index in range(len(compact) - size + 1))
+    if compact := text.replace(" ", ""):
+        return (
+            frozenset({compact})
+            if len(compact) <= size
+            else frozenset(
+                compact[index : index + size] for index in range(len(compact) - size + 1)
+            )
+        )
+    return frozenset()
 
 
 @lru_cache(maxsize=2048)
@@ -105,8 +104,7 @@ def literal_token_variants(literal_text: str) -> tuple[frozenset[str], ...]:
     for variant in literal_text.split("|"):
         if not variant.strip():
             continue
-        literal_tokens = frozenset(normalize_text(variant).split())
-        if literal_tokens:
+        if literal_tokens := frozenset(normalize_text(variant).split()):
             variants.append(literal_tokens)
     return tuple(variants)
 

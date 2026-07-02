@@ -22,6 +22,19 @@ from custom_components.assist_canonicalizer.const import DATA_RUNTIME, DOMAIN
 from custom_components.assist_canonicalizer.runtime import CanonicalizerRuntime
 
 
+class _IntentSubscriptionRecorder:
+    """Record the callback passed to subscribe_intents."""
+
+    def __init__(self) -> None:
+        """Initialize callback storage."""
+        self.saved_callback: Any = None
+
+    def subscribe_intents(self, cb: Any) -> Any:
+        """Mock subscribing to intent changes."""
+        self.saved_callback = cb
+        return lambda: None
+
+
 def test_init_imports_fallback() -> None:
     """Test importing the custom component when Home Assistant helper registries are missing."""
     # Delete attributes from parent modules to force try-except block execution on import/reload
@@ -57,14 +70,7 @@ def test_init_imports_fallback() -> None:
 
     try:
         with patch.dict(sys.modules, sys_modules_patch):
-            importlib.reload(custom_components.assist_canonicalizer)
-
-            assert custom_components.assist_canonicalizer.agent_manager is None
-            assert custom_components.assist_canonicalizer.exposed_entities is None
-            assert custom_components.assist_canonicalizer.area_registry is None
-            assert custom_components.assist_canonicalizer.entity_registry is None
-            assert custom_components.assist_canonicalizer.ha_event is None
-            assert custom_components.assist_canonicalizer.floor_registry is None
+            _test_init_imports_fallback()
     finally:
         # Restore parent module attributes
         for attr, val in old_helpers.items():
@@ -74,6 +80,18 @@ def test_init_imports_fallback() -> None:
 
         # Force restore reload of the module to its original state
         importlib.reload(custom_components.assist_canonicalizer)
+
+
+def _test_init_imports_fallback() -> None:
+    """Test imports fallback to None when HA registries and services are missing."""
+    importlib.reload(custom_components.assist_canonicalizer)
+
+    assert custom_components.assist_canonicalizer.agent_manager is None
+    assert custom_components.assist_canonicalizer.exposed_entities is None
+    assert custom_components.assist_canonicalizer.area_registry is None
+    assert custom_components.assist_canonicalizer.entity_registry is None
+    assert custom_components.assist_canonicalizer.ha_event is None
+    assert custom_components.assist_canonicalizer.floor_registry is None
 
 
 @pytest.mark.asyncio
@@ -98,16 +116,9 @@ async def test_async_setup_entry(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda h: {"name": ("light",)},
     )
 
-    saved_callback = None
-
-    def subscribe_intents(cb: Any) -> Any:
-        """Mock subscribing to intent changes."""
-        nonlocal saved_callback
-        saved_callback = cb
-        return lambda: None
-
+    subscription_recorder = _IntentSubscriptionRecorder()
     mock_agent_manager = MagicMock()
-    mock_agent_manager.subscribe_intents = subscribe_intents
+    mock_agent_manager.subscribe_intents = subscription_recorder.subscribe_intents
     monkeypatch.setattr(
         "custom_components.assist_canonicalizer.agent_manager.get_agent_manager",
         lambda h: mock_agent_manager,
@@ -137,9 +148,9 @@ async def test_async_setup_entry(monkeypatch: pytest.MonkeyPatch) -> None:
     assert isinstance(runtime, CanonicalizerRuntime)
 
     # Verify triggering the intent update callback schedules index rebuild
-    assert saved_callback is not None
+    assert subscription_recorder.saved_callback is not None
     runtime.indexes["en"] = MagicMock()
-    saved_callback({"some": "update"})
+    subscription_recorder.saved_callback({"some": "update"})
     hass.add_job.assert_called_with(runtime.async_rebuild_index, hass, "en")
 
 

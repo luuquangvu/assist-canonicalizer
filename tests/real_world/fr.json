@@ -533,7 +533,7 @@
     {
       "query": "éteins aspirateur",
       "language": "fr",
-      "expected_intent": "HassTurnOff",
+      "expected_intent": "HassVacuumReturnToBase",
       "expected_canonical": "éteins aspirateur",
       "category": "intent_coverage",
       "expected_slots": {
@@ -644,7 +644,7 @@
     {
       "query": "aspirateur éteindre",
       "language": "fr",
-      "expected_intent": "HassTurnOff",
+      "expected_intent": "HassVacuumReturnToBase",
       "expected_canonical": "éteindre l'aspirateur",
       "category": "missing_words",
       "expected_slots": {

@@ -1,13 +1,21 @@
 """Tests for lexical ranking and candidate indexing."""
 
+from typing import Any, cast
+
+import orjson
 import pytest
 
 from custom_components.assist_canonicalizer import ranking
-from custom_components.assist_canonicalizer.candidate import Candidate, CandidateSource
+from custom_components.assist_canonicalizer.candidate import (
+    Candidate,
+    CandidateSource,
+    slot_alias_values_by_key,
+)
 from custom_components.assist_canonicalizer.const import (
     DEFAULT_MIN_CONFIDENCE,
     DEFAULT_MIN_MARGIN,
     DEFAULT_RAPIDFUZZ_PREFILTER_CANDIDATES,
+    FallbackReason,
 )
 from custom_components.assist_canonicalizer.indexer import build_index
 from custom_components.assist_canonicalizer.normalization import normalize_text
@@ -17,10 +25,30 @@ from custom_components.assist_canonicalizer.ranking import (
     ScoreBreakdown,
     _query_token_coverage,
     accepted_candidate,
+    confidence_gate_rejection_reason,
     rank_candidates,
     rapidfuzz_similarity_normalized,
     token_count_ratio,
 )
+from custom_components.assist_canonicalizer.rehydration import wildcard_variants_analysis
+
+
+def _fail_bm25_from_texts(*args: object, **kwargs: object) -> None:
+    """Fail if ranking rebuilds BM25 data."""
+    raise AssertionError("BM25 index should be cached by CanonicalIndex")
+
+
+class _RapidFuzzSimilarityCounter:
+    """Callable RapidFuzz mock that counts invocations."""
+
+    def __init__(self) -> None:
+        """Initialize the call counter."""
+        self.calls = 0
+
+    def __call__(self, query: str, candidate: str, **kwargs: object) -> float:
+        """Count expensive RapidFuzz calls."""
+        self.calls += 1
+        return 0.5
 
 
 def test_index_deduplicates_by_normalized_text_with_source_priority() -> None:
@@ -40,6 +68,155 @@ def test_index_deduplicates_by_normalized_text_with_source_priority() -> None:
     index = build_index("en", [generated, custom])
     assert index.candidate_count == 1
     assert index.candidates[0].source == CandidateSource.CUSTOM_SENTENCE
+
+
+def test_index_deduplicates_with_hassil_domain_area_preference() -> None:
+    """Prefer HassIL-style domain-area candidates for same-source static duplicates."""
+    generic = Candidate(
+        text="turn on bathroom fan",
+        intent_name="HassTurnOn",
+        source=CandidateSource.BUILT_IN,
+        language="en",
+        metadata={
+            "slots": orjson.dumps({"name": "bathroom fan", "name:fan": "bathroom fan"}).decode(
+                "utf-8"
+            )
+        },
+    )
+    domain_area = Candidate(
+        text="turn on bathroom fan",
+        intent_name="HassTurnOn",
+        source=CandidateSource.BUILT_IN,
+        language="en",
+        metadata={
+            "slots": orjson.dumps(
+                {
+                    "domain": "fan",
+                    "name": "all",
+                    "name:fan": "bathroom fan",
+                    "area": "bathroom",
+                }
+            ).decode("utf-8"),
+            "static_slots": "domain,name",
+        },
+    )
+
+    index = build_index("en", [generic, domain_area])
+
+    assert index.candidate_count == 1
+    slots = orjson.loads(index.candidates[0].metadata["slots"])
+    assert slots["domain"] == "fan"
+    assert slots["area"] == "bathroom"
+    assert slots["name"] == "all"
+
+
+@pytest.mark.parametrize("location_slot_name", ["area_name", "floor_name"])
+def test_index_dedupe_preference_uses_shared_location_slot_names(
+    location_slot_name: str,
+) -> None:
+    """Use shared entity/location slot aliases when selecting static duplicates."""
+    generic = Candidate(
+        text="turn on upstairs fan",
+        intent_name="HassTurnOn",
+        source=CandidateSource.BUILT_IN,
+        language="en",
+        metadata={"slots": orjson.dumps({"entity_name": "upstairs fan"}).decode("utf-8")},
+    )
+    domain_location = Candidate(
+        text="turn on upstairs fan",
+        intent_name="HassTurnOn",
+        source=CandidateSource.BUILT_IN,
+        language="en",
+        metadata={
+            "slots": orjson.dumps(
+                {
+                    "domain": "fan",
+                    "name": "all",
+                    location_slot_name: "upstairs",
+                }
+            ).decode("utf-8"),
+            "static_slots": "domain,name",
+        },
+    )
+
+    index = build_index("en", [generic, domain_location])
+
+    assert index.candidate_count == 1
+    slots = orjson.loads(index.candidates[0].metadata["slots"])
+    assert slots["domain"] == "fan"
+    assert slots[location_slot_name] == "upstairs"
+    assert slots["name"] == "all"
+
+
+def test_index_keeps_custom_source_before_domain_area_preference() -> None:
+    """Prefer custom static duplicates before built-in structural preferences."""
+    custom = Candidate(
+        text="turn on bathroom fan",
+        intent_name="HassTurnOn",
+        source=CandidateSource.CUSTOM_SENTENCE,
+        language="en",
+        metadata={
+            "slots": orjson.dumps({"name": "bathroom fan", "name:fan": "bathroom fan"}).decode(
+                "utf-8"
+            )
+        },
+    )
+    built_in_domain_area = Candidate(
+        text="turn on bathroom fan",
+        intent_name="HassTurnOn",
+        source=CandidateSource.BUILT_IN,
+        language="en",
+        metadata={
+            "slots": orjson.dumps(
+                {
+                    "domain": "fan",
+                    "name": "all",
+                    "name:fan": "bathroom fan",
+                    "area": "bathroom",
+                }
+            ).decode("utf-8"),
+            "static_slots": "domain,name",
+        },
+    )
+
+    index = build_index("en", [built_in_domain_area, custom])
+
+    assert index.candidate_count == 1
+    assert index.candidates[0].source == CandidateSource.CUSTOM_SENTENCE
+
+
+def test_slot_alias_values_by_key_includes_direct_namespace_and_mapping_aliases() -> None:
+    """Expose core slot aliases for benchmark and production diagnostics."""
+    values_by_key = slot_alias_values_by_key(
+        {"name:fan": "bathroom fan", "todo_list": "shopping list"},
+        {"name": frozenset({"entity", "entity_name"}), "todo_list": frozenset({"name"})},
+    )
+
+    assert values_by_key["name"] == ("bathroom fan", "shopping list")
+    assert values_by_key["name:fan"] == ("bathroom fan",)
+    assert values_by_key["entity"] == ("bathroom fan",)
+    assert values_by_key["entity_name"] == ("bathroom fan",)
+    assert values_by_key["todo_list"] == ("shopping list",)
+
+
+@pytest.mark.parametrize("static_slots_meta", [None, ["area"]])
+def test_candidate_slot_tokens_ignore_non_string_static_slots_metadata(
+    static_slots_meta: object,
+) -> None:
+    """Malformed static_slots metadata should not block slot-token extraction."""
+    candidate = Candidate(
+        text="turn on kitchen light",
+        intent_name="HassTurnOn",
+        metadata=cast(
+            Any,
+            {
+                "slots": orjson.dumps({"area": "kitchen"}).decode("utf-8"),
+                "static_slots": static_slots_meta,
+            },
+        ),
+    )
+
+    assert candidate.slot_tokens_set == frozenset({"kitchen"})
 
 
 def test_rank_candidates_prefers_matching_entity_terms() -> None:
@@ -73,6 +250,48 @@ def test_accepted_candidate_enforces_margin_for_competing_intents() -> None:
             min_margin=DEFAULT_MIN_MARGIN + 0.95,
         )
         is None
+    )
+
+
+def test_confidence_gate_rejection_reason_distinguishes_threshold_failures() -> None:
+    """Return the specific confidence-gate reason for rejected ranked candidates."""
+    low_confidence = RankedCandidate(
+        candidate=Candidate(text="turn on kitchen light", intent_name="HassTurnOn", language="en"),
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.1,
+            char_ngram_score=0.1,
+            bm25_score=0.1,
+            intent_score=0.1,
+            final_score=DEFAULT_MIN_CONFIDENCE - 0.01,
+        ),
+    )
+    top = RankedCandidate(
+        candidate=Candidate(text="turn on kitchen light", intent_name="HassTurnOn", language="en"),
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.8,
+            char_ngram_score=0.8,
+            bm25_score=0.8,
+            intent_score=1.0,
+            final_score=0.8,
+        ),
+    )
+    competitor = RankedCandidate(
+        candidate=Candidate(
+            text="turn off kitchen light", intent_name="HassTurnOff", language="en"
+        ),
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.79,
+            char_ngram_score=0.79,
+            bm25_score=0.79,
+            intent_score=1.0,
+            final_score=0.79,
+        ),
+    )
+
+    assert confidence_gate_rejection_reason((low_confidence,)) == FallbackReason.LOW_CONFIDENCE
+    assert (
+        confidence_gate_rejection_reason((top, competitor), min_margin=0.05)
+        == FallbackReason.LOW_MARGIN
     )
 
 
@@ -162,11 +381,7 @@ def test_index_rank_reuses_prebuilt_lexical_index(monkeypatch) -> None:
         ],
     )
 
-    def fail_from_texts(*args, **kwargs):
-        """Fail if ranking rebuilds BM25 data."""
-        raise AssertionError("BM25 index should be cached by CanonicalIndex")
-
-    monkeypatch.setattr(ranking.BM25Index, "from_texts", fail_from_texts)
+    monkeypatch.setattr(ranking.BM25Index, "from_normalized_texts", _fail_bm25_from_texts)
 
     ranked = index.rank("turn on kitchen lamp")
 
@@ -179,23 +394,28 @@ def test_rank_candidates_prefilters_rapidfuzz_work(monkeypatch) -> None:
         Candidate(text=f"device {index}", intent_name="HassTurnOn", language="en")
         for index in range(DEFAULT_RAPIDFUZZ_PREFILTER_CANDIDATES + 50)
     ]
-    calls = 0
-
-    def fake_rapidfuzz_similarity(query: str, candidate: str, **kwargs: object) -> float:
-        """Count expensive RapidFuzz calls."""
-        nonlocal calls
-        calls += 1
-        return 0.5
-
+    rapidfuzz_counter = _RapidFuzzSimilarityCounter()
     monkeypatch.setattr(
         ranking,
         "rapidfuzz_similarity_normalized",
-        fake_rapidfuzz_similarity,
+        rapidfuzz_counter,
     )
 
     ranking.rank_candidates("device 1", candidates, max_candidates=5)
 
-    assert calls == DEFAULT_RAPIDFUZZ_PREFILTER_CANDIDATES
+    assert rapidfuzz_counter.calls == DEFAULT_RAPIDFUZZ_PREFILTER_CANDIDATES
+
+
+def test_rank_candidates_validates_candidate_slot_token_length() -> None:
+    """Reject precomputed slot-token data that does not match the candidate list."""
+    candidates = [Candidate(text="turn on kitchen light", intent_name="HassTurnOn")]
+
+    with pytest.raises(ValueError, match="candidate_slot_tokens length must match candidates"):
+        rank_candidates(
+            "turn on kitchen light",
+            candidates,
+            candidate_slot_tokens=(),
+        )
 
 
 def test_rapidfuzz_similarity_penalizes_extra_area_tokens() -> None:
@@ -238,6 +458,27 @@ def test_rank_candidates_penalizes_opposite_builtin_action() -> None:
     assert ranked[0].candidate.intent_name == "HassTurnOn"
     assert ranked[0].scores.intent_score == 1.0
     assert ranked[1].scores.intent_score == 0.0
+
+
+def test_rank_candidates_scores_single_token_exact_literal_above_coverage() -> None:
+    """Keep exact single-token literal matches from falling back to coverage."""
+    candidate = Candidate(
+        text="turn on lamp",
+        intent_name="HassTurnOn",
+        language="en",
+        metadata={"literal_text": "turn"},
+        slot_values=("lamp",),
+    )
+
+    ranked = rank_candidates(
+        query="turn kitchen lamp",
+        candidates=[candidate],
+        max_candidates=1,
+        language="en",
+        positional_literal_tokens=frozenset({"turn", "kitchen"}),
+    )
+
+    assert ranked[0].scores.intent_score == 1.0
 
 
 def test_rank_candidates_uses_english_builtin_action_alignment() -> None:
@@ -573,6 +814,7 @@ def test_apply_intent_disambiguation_keeps_order_for_same_intent() -> None:
     assert ranked[1] is second
 
 
+@pytest.mark.current_intents
 def test_rank_candidates_rehydrates_wildcard() -> None:
     """Test that rank_candidates correctly rehydrates wildcard placeholder candidates."""
     # We create a candidate with a wildcard slot
@@ -603,6 +845,221 @@ def test_rank_candidates_rehydrates_wildcard() -> None:
     assert ranked[0].scores.rapidfuzz_score >= 0.99
 
 
+@pytest.mark.current_intents
+def test_rank_candidates_does_not_slot_penalize_rehydrated_wildcard_placeholder() -> None:
+    """Do not treat a rehydrated wildcard placeholder as a missing slot token."""
+    candidate = Candidate(
+        text="broadcast message",
+        intent_name="HassBroadcast",
+        language="en",
+        metadata={
+            "sentence_template": "(broadcast|announce) {message}",
+            "literal_text": "broadcast|announce",
+            "wildcard_slots": "message",
+            "slots": '{"message":"message"}',
+        },
+        slot_values=("message",),
+    )
+    second_candidate = Candidate(
+        text="status status",
+        intent_name="HassStatus",
+        language="en",
+        metadata={
+            "sentence_template": "{status}",
+            "slots": '{"status":"status"}',
+        },
+        slot_values=("status",),
+    )
+
+    ranked = rank_candidates(
+        query="broadcast dinner is ready status",
+        candidates=[candidate, second_candidate],
+        max_candidates=2,
+        language="en",
+    )
+
+    assert len(ranked) == 2
+    assert ranked[0].candidate == candidate
+    assert ranked[0].scores.final_score > DEFAULT_MIN_CONFIDENCE
+    assert accepted_candidate(ranked) is ranked[0]
+
+
+@pytest.mark.current_intents
+def test_rank_candidates_keeps_slot_penalty_for_leading_rehydrated_wildcard() -> None:
+    """Keep slot conflict protection for generic leading free-text wildcards."""
+    generic_media = Candidate(
+        text="search_query starten",
+        intent_name="HassMediaSearchAndPlay",
+        language="de",
+        metadata={
+            "sentence_template": "{search_query} <starten_end_of_sentence>",
+            "literal_text": "starten",
+            "wildcard_slots": "search_query",
+            "slots": '{"search_query":"search_query"}',
+        },
+        slot_values=("search_query",),
+    )
+    assert generic_media.wildcard_info == (0, "search_query")
+    vacuum = Candidate(
+        text="staubsauger Reinigung starten",
+        intent_name="HassVacuumStart",
+        language="de",
+        metadata={
+            "literal_text": "staubsauger|reinigung|starten",
+            "slots": '{"name":"staubsauger"}',
+        },
+        slot_values=("staubsauger",),
+    )
+
+    ranked = rank_candidates(
+        query="reinigung mit staubsauger starten",
+        candidates=[generic_media, vacuum],
+        max_candidates=2,
+        language="de",
+    )
+
+    assert ranked[0].candidate == vacuum
+
+
+@pytest.mark.current_intents
+def test_rank_candidates_allows_leading_rehydrated_wildcard_with_slot_anchor() -> None:
+    """Count rehydrated leading wildcard tokens when another slot anchors the candidate."""
+    wildcard_with_anchor = Candidate(
+        text="search_query auf fernseher starten",
+        intent_name="HassMediaSearchAndPlay",
+        language="de",
+        metadata={
+            "sentence_template": "{search_query} auf {name} <starten_end_of_sentence>",
+            "literal_text": "auf|starten",
+            "wildcard_slots": "search_query",
+            "slots": '{"search_query":"search_query","name":"fernseher"}',
+        },
+        slot_values=("search_query", "fernseher"),
+    )
+    assert wildcard_with_anchor.wildcard_info == (0, "search_query")
+    music_device = Candidate(
+        text="musik auf radio starten",
+        intent_name="HassMediaSearchAndPlay",
+        language="de",
+        metadata={
+            "literal_text": "musik|radio|starten",
+            "slots": '{"media":"musik","name":"radio"}',
+        },
+        slot_values=("musik", "radio"),
+    )
+
+    ranked = rank_candidates(
+        query="musik auf fernseher starten",
+        candidates=[wildcard_with_anchor, music_device],
+        max_candidates=2,
+        language="de",
+    )
+
+    assert ranked[0].candidate == wildcard_with_anchor
+    assert ranked[0].scores.final_score > 0.95
+
+
+def test_rank_candidates_clamps_high_confidence_slot_penalty_multiplier() -> None:
+    """Do not let min_confidence above 1 turn slot penalties into score boosts."""
+    candidate = Candidate(
+        text="turn on kitchen lamp",
+        intent_name="HassTurnOn",
+        language="en",
+        slot_values=("kitchen lamp",),
+    )
+
+    penalized = rank_candidates(
+        query="turn on kitchen light",
+        candidates=[candidate],
+        language="en",
+        min_confidence=1.2,
+    )
+    unpenalized = rank_candidates(
+        query="turn on kitchen light",
+        candidates=[candidate],
+        candidate_slot_tokens=(frozenset(),),
+        language="en",
+        min_confidence=1.2,
+    )
+
+    assert penalized[0].scores.final_score <= unpenalized[0].scores.final_score
+
+
+@pytest.mark.current_intents
+def test_wildcard_variants_analysis_removes_wildcard_and_deduplicates() -> None:
+    """Compute wildcard literal coverage once per equivalent variant/wildcard pair."""
+    candidate = Candidate(
+        text="message",
+        intent_name="HassBroadcast",
+        language="en",
+        metadata={"literal_text": "message|messages|broadcast message"},
+    )
+
+    variants_with_len, all_tokens = wildcard_variants_analysis(candidate)
+
+    assert variants_with_len == (
+        (frozenset(), 0, 0),
+        (frozenset({"messages"}), 1, 1),
+        (frozenset({"broadcast"}), 1, 1),
+    )
+    assert all_tokens == frozenset({"broadcast", "messages"})
+
+
+@pytest.mark.current_intents
+def test_wildcard_variants_analysis_removes_embedded_structured_wildcard() -> None:
+    """Do not keep placeholder-bearing tokens as wildcard literal anchors."""
+    candidate = Candidate(
+        text="search_querypodcast",
+        intent_name="HassMediaSearchAndPlay",
+        language="de",
+        metadata={"literal_text": "spiel den search_querypodcast|spiel den podcast"},
+    )
+
+    variants_with_len, all_tokens = wildcard_variants_analysis(candidate)
+
+    assert variants_with_len == (
+        (frozenset({"den", "spiel"}), 2, 2),
+        (frozenset({"den", "podcast", "spiel"}), 3, 3),
+    )
+    assert all_tokens == frozenset({"den", "podcast", "spiel"})
+
+
+@pytest.mark.current_intents
+def test_wildcard_variants_analysis_removes_embedded_single_word_wildcard() -> None:
+    """Strip single-word wildcard names embedded in literal tokens."""
+    candidate = Candidate(
+        text="urgentmessage",
+        intent_name="HassBroadcast",
+        language="en",
+        metadata={"literal_text": "broadcast urgentmessage|broadcast"},
+    )
+
+    variants_with_len, all_tokens = wildcard_variants_analysis(candidate)
+
+    assert variants_with_len == ((frozenset({"broadcast"}), 1, 1),)
+    assert all_tokens == frozenset({"broadcast"})
+
+
+@pytest.mark.current_intents
+def test_wildcard_variants_analysis_keeps_multilingual_word_containing_wildcard() -> None:
+    """Do not strip non-English words that merely contain a wildcard name."""
+    candidate = Candidate(
+        text="messagerie",
+        intent_name="HassBroadcast",
+        language="fr",
+        metadata={"literal_text": "messagerie|diffuser message"},
+    )
+
+    variants_with_len, all_tokens = wildcard_variants_analysis(candidate)
+
+    assert variants_with_len == (
+        (frozenset({"messagerie"}), 1, 1),
+        (frozenset({"diffuser"}), 1, 1),
+    )
+    assert all_tokens == frozenset({"diffuser", "messagerie"})
+
+
+@pytest.mark.current_intents
 def test_rank_candidates_wildcard_bypasses_prefilter() -> None:
     """Test that wildcard candidates bypass the pre-filter and are evaluated."""
     # We create multiple candidates to exceed the pre-filter limit.
@@ -637,6 +1094,9 @@ def test_rank_candidates_wildcard_bypasses_prefilter() -> None:
         language="en",
         wildcard_always_passes=frozenset(),
         wildcard_variants_with_len={},
+        wildcard_token_to_indices={},
+        wildcard_literal_tokens_by_index={},
+        wildcard_min_required_by_index={},
     )
     assert len(ranked_disabled) == 1
     assert ranked_disabled[0].candidate != wildcard_cand
@@ -654,6 +1114,7 @@ def test_rank_candidates_wildcard_bypasses_prefilter() -> None:
     assert ranked[0].candidate == wildcard_cand
 
 
+@pytest.mark.current_intents
 def test_rank_candidates_applies_slot_preferences_tiebreaker() -> None:
     """Verify that slot_preferences tie-breaks wildcard candidate ranking."""
     cand_shopping = Candidate(
@@ -760,3 +1221,119 @@ def test_vietnamese_shopping_list_rehydration_selection() -> None:
     # Specific template should be ranked first because cand_generic's wildcard
     # is too long and gets penalized
     assert ranked[0].candidate == cand_specific
+
+
+def test_slot_matching_penalty_robustness_against_wrong_intent() -> None:
+    """Verify slot suffix mismatch does not rank correct intent below wrong intent."""
+    cand_with_suffix = Candidate(
+        text="tắt Quạt phòng khách 1",
+        intent_name="HassTurnOff",
+        language="vi",
+        metadata={"literal_text": "tắt"},
+        slot_values=("quạt phòng khách 1",),
+    )
+    cand_correct_suffix = Candidate(
+        text="tắt Quạt phòng khách 2",
+        intent_name="HassTurnOff",
+        language="vi",
+        metadata={"literal_text": "tắt"},
+        slot_values=("quạt phòng khách 2",),
+    )
+    cand_wrong_intent = Candidate(
+        text="quạt phòng khách",
+        intent_name="HassTurnOn",
+        language="vi",
+        metadata={"literal_text": ""},
+        slot_values=("quạt phòng khách",),
+    )
+
+    # 1. Query without digits: "tắt quạt phòng khách"
+    # Both candidates with suffixes should rank above the wrong intent,
+    # because the wrong intent is missing the critical action verb "tắt".
+    ranked = rank_candidates(
+        query="tắt quạt phòng khách",
+        candidates=[cand_wrong_intent, cand_with_suffix, cand_correct_suffix],
+        max_candidates=3,
+        language="vi",
+    )
+    assert len(ranked) == 3
+    # The suffix candidates should rank top because digit "1" and "2" are ignored
+    assert ranked[0].candidate in (cand_with_suffix, cand_correct_suffix)
+    assert ranked[1].candidate in (cand_with_suffix, cand_correct_suffix)
+
+    # 2. Query with digits: "tắt quạt phòng khách 2"
+    # Since query has digits, numeric slot tokens are not ignored.
+    # cand_correct_suffix should rank first (perfect slot match),
+    # and cand_with_suffix should be penalized (mismatching slot token "1" vs "2").
+    ranked_with_digits = rank_candidates(
+        query="tắt quạt phòng khách 2",
+        candidates=[cand_wrong_intent, cand_with_suffix, cand_correct_suffix],
+        max_candidates=3,
+        language="vi",
+    )
+    assert len(ranked_with_digits) == 3
+    assert ranked_with_digits[0].candidate == cand_correct_suffix
+    assert ranked_with_digits[1].candidate == cand_with_suffix
+
+
+def test_slot_matching_penalty_ignores_static_slots() -> None:
+    """Verify that slot matching penalty calculation ignores static slots."""
+    metadata = {
+        "slots": orjson.dumps({"area": "phòng khách 1", "domain": "fan", "name": "all"}).decode(
+            "utf-8"
+        ),
+        "static_slots": "domain,name",
+        "literal_text": "tắt quạt",
+    }
+
+    cand_generic = Candidate(
+        text="tắt quạt phòng khách 1",
+        intent_name="HassTurnOff",
+        language="vi",
+        metadata=metadata,
+        slot_values=("phòng khách 1", "fan", "all"),
+    )
+
+    cand_competitor = Candidate(
+        text="tắt quạt phòng khách 2",
+        intent_name="HassTurnOff",
+        language="vi",
+        metadata={
+            "slots": orjson.dumps({"area": "phòng khách 2"}).decode("utf-8"),
+            "literal_text": "tắt quạt",
+        },
+        slot_values=("phòng khách 2",),
+    )
+
+    ranked = rank_candidates(
+        query="tắt quạt phòng khách 2",
+        candidates=[cand_generic, cand_competitor],
+        max_candidates=2,
+        language="vi",
+    )
+    assert len(ranked) == 2
+    generic_result = next(r for r in ranked if r.candidate == cand_generic)
+
+    cand_without_static = Candidate(
+        text="tắt quạt phòng khách 1",
+        intent_name="HassTurnOff",
+        language="vi",
+        metadata={
+            "slots": orjson.dumps({"area": "phòng khách 1", "domain": "fan", "name": "all"}).decode(
+                "utf-8"
+            ),
+            "literal_text": "tắt quạt",
+        },
+        slot_values=("phòng khách 1", "fan", "all"),
+    )
+    ranked_without_static = rank_candidates(
+        query="tắt quạt phòng khách 2",
+        candidates=[cand_without_static, cand_competitor],
+        max_candidates=2,
+        language="vi",
+    )
+    without_static_result = next(
+        r for r in ranked_without_static if r.candidate == cand_without_static
+    )
+
+    assert generic_result.scores.final_score > without_static_result.scores.final_score

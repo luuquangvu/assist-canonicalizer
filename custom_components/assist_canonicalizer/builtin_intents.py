@@ -20,12 +20,10 @@ def load_language_intent_sources(
         return {}
 
     sources: dict[str, Mapping[str, Any]] = {}
-    built_in = _load_built_in_intents(language_variant)
-    if built_in:
+    if built_in := _load_built_in_intents(language_variant):
         sources["built_in"] = built_in
 
-    custom = _load_custom_sentences(language_variant, config_path)
-    if custom:
+    if custom := _load_custom_sentences(language_variant, config_path):
         sources["custom_sentence"] = custom
 
     return sources

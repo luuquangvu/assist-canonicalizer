@@ -87,7 +87,50 @@ jobs:
             exit 1
           fi
 
-          MATRIX_JSON=$(jq -c --arg latest "$LATEST_HA" 'map(if .ha_version == "latest" then . + {ha_version: ("latest (" + $latest + ")"), ha_real_version: $latest} else . + {ha_real_version: .ha_version} end) | {include: .}' tools/compatibility_matrix.json)
+          jq -e '
+            (type == "array") and all(.[]; (
+              (type == "object") and
+              (.ha_version | type == "string") and
+              (.python_version | type == "string") and
+              (.ha_version == "latest" or (.ha_version | test("^[a-zA-Z0-9]+(\\.[a-zA-Z0-9]+)*$")))
+              and (.python_version | test("^[a-zA-Z0-9]+(\\.[a-zA-Z0-9]+)*$"))
+              and ((.pinned_test_dependencies // []) | type == "array")
+              and all((.pinned_test_dependencies // [])[]; (
+                (type == "object")
+                and (.package | type == "string")
+                and (.version | type == "string")
+                and (.package | test("^[a-zA-Z0-9](?:[a-zA-Z0-9._-]*[a-zA-Z0-9])?$"))
+                and (.version | test("^[a-zA-Z0-9]+(\\.[a-zA-Z0-9]+)*$"))
+              ))
+              and (
+                ((.pinned_test_dependencies // []) | map(.package | ascii_downcase | gsub("[._-]+"; "-"))) as $pinned_packages
+                | all($pinned_packages[]; . != "homeassistant")
+                  and (($pinned_packages | unique | length) == ($pinned_packages | length))
+              )
+            ))
+          ' tools/compatibility_matrix.json >/dev/null
+
+          MATRIX_JSON=$(jq -c --arg latest "$LATEST_HA" '
+            map(
+              (if .ha_version == "latest" then
+                . + {
+                  ha_version: ("latest (" + $latest + ")"),
+                  ha_real_version: $latest
+                }
+              else
+                . + {
+                  ha_real_version: .ha_version
+                }
+              end)
+              | . + {
+                pinned_test_dependency_specs: (
+                  (.pinned_test_dependencies // [])
+                  | map((.package | ascii_downcase | gsub("[._-]+"; "-")) + "==" + .version)
+                )
+              }
+            )
+            | {include: .}
+          ' tools/compatibility_matrix.json)
           echo "matrix=$MATRIX_JSON" >> $GITHUB_OUTPUT
 
   compatibility:
@@ -109,13 +152,50 @@ jobs:
 
       - name: Install dependencies
         shell: bash
+        env:
+          MATRIX_HA_REAL_VERSION: ${{ matrix.ha_real_version }}
+          MATRIX_PINNED_TEST_DEPENDENCY_SPECS: ${{ toJson(matrix.pinned_test_dependency_specs) }}
+          MATRIX_PYTHON_VERSION: ${{ matrix.python_version }}
         run: |
           set -euo pipefail
 
-          uv --no-config venv --no-project --python ${{ matrix.python_version }}
-          HA_SPEC="homeassistant==${{ matrix.ha_real_version }}"
-          echo "homeassistant == ${{ matrix.ha_real_version }}" > overrides.txt
-          uv --no-config pip install --overrides overrides.txt --python .venv/bin/python "$HA_SPEC" hassil home-assistant-intents pytest pytest-homeassistant-custom-component rapidfuzz
+          uv --no-config venv --no-project --python "$MATRIX_PYTHON_VERSION"
+          HA_SPEC="homeassistant==$MATRIX_HA_REAL_VERSION"
+          mapfile -t PINNED_TEST_DEPENDENCIES < <(jq -r '.[]' <<< "$MATRIX_PINNED_TEST_DEPENDENCY_SPECS")
+          PINNED_HA_INTENTS=false
+          for spec in "${PINNED_TEST_DEPENDENCIES[@]}"; do
+            if [[ "${spec%%==*}" == "home-assistant-intents" ]]; then
+              PINNED_HA_INTENTS=true
+              break
+            fi
+          done
+          HA_REQUIREMENTS_URL="https://raw.githubusercontent.com/home-assistant/core/$MATRIX_HA_REAL_VERSION/requirements_all.txt"
+          REQUIRED_TEST_DEPS=(hassil pytest pytest-homeassistant-custom-component rapidfuzz)
+          if [[ "$PINNED_HA_INTENTS" == false ]]; then
+            HA_REQUIREMENTS=$(curl -sS -f --max-time 20 --retry 3 "$HA_REQUIREMENTS_URL")
+            HA_INTENTS_SPEC=$(awk '/^home-assistant-intents==/ {print $1; exit}' <<< "$HA_REQUIREMENTS")
+            if [[ ! "$HA_INTENTS_SPEC" =~ ^home-assistant-intents==[a-zA-Z0-9]+(\.[a-zA-Z0-9]+)*$ ]]; then
+              echo "::error::Failed to resolve home-assistant-intents from $HA_REQUIREMENTS_URL"
+              exit 1
+            fi
+            REQUIRED_TEST_DEPS+=("$HA_INTENTS_SPEC")
+          fi
+          echo "homeassistant == $MATRIX_HA_REAL_VERSION" > overrides.txt
+          INSTALL_TEST_DEPS=("${PINNED_TEST_DEPENDENCIES[@]}")
+          for dep in "${REQUIRED_TEST_DEPS[@]}"; do
+            dep_package="${dep%%==*}"
+            pinned=false
+            for spec in "${PINNED_TEST_DEPENDENCIES[@]}"; do
+              if [[ "${spec%%==*}" == "$dep_package" ]]; then
+                pinned=true
+                break
+              fi
+            done
+            if [[ "$pinned" == false ]]; then
+              INSTALL_TEST_DEPS+=("$dep")
+            fi
+          done
+          uv --no-config pip install --overrides overrides.txt --python .venv/bin/python "$HA_SPEC" "${INSTALL_TEST_DEPS[@]}"
 
       - name: Run Tests
-        run: uv run --no-project --python .venv/bin/python pytest --no-cov
+        run: uv run --no-project --python .venv/bin/python pytest --no-cov -m "not current_intents"

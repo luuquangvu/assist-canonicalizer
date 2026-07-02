@@ -161,7 +161,7 @@ def _fallback_agent_choices(
 ) -> dict[str, str]:
     """Return fallback agent IDs mapped to display labels for config forms."""
     choices: dict[str, str] = {}
-    choices.update(_available_fallback_agents(hass, exclude_agent_id))
+    choices |= _available_fallback_agents(hass, exclude_agent_id)
     if (
         current_agent_id
         and current_agent_id != exclude_agent_id

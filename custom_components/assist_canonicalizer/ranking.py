@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import partial
 from heapq import nsmallest
 
 from rapidfuzz import fuzz
@@ -26,8 +27,10 @@ from .const import (
     POSITIONAL_SIMILARITY_SHORT_3_THRESHOLD,
     POSITIONAL_SIMILARITY_VERY_SHORT_THRESHOLD,
     RAPIDFUZZ_WEIGHT,
+    SLOT_TOKEN_MATCH_THRESHOLD,
     TIEBREAKER_INTENT_MARGIN,
     WILDCARD_LENGTH_PENALTY_FACTOR,
+    FallbackReason,
 )
 from .normalization import (
     char_ngrams_normalized,
@@ -122,12 +125,12 @@ def rapidfuzz_similarity_normalized(
     """Return a RapidFuzz score that penalizes unmatched extra tokens."""
     if not query or not candidate:
         return 0.0
-    wratio = float(fuzz.WRatio(query, candidate))
+    wratio: float = fuzz.WRatio(query, candidate)
     if query_sorted is not None and candidate_sorted is not None:
-        token_sort = float(fuzz.ratio(query_sorted, candidate_sorted))
+        token_sort: float = fuzz.ratio(query_sorted, candidate_sorted)
     else:
-        token_sort = float(fuzz.token_sort_ratio(query, candidate))
-    token_set = float(fuzz.token_set_ratio(query, candidate))
+        token_sort: float = fuzz.token_sort_ratio(query, candidate)
+    token_set: float = fuzz.token_set_ratio(query, candidate)
 
     query_count = query_token_count if query_token_count is not None else query.count(" ") + 1
     candidate_count = (
@@ -173,13 +176,10 @@ def _positional_similarity(a: str, b: str) -> float:
         return 1.0
     len_a = len(a)
     len_b = len(b)
-    max_len = len_a if len_a > len_b else len_b
+    max_len = max(len_a, len_b)
     if max_len == 0:
         return 0.0
-    matches = 0
-    for x, y in zip(a, b, strict=False):
-        if x == y:
-            matches += 1
+    matches = sum(x == y for x, y in zip(a, b, strict=False))
     return matches / max_len
 
 
@@ -393,73 +393,196 @@ def _rehydrated_bm25_score(
     return min(1.0, raw_score / max_raw_score)
 
 
+def _wildcard_variants_match(
+    variants_with_len: tuple[tuple[frozenset[str], int, int], ...],
+    query_tokens: frozenset[str],
+) -> bool:
+    """Return True if any wildcard variant has sufficient token overlap with the query."""
+    for variant, var_len, req in variants_with_len:
+        if var_len == 0:
+            return True
+        if len(variant & query_tokens) >= req:
+            return True
+    return False
+
+
+def _check_precomputed_wildcard(
+    i: int,
+    query_tokens: frozenset[str],
+    wildcard_always_passes: frozenset[int],
+    wildcard_variants_with_len: dict[int, tuple[tuple[frozenset[str], int, int], ...]] | None,
+    wildcard_literal_tokens_by_index: dict[int, frozenset[str]] | None,
+    wildcard_min_required_by_index: dict[int, int] | None,
+) -> bool:
+    """Return True if precomputed wildcard candidate i passes the token filter."""
+    if i in wildcard_always_passes:
+        return True
+    variants_with_len = wildcard_variants_with_len.get(i) if wildcard_variants_with_len else None
+    if not variants_with_len:
+        return False
+    if wildcard_literal_tokens_by_index is not None and wildcard_min_required_by_index is not None:
+        literal_tokens = wildcard_literal_tokens_by_index.get(i)
+        min_required = wildcard_min_required_by_index.get(i)
+        if (
+            literal_tokens is not None
+            and min_required is not None
+            and min_required > 0
+            and len(literal_tokens & query_tokens) < min_required
+        ):
+            return False
+    return _wildcard_variants_match(variants_with_len, query_tokens)
+
+
+def _check_onthefly_wildcard(cand: Candidate, query_tokens: frozenset[str]) -> bool:
+    """Return True if an on-the-fly analyzed wildcard candidate passes the token filter."""
+    var_with_len, all_literal = wildcard_variants_analysis(cand)
+    always_passes = not cand.literal_variants or any(length == 0 for _, length, _ in var_with_len)
+    if always_passes:
+        return True
+    if all_literal.isdisjoint(query_tokens):
+        return False
+    return _wildcard_variants_match(var_with_len, query_tokens)
+
+
 def _prefilter_wildcard_candidates(
     candidates: Sequence[Candidate],
     query_tokens: frozenset[str],
     wildcard_always_passes: frozenset[int] | None,
     wildcard_variants_with_len: dict[int, tuple[tuple[frozenset[str], int, int], ...]] | None,
     wildcard_token_to_indices: dict[str, tuple[int, ...]] | None,
+    wildcard_literal_tokens_by_index: dict[int, frozenset[str]] | None = None,
+    wildcard_min_required_by_index: dict[int, int] | None = None,
 ) -> set[int]:
     """Prefilter wildcard candidates using precomputed structures or on-the-fly coverage."""
-    wildcard_indices_set = set()
-    if wildcard_always_passes is not None:
-        candidates_to_check = set()
-        if wildcard_always_passes:
-            candidates_to_check.update(wildcard_always_passes)
-        if wildcard_token_to_indices:
-            for token in query_tokens:
-                indices = wildcard_token_to_indices.get(token)
-                if indices:
-                    candidates_to_check.update(indices)
-
-        for i in candidates_to_check:
-            if wildcard_always_passes and i in wildcard_always_passes:
-                wildcard_indices_set.add(i)
-                continue
-
-            variants_with_len = (
-                wildcard_variants_with_len.get(i) if wildcard_variants_with_len else None
+    if (
+        wildcard_always_passes is not None
+        and wildcard_variants_with_len is not None
+        and wildcard_token_to_indices is not None
+        and wildcard_literal_tokens_by_index is not None
+        and wildcard_min_required_by_index is not None
+    ):
+        candidates_to_check: set[int] = set(wildcard_always_passes)
+        for token in query_tokens:
+            if indices := wildcard_token_to_indices.get(token):
+                candidates_to_check.update(indices)
+        return {
+            i
+            for i in candidates_to_check
+            if _check_precomputed_wildcard(
+                i,
+                query_tokens,
+                wildcard_always_passes,
+                wildcard_variants_with_len,
+                wildcard_literal_tokens_by_index,
+                wildcard_min_required_by_index,
             )
-            if variants_with_len:
-                passed = False
-                for variant, var_len, req in variants_with_len:
-                    if var_len == 0:
-                        passed = True
-                        break
-                    matched = len(variant & query_tokens)
-                    if matched >= req:
-                        passed = True
-                        break
-                if passed:
-                    wildcard_indices_set.add(i)
-    else:
-        for i, cand in enumerate(candidates):
-            if not cand.has_wildcard:
-                continue
-            var_with_len, all_literal = wildcard_variants_analysis(cand)
+        }
+    return {
+        i
+        for i, cand in enumerate(candidates)
+        if cand.has_wildcard and _check_onthefly_wildcard(cand, query_tokens)
+    }
 
-            always_passes = not cand.literal_variants or any(
-                length == 0 for _, length, _ in var_with_len
-            )
-            if always_passes:
-                wildcard_indices_set.add(i)
-                continue
 
-            if all_literal.isdisjoint(query_tokens):
-                continue
+def _exact_lookup_ranked(
+    query: str,
+    query_normalized: str,
+    max_candidates: int,
+    exact_normalized_lookup: dict[str, list[Candidate]] | None,
+    exact_no_diacritics_lookup: dict[str, list[Candidate]] | None,
+    language: str | None,
+) -> tuple[RankedCandidate, ...] | None:
+    """Return exact-match ranked candidates or None when fuzzy ranking is required."""
+    if exact_normalized_lookup is not None and (
+        exact_matches := exact_normalized_lookup.get(query_normalized)
+    ):
+        return tuple(
+            RankedCandidate(candidate=c, scores=_PERFECT_SCORE)
+            for c in exact_matches[:max_candidates]
+        )
+    if exact_no_diacritics_lookup is not None:
+        query_no_diac = normalize_text_no_diacritics(query, language)
+        if no_diac_matches := exact_no_diacritics_lookup.get(query_no_diac):
+            unique_intents = {c.intent_name for c in no_diac_matches}
+            if len(unique_intents) == 1:
+                return tuple(
+                    RankedCandidate(candidate=c, scores=_PERFECT_SCORE)
+                    for c in no_diac_matches[:max_candidates]
+                )
+    return None
 
-            passed = False
-            for clean_var, var_len, req in var_with_len:
-                if var_len == 0:
-                    passed = True
-                    break
-                matched = len(clean_var & query_tokens)
-                if matched >= req:
-                    passed = True
-                    break
-            if passed:
-                wildcard_indices_set.add(i)
-    return wildcard_indices_set
+
+def _rank_query_setup(
+    query_normalized: str,
+    positional_literal_tokens: frozenset[str],
+) -> tuple[frozenset[str], tuple[str, ...], int, str, frozenset[str] | None]:
+    """Return normalized query token structures shared by ranking and profiling."""
+    query_tokens_tuple = tuple(query_normalized.split())
+    query_tokens = frozenset(query_tokens_tuple)
+    query_token_count = len(query_tokens_tuple)
+    query_sorted = " ".join(sorted(query_tokens_tuple))
+    non_entity_tokens: frozenset[str] | None = None
+    if positional_literal_tokens:
+        non_entity_scratch = query_tokens - positional_literal_tokens
+        non_entity_tokens = non_entity_scratch or None
+    return query_tokens, query_tokens_tuple, query_token_count, query_sorted, non_entity_tokens
+
+
+def _normalized_bm25_scores_from_raw(
+    raw_scores: Sequence[float],
+    doc_count: int,
+) -> tuple[float, ...]:
+    """Return normalized BM25 scores from raw document scores."""
+    if doc_count < 1:
+        return ()
+    max_raw_score = max(raw_scores, default=0.0)
+    if max_raw_score <= 0.0:
+        return (0.0,) * doc_count
+    inv_max = 1.0 / max_raw_score
+    return tuple(score * inv_max for score in raw_scores)
+
+
+def _rank_prefilter_keys(
+    char_scores: Sequence[float],
+    bm25_scores: Sequence[float],
+) -> list[float]:
+    """Return heap keys used to select rank prefilter candidates."""
+    return [
+        -(CHAR_NGRAM_WEIGHT * char_score + BM25_WEIGHT * bm25_score)
+        for char_score, bm25_score in zip(char_scores, bm25_scores, strict=True)
+    ]
+
+
+def _rank_prefilter_limit(
+    candidate_count: int,
+    max_candidates: int = DEFAULT_MAX_CANDIDATES,
+    rapidfuzz_prefilter_candidates: int = DEFAULT_RAPIDFUZZ_PREFILTER_CANDIDATES,
+) -> int:
+    """Return the number of candidates considered by expensive final ranking."""
+    disambiguation_limit = max(2, max_candidates)
+    return min(candidate_count, max(rapidfuzz_prefilter_candidates, disambiguation_limit))
+
+
+def _top_prefilter_indices(
+    prefilter_keys: Sequence[float],
+    prefilter_limit: int,
+) -> list[int]:
+    """Return candidate indices selected by the prefilter heap."""
+    return nsmallest(prefilter_limit, range(len(prefilter_keys)), key=prefilter_keys.__getitem__)
+
+
+def _query_slot_tokens_from_index(
+    query_tokens: frozenset[str],
+    top_indices: Sequence[int],
+    slot_token_to_indices: dict[str, tuple[int, ...]],
+) -> frozenset[str]:
+    """Return query tokens that appear in selected candidates' indexed slot tokens."""
+    top_index_set = set(top_indices)
+    return frozenset(
+        token
+        for token in query_tokens
+        if any(idx in top_index_set for idx in slot_token_to_indices.get(token, ()))
+    )
 
 
 def _rehydrate_and_rescore_wildcard(
@@ -519,7 +642,12 @@ def rank_candidates(
         dict[int, tuple[tuple[frozenset[str], int, int], ...]] | None
     ) = None,
     wildcard_token_to_indices: dict[str, tuple[int, ...]] | None = None,
+    wildcard_literal_tokens_by_index: dict[int, frozenset[str]] | None = None,
+    wildcard_min_required_by_index: dict[int, int] | None = None,
+    candidate_slot_tokens: tuple[frozenset[str], ...] | None = None,
+    slot_token_to_indices: dict[str, tuple[int, ...]] | None = None,
     slot_preferences: set[tuple[str, str]] | None = None,
+    min_confidence: float = DEFAULT_MIN_CONFIDENCE,
 ) -> tuple[RankedCandidate, ...]:
     """Rank candidates for a query using lexical scoring.
 
@@ -538,36 +666,23 @@ def rank_candidates(
         candidates
     ):
         raise ValueError("candidate_char_index length must match candidates")
+    if candidate_slot_tokens is not None and len(candidate_slot_tokens) != len(candidates):
+        raise ValueError("candidate_slot_tokens length must match candidates")
 
     _rehydrated_cache: dict[int, tuple[str, dict[str, str]]] = {}
 
     query_normalized = normalize_text(query)
+    exact_ranked = _exact_lookup_ranked(
+        query,
+        query_normalized,
+        max_candidates,
+        exact_normalized_lookup,
+        exact_no_diacritics_lookup,
+        language,
+    )
+    if exact_ranked is not None:
+        return exact_ranked
 
-    # 1. Exact normalized match check
-    if exact_normalized_lookup is not None:
-        exact_matches = exact_normalized_lookup.get(query_normalized)
-        if exact_matches:
-            return tuple(
-                RankedCandidate(candidate=c, scores=_PERFECT_SCORE)
-                for c in exact_matches[:max_candidates]
-            )
-
-    # 2. Exact no-diacritics match check
-    if exact_no_diacritics_lookup is not None:
-        query_no_diac = normalize_text_no_diacritics(query, language)
-        no_diac_matches = exact_no_diacritics_lookup.get(query_no_diac)
-        if no_diac_matches:
-            unique_intents = {c.intent_name for c in no_diac_matches}
-            if len(unique_intents) == 1:
-                return tuple(
-                    RankedCandidate(candidate=c, scores=_PERFECT_SCORE)
-                    for c in no_diac_matches[:max_candidates]
-                )
-    query_tokens = frozenset(query_normalized.split())
-    query_tokens_tuple = tuple(query_normalized.split())
-    query_token_count = len(query_tokens_tuple)
-    query_sorted = " ".join(sorted(query_tokens_tuple))
-    intent_score_cache: dict[tuple[frozenset[str], ...], float] = {}
     if positional_literal_tokens is None:
         all_tokens: set[str] = set()
         for candidate in candidates:
@@ -576,10 +691,14 @@ def rank_candidates(
                 for variant in literal_token_variants(literal_text):
                     all_tokens.update(variant)
         positional_literal_tokens = frozenset(all_tokens)
-    non_entity_tokens: frozenset[str] | None = None
-    if positional_literal_tokens:
-        non_entity_scratch = query_tokens - positional_literal_tokens
-        non_entity_tokens = non_entity_scratch if non_entity_scratch else None
+    (
+        query_tokens,
+        query_tokens_tuple,
+        query_token_count,
+        query_sorted,
+        non_entity_tokens,
+    ) = _rank_query_setup(query_normalized, positional_literal_tokens)
+    intent_score_cache: dict[tuple[frozenset[str], ...], float] = {}
 
     max_raw_score = 0.0
     if reference_bm25_index is not None:
@@ -603,11 +722,7 @@ def rank_candidates(
         else:
             raw_scores = bm25_index.raw_scores(query_tokens_tuple)
             max_raw_score = max(raw_scores, default=0.0)
-            if max_raw_score <= 0.0:
-                bm25_scores = (0.0,) * doc_count
-            else:
-                inv_max = 1.0 / max_raw_score
-                bm25_scores = tuple([score * inv_max for score in raw_scores])
+            bm25_scores = _normalized_bm25_scores_from_raw(raw_scores, doc_count)
 
     _bm25_ref = reference_bm25_index or bm25_index
     if candidate_char_index is None:
@@ -617,18 +732,11 @@ def rank_candidates(
     query_grams = char_ngrams_normalized(query_normalized)
     char_scores = candidate_char_index.score(query_grams)
 
-    prefilter_keys = [
-        -(CHAR_NGRAM_WEIGHT * cs + BM25_WEIGHT * bs)
-        for cs, bs in zip(char_scores, bm25_scores, strict=True)
-    ]
-    prefilter_limit = min(
-        len(candidates),
-        max(rapidfuzz_prefilter_candidates, disambiguation_limit),
+    prefilter_keys = _rank_prefilter_keys(char_scores, bm25_scores)
+    prefilter_limit = _rank_prefilter_limit(
+        len(candidates), max_candidates, rapidfuzz_prefilter_candidates
     )
-
-    top_indices = nsmallest(
-        prefilter_limit, range(len(prefilter_keys)), key=prefilter_keys.__getitem__
-    )
+    top_indices = _top_prefilter_indices(prefilter_keys, prefilter_limit)
 
     wildcard_passed_set = _prefilter_wildcard_candidates(
         candidates,
@@ -636,6 +744,8 @@ def rank_candidates(
         wildcard_always_passes,
         wildcard_variants_with_len,
         wildcard_token_to_indices,
+        wildcard_literal_tokens_by_index,
+        wildcard_min_required_by_index,
     )
     if wildcard_passed_set:
         top_set = set(top_indices)
@@ -648,6 +758,24 @@ def rank_candidates(
         if positional_literal_tokens
         else {}
     )
+
+    if candidate_slot_tokens is None:
+        slot_tokens_by_index = {idx: candidates[idx].slot_tokens_set for idx in top_indices}
+        active_slot_tokens = frozenset(
+            token for tokens in slot_tokens_by_index.values() for token in tokens
+        )
+        query_slot_tokens = query_tokens & active_slot_tokens
+    elif slot_token_to_indices is not None:
+        slot_tokens_by_index = {}
+        query_slot_tokens = _query_slot_tokens_from_index(
+            query_tokens, top_indices, slot_token_to_indices
+        )
+    else:
+        slot_tokens_by_index = {}
+        active_slot_tokens = frozenset(
+            token for idx in top_indices for token in candidate_slot_tokens[idx]
+        )
+        query_slot_tokens = query_tokens & active_slot_tokens
 
     literal_analysis_cache: dict[
         tuple[str, tuple[frozenset[str], ...]], _LiteralVariantAnalysis
@@ -675,10 +803,10 @@ def rank_candidates(
             _rehydrated_cache[idx] = (rehydrated_norm, replacements)
         if idx in _rehydrated_cache:
             cand_text, replacements = _rehydrated_cache[idx]
-            cand_tokens = cand_text.split()
-            cand_sorted = " ".join(sorted(cand_tokens))
-            cand_token_count = len(cand_tokens)
-            candidate_tokens = frozenset(cand_tokens)
+            cand_tokens_list = cand_text.split()
+            cand_sorted = " ".join(sorted(cand_tokens_list))
+            cand_token_count = len(cand_tokens_list)
+            candidate_tokens = frozenset(cand_tokens_list)
 
             norm_replacements = {
                 wc: normalize_text(val).split() for wc, val in replacements.items()
@@ -724,10 +852,18 @@ def rank_candidates(
                 exact = _exact_intent_score(literal_variants, query_tokens)
                 intent_score_cache[literal_variants] = exact
             if exact >= 1.0:
+                matched_non_empty = any(
+                    var and var.issubset(query_tokens) for var in literal_variants
+                )
+                if not matched_non_empty and not query_tokens.issubset(candidate_tokens):
+                    exact = 0.0
+            if exact >= 1.0:
                 if total_unique_literal_tokens >= 2:
                     matched_q = len(query_tokens & candidate_tokens)
                     intent_score = matched_q / len(query_tokens) if query_tokens else 1.0
-            elif query_tokens.issubset(candidate_tokens):
+                elif candidate.slot_tokens_set:
+                    intent_score = exact
+            elif query_tokens.issubset(candidate_tokens) or not positional_lookup:
                 intent_score = exact
             else:
                 analysis_key = (literal_text, literal_variants)
@@ -746,7 +882,7 @@ def rank_candidates(
                     score = matched / total_len if total_len else 0.0
                     if score > best:
                         best = score
-                intent_score = best
+                    intent_score = best
             if positional_literal_tokens:
                 penalty = _non_entity_coverage(
                     query_tokens,
@@ -756,14 +892,88 @@ def rank_candidates(
                 )
                 intent_score *= 1.0 - NON_ENTITY_PENALTY_BLEND + NON_ENTITY_PENALTY_BLEND * penalty
         combined = lexical_score(rapidfuzz_score, char_score, bm25_score, intent_score)
+
+        # Slot matching penalty
+        slot_penalty = 1.0
+        cand_slot_tokens = _candidate_slot_tokens_at(
+            idx,
+            candidate_slot_tokens,
+            slot_tokens_by_index,
+        )
+        wildcard_info = candidate.wildcard_info
+        wildcard_tokens = frozenset()
+        leading_placeholder_only_wildcard = False
+        if cand_slot_tokens and idx in _rehydrated_cache and wildcard_info is not None:
+            _, replacements = _rehydrated_cache[idx]
+            wildcard_index, wildcard_name = wildcard_info
+            placeholder_tokens = frozenset(normalize_text(wildcard_name).split())
+            cand_slot_tokens = cand_slot_tokens - placeholder_tokens
+            leading_placeholder_only_wildcard = wildcard_index == 0 and not cand_slot_tokens
+            if wildcard_index > 0 or cand_slot_tokens:
+                wildcard_tokens = frozenset(
+                    token
+                    for wildcard_value in replacements.values()
+                    for token in normalize_text(wildcard_value).split()
+                )
+        if cand_slot_tokens and query_slot_tokens:
+            has_conflict = False
+            allowed_cand_tokens = (
+                cand_slot_tokens | wildcard_tokens | candidate.normalized_tokens_set
+            )
+            for q_tok in query_slot_tokens:
+                is_matched = q_tok in allowed_cand_tokens or any(
+                    fuzz.ratio(q_tok, c_tok) >= SLOT_TOKEN_MATCH_THRESHOLD
+                    for c_tok in allowed_cand_tokens
+                )
+                if not is_matched:
+                    has_conflict = True
+                    break
+
+            if has_conflict:
+                cand_matched = 0
+                for c_tok in cand_slot_tokens:
+                    if c_tok in query_tokens_tuple or any(
+                        fuzz.ratio(c_tok, q_tok) >= SLOT_TOKEN_MATCH_THRESHOLD
+                        for q_tok in query_tokens_tuple
+                    ):
+                        cand_matched += 1
+                cand_coverage = cand_matched / len(cand_slot_tokens)
+
+                query_matched = 0
+                for q_tok in query_slot_tokens:
+                    if q_tok in allowed_cand_tokens or any(
+                        fuzz.ratio(q_tok, c_tok) >= SLOT_TOKEN_MATCH_THRESHOLD
+                        for c_tok in allowed_cand_tokens
+                    ):
+                        query_matched += 1
+                query_coverage = query_matched / len(query_slot_tokens)
+
+                slot_penalty = cand_coverage * (0.8 + 0.2 * query_coverage)
+        elif leading_placeholder_only_wildcard and query_slot_tokens:
+            allowed_cand_tokens = wildcard_tokens | candidate.normalized_tokens_set
+            has_conflict = any(
+                q_tok not in allowed_cand_tokens
+                and all(
+                    fuzz.ratio(q_tok, c_tok) < SLOT_TOKEN_MATCH_THRESHOLD
+                    for c_tok in allowed_cand_tokens
+                )
+                for q_tok in query_slot_tokens
+            )
+            if has_conflict:
+                slot_penalty = 0.0
+
+        # Apply penalty only if less than 100% of slot tokens match
+        if slot_penalty < 1.0:
+            base_multiplier = min(1.0, max(0.1, min_confidence - 0.05))
+            combined *= base_multiplier + (1.0 - base_multiplier) * slot_penalty
+
         penalty_val = 0.0
         if idx in _rehydrated_cache:
             _, replacements = _rehydrated_cache[idx]
             wc_len = sum(len(val.split()) for val in replacements.values())
             penalty_val = WILDCARD_LENGTH_PENALTY_FACTOR * wc_len
             combined -= penalty_val
-            if combined < 0.0:
-                combined = 0.0
+            combined = max(combined, 0.0)
         ranked_tuples.append(
             (
                 combined,
@@ -777,19 +987,14 @@ def rank_candidates(
             )
         )
 
-    def sort_key(item):
-        idx = item[6]
-        tb = 0.0
-        if slot_preferences and idx in _rehydrated_cache:
-            _, replacements = _rehydrated_cache[idx]
-            for slot_name, val in replacements.items():
-                if (slot_name, val.lower()) in slot_preferences:
-                    tb = 1.0
-                    break
-
-        return (item[0], tb, -idx)
-
-    ranked_tuples.sort(key=sort_key, reverse=True)
+    ranked_tuples.sort(
+        key=partial(
+            _ranked_tuple_sort_key,
+            slot_preferences=slot_preferences,
+            rehydrated_cache=_rehydrated_cache,
+        ),
+        reverse=True,
+    )
     ranked = [
         RankedCandidate(
             candidate=item[1],
@@ -806,6 +1011,36 @@ def rank_candidates(
     ]
     _apply_intent_disambiguation(ranked)
     return tuple(ranked[:max_candidates])
+
+
+def _candidate_slot_tokens_at(
+    index: int,
+    candidate_slot_tokens: tuple[frozenset[str], ...] | None,
+    slot_tokens_by_index: dict[int, frozenset[str]],
+) -> frozenset[str]:
+    """Return precomputed slot tokens for a candidate index."""
+    if candidate_slot_tokens is not None:
+        return candidate_slot_tokens[index]
+    return slot_tokens_by_index.get(index, frozenset())
+
+
+def _ranked_tuple_sort_key(
+    item: tuple[float, Candidate, float, float, float, float, int, float],
+    *,
+    slot_preferences: set[tuple[str, str]] | None,
+    rehydrated_cache: dict[int, tuple[str, dict[str, str]]],
+) -> tuple[float, float, int]:
+    """Return the stable ranking sort key for an intermediate score tuple."""
+    idx = item[6]
+    tb = 0.0
+    if slot_preferences and idx in rehydrated_cache:
+        _, replacements = rehydrated_cache[idx]
+        for slot_name, val in replacements.items():
+            if (slot_name, val.lower()) in slot_preferences:
+                tb = 1.0
+                break
+
+    return (item[0], tb, -idx)
 
 
 def _apply_intent_disambiguation(
@@ -856,9 +1091,31 @@ def accepted_candidate(
     if _is_exact_lexical_match(top_candidate):
         return top_candidate
     margin = top_candidate.scores.final_score - competing_candidate.scores.final_score
-    if margin < min_margin:
-        return None
-    return top_candidate
+    return None if margin < min_margin else top_candidate
+
+
+def confidence_gate_rejection_reason(
+    ranked: Sequence[RankedCandidate],
+    min_confidence: float = DEFAULT_MIN_CONFIDENCE,
+    min_margin: float = DEFAULT_MIN_MARGIN,
+) -> FallbackReason:
+    """Return the fallback reason for candidates rejected by confidence gates."""
+    if not ranked or ranked[0].scores.final_score < min_confidence:
+        return FallbackReason.LOW_CONFIDENCE
+    top_candidate = ranked[0]
+    competing_candidate = next(
+        (
+            item
+            for item in ranked[1:]
+            if item.candidate.intent_name != top_candidate.candidate.intent_name
+            and item.candidate.normalized_text != top_candidate.candidate.normalized_text
+        ),
+        None,
+    )
+    if competing_candidate is None or _is_exact_lexical_match(top_candidate):
+        return FallbackReason.LOW_CONFIDENCE
+    margin = top_candidate.scores.final_score - competing_candidate.scores.final_score
+    return FallbackReason.LOW_MARGIN if margin < min_margin else FallbackReason.LOW_CONFIDENCE
 
 
 def _is_exact_lexical_match(ranked_candidate: RankedCandidate) -> bool:
