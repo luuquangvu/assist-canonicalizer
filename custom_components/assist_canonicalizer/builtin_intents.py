@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 
 import orjson
+import yaml
+from homeassistant.util import language as language_module
 
 
 def load_language_intent_sources(
@@ -33,13 +35,13 @@ def language_variant_for(language: str) -> str | None:
     """Return the Home Assistant intents language variant for a language."""
     if not language.strip():
         return None
+
     try:
-        import home_assistant_intents as intents_module
-        from homeassistant.util import language as language_module
+        import home_assistant_intents
     except ImportError:
         return language
 
-    get_languages = intents_module.get_languages
+    get_languages = home_assistant_intents.get_languages
     matches = language_module.matches(language, set(get_languages()))
     return matches[0] if matches else None
 
@@ -47,11 +49,11 @@ def language_variant_for(language: str) -> str | None:
 def _load_built_in_intents(language_variant: str) -> Mapping[str, Any]:
     """Load built-in Home Assistant intents for a language variant."""
     try:
-        import home_assistant_intents as intents_module
+        import home_assistant_intents
     except ImportError:
         return {}
 
-    get_intents = intents_module.get_intents
+    get_intents = home_assistant_intents.get_intents
     try:
         intents = get_intents(language_variant, json_load=_json_load)
     except TypeError:
@@ -67,11 +69,6 @@ def _load_custom_sentences(
     if config_path is None:
         return {}
 
-    try:
-        import yaml as yaml_module
-    except ImportError:
-        return {}
-
     custom_dir = Path(config_path("custom_sentences", language_variant))
     if not custom_dir.is_dir():
         return {}
@@ -79,7 +76,7 @@ def _load_custom_sentences(
     merged: dict[str, Any] = {}
     for sentence_file in sorted(custom_dir.rglob("*.yaml")):
         with sentence_file.open(encoding="utf-8") as file_handle:
-            loaded = yaml_module.safe_load(file_handle)
+            loaded = yaml.safe_load(file_handle)
         if isinstance(loaded, Mapping):
             _merge_dict(merged, loaded)
     return merged

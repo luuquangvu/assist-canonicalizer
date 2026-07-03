@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 from heapq import nsmallest
+from math import isclose
+from typing import Any
 
+import orjson
 from rapidfuzz import fuzz
 
 from .bm25 import BM25Index
@@ -15,21 +18,42 @@ from .candidate import Candidate
 from .const import (
     BM25_WEIGHT,
     CHAR_NGRAM_WEIGHT,
+    CONTEXT_SLOT_MATCH_BOOST,
+    CONTEXT_SLOT_MISMATCH_PENALTY,
     DEFAULT_MAX_CANDIDATES,
     DEFAULT_MIN_CONFIDENCE,
     DEFAULT_MIN_MARGIN,
     DEFAULT_RAPIDFUZZ_PREFILTER_CANDIDATES,
+    ENTITY_ONLY_UNCOVERED_QUERY_PENALTY,
+    ENTITY_SLOT_NAME_SET,
+    HIGH_CONFIDENCE_RELAXED_MIN_MARGIN,
+    HIGH_CONFIDENCE_RELAXED_MIN_SCORE,
     INTENT_ACTION_WEIGHT,
+    LOCATION_SLOT_NAME_SET,
     NON_ENTITY_PENALTY_BLEND,
+    NUMERIC_SLOT_WITHOUT_QUERY_PENALTY,
+    POSITIONAL_FUZZY_TOKEN_MAX_LENGTH_RATIO,
     POSITIONAL_SIMILARITY_BASE_THRESHOLD,
     POSITIONAL_SIMILARITY_MEDIUM_THRESHOLD,
     POSITIONAL_SIMILARITY_PARTIAL_CREDIT,
     POSITIONAL_SIMILARITY_SHORT_3_THRESHOLD,
     POSITIONAL_SIMILARITY_VERY_SHORT_THRESHOLD,
     RAPIDFUZZ_WEIGHT,
+    SAFE_EMPTY_SLOT_RELAXED_MIN_MARGIN,
+    SAFE_EMPTY_SLOT_RELAXED_MIN_SCORE,
+    SAFE_INTENT_EVIDENCE_MAX_SCORE,
+    SAFE_INTENT_EVIDENCE_MIN_ADVANTAGE,
+    SAFE_INTENT_EVIDENCE_MIN_SCORE,
+    SLOT_FUZZY_TOKEN_MIN_LENGTH,
     SLOT_TOKEN_MATCH_THRESHOLD,
+    STATIC_ENTITY_UNCOVERED_QUERY_PENALTY,
+    STATIC_SLOT_QUERY_CONFLICT_PENALTY,
     TIEBREAKER_INTENT_MARGIN,
+    UNANCHORED_ENTITY_SLOT_PENALTY,
+    WILDCARD_KNOWN_SLOT_TOKEN_PENALTY,
     WILDCARD_LENGTH_PENALTY_FACTOR,
+    ZERO_INTENT_EVIDENCE_MAX_MARGIN,
+    ZERO_INTENT_EVIDENCE_MAX_SCORE,
     FallbackReason,
 )
 from .normalization import (
@@ -39,8 +63,25 @@ from .normalization import (
     normalize_text_no_diacritics,
 )
 from .rehydration import get_wildcard_rehydration, wildcard_variants_analysis
+from .utils import NormalizedIntentContext, normalize_intent_context, normalized_slot_value_tokens
 
 _LiteralVariantAnalysis = list[tuple[int, int, list[frozenset[str]]]]
+_KNOWN_OPPOSING_INTENT_TIE_PAIRS: tuple[tuple[str, str], ...] = (
+    ("HassTurnOn", "HassTurnOff"),
+    ("HassMediaUnpause", "HassMediaPause"),
+    ("HassMediaPlayerUnmute", "HassMediaPlayerMute"),
+    ("HassUnpauseTimer", "HassPauseTimer"),
+    ("HassIncreaseTimer", "HassDecreaseTimer"),
+    ("HassMediaNext", "HassMediaPrevious"),
+)
+_KNOWN_OPPOSING_INTENT_TIE_PREFERENCES: Mapping[frozenset[str], Mapping[str, int]] = {
+    frozenset((preferred_intent, other_intent)): {
+        preferred_intent: 1,
+        other_intent: 0,
+    }
+    for preferred_intent, other_intent in _KNOWN_OPPOSING_INTENT_TIE_PAIRS
+}
+_STRUCTURAL_TIE_ABS_TOLERANCE = 1e-12
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +111,21 @@ class RankedCandidate:
 
     candidate: Candidate
     scores: ScoreBreakdown
+
+
+@dataclass(frozen=True, slots=True)
+class _RankedItem:
+    """Intermediate ranking record before public score objects are built."""
+
+    final_score: float
+    candidate: Candidate
+    rapidfuzz_score: float
+    char_ngram_score: float
+    bm25_score: float
+    intent_score: float
+    index: int
+    penalty: float
+    slot_specificity: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,13 +326,71 @@ def _build_positional_lookup(
         matched: list[str] = []
         for qtok in candidate_q_tokens:
             sim = _positional_similarity(literal_token, qtok)
-            if sim >= _per_pair_positional_threshold(literal_token, qtok):
+            if sim >= _per_pair_positional_threshold(
+                literal_token,
+                qtok,
+            ) or _is_fuzzy_literal_token_match(literal_token, qtok):
                 matched.append(qtok)
                 if sim >= 0.99:
                     break
         if matched:
             lookup[literal_token] = frozenset(matched)
     return lookup
+
+
+def _is_fuzzy_literal_token_match(literal_token: str, query_token: str) -> bool:
+    """Return whether two same-bucket literal tokens differ by one insertion."""
+    literal_len = len(literal_token)
+    query_len = len(query_token)
+    if abs(literal_len - query_len) != 1:
+        return False
+    min_len = min(literal_len, query_len)
+    if min_len < 2:
+        return False
+    length_ratio = max(literal_len, query_len) / min_len
+    if length_ratio > POSITIONAL_FUZZY_TOKEN_MAX_LENGTH_RATIO:
+        return False
+    if literal_len < query_len:
+        shorter, longer = literal_token, query_token
+    else:
+        shorter, longer = query_token, literal_token
+
+    skipped = False
+    short_idx = 0
+    for long_char in longer:
+        if short_idx < min_len and shorter[short_idx] == long_char:
+            short_idx += 1
+            continue
+        if skipped:
+            return False
+        skipped = True
+    return short_idx == min_len
+
+
+def _is_fuzzy_slot_token_match(slot_token: str, query_token: str) -> bool:
+    """Return whether a query token is a bounded one-edit slot-token typo."""
+    slot_len = len(slot_token)
+    query_len = len(query_token)
+    if (
+        not slot_token
+        or not query_token
+        or slot_token == query_token
+        or slot_token[0] != query_token[0]
+    ):
+        return False
+    if min(slot_len, query_len) < SLOT_FUZZY_TOKEN_MIN_LENGTH:
+        return False
+    if abs(slot_len - query_len) > 1:
+        return False
+    if slot_len == query_len:
+        return (
+            sum(
+                slot_char != query_char
+                for slot_char, query_char in zip(slot_token, query_token, strict=True)
+            )
+            == 1
+        )
+    return _is_fuzzy_literal_token_match(slot_token, query_token)
 
 
 def _precompute_literal_analysis(
@@ -576,13 +690,273 @@ def _query_slot_tokens_from_index(
     top_indices: Sequence[int],
     slot_token_to_indices: dict[str, tuple[int, ...]],
 ) -> frozenset[str]:
-    """Return query tokens that appear in selected candidates' indexed slot tokens."""
+    """Return indexed slot tokens referenced exactly or fuzzily by the query."""
     top_index_set = set(top_indices)
-    return frozenset(
-        token
-        for token in query_tokens
-        if any(idx in top_index_set for idx in slot_token_to_indices.get(token, ()))
+    active_slot_tokens: list[str] = []
+    matched_tokens: set[str] = set()
+    for token, indexes in slot_token_to_indices.items():
+        if all(idx not in top_index_set for idx in indexes):
+            continue
+        active_slot_tokens.append(token)
+        if token in query_tokens:
+            matched_tokens.add(token)
+
+    for query_token in query_tokens:
+        if query_token in matched_tokens:
+            continue
+        matched_tokens.update(
+            slot_token
+            for slot_token in active_slot_tokens
+            if slot_token not in matched_tokens
+            and _is_fuzzy_slot_token_match(slot_token, query_token)
+        )
+    return frozenset(matched_tokens)
+
+
+# ---------------------------------------------------------------------------
+# Slot/context conflict detection helpers
+# ---------------------------------------------------------------------------
+# Slot/context scoring guard matrix:
+# - Explicit query slot tokens must be covered by candidate slot tokens, static
+#   text, or rehydrated wildcard text; otherwise the local slot penalty applies.
+# - Non-static numeric/entity slots need query anchors, while broad static
+#   domain/name candidates are penalized when query slot words point elsewhere.
+# - HassIL intent context is applied after slot penalties: matching explicit
+#   context boosts, conflicting explicit context penalizes, and metadata-only
+#   ``context_slots`` boosts only slots that HassIL says are context-supplied.
+# - Wildcard candidates are additionally penalized when a free-text wildcard
+#   absorbs known slot words that should have remained concrete.
+# Fuzzy checks in this section run after candidate prefiltering and operate on
+# short query-token/slot-token sets; helpers keep cheap exact/static guards first
+# so RapidFuzz work is skipped for unrelated or already-covered candidates.
+
+
+def _candidate_slots(candidate: Candidate) -> dict[str, Any]:
+    """Return decoded slot metadata for one candidate."""
+    slots_text = candidate.metadata.get("slots")
+    if not isinstance(slots_text, str) or not slots_text:
+        return {}
+    try:
+        decoded = orjson.loads(slots_text)
+    except orjson.JSONDecodeError:
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _static_slot_names(candidate: Candidate) -> frozenset[str]:
+    """Return slot names declared static in candidate metadata."""
+    static_slots_text = candidate.metadata.get("static_slots", "")
+    if not isinstance(static_slots_text, str) or not static_slots_text:
+        return frozenset()
+    return frozenset(slot for slot in static_slots_text.split(",") if slot)
+
+
+def _context_slot_names(candidate: Candidate) -> frozenset[str]:
+    """Return slot names supplied by HassIL intent context."""
+    context_slots_text = candidate.metadata.get("context_slots", "")
+    if not isinstance(context_slots_text, str) or not context_slots_text:
+        return frozenset()
+    return frozenset(slot for slot in context_slots_text.split(",") if slot)
+
+
+def _context_key_aliases(slot_name: str) -> frozenset[str]:
+    """Return context keys equivalent to a candidate slot name."""
+    if slot_name in LOCATION_SLOT_NAME_SET:
+        return LOCATION_SLOT_NAME_SET
+    return frozenset({slot_name})
+
+
+def _context_slot_adjustment(
+    slots: Mapping[str, Any],
+    context_slot_names: frozenset[str],
+    normalized_context: NormalizedIntentContext,
+) -> float:
+    """Return a language-neutral score adjustment from intent context.
+
+    Positive values reward explicit or context-injected slot agreement.
+    Negative values penalize explicit candidate slots that conflict with
+    context. Missing explicit slots are only rewarded when HassIL marks
+    the slot as context-supplied.
+    """
+    if not normalized_context:
+        return 0.0
+
+    score = 0.0
+    for context_name, context_tokens in normalized_context.items():
+        if candidate_values := [
+            slot_value
+            for slot_name, slot_value in slots.items()
+            if context_name in _context_key_aliases(slot_name)
+        ]:
+            if any(
+                normalized_slot_value_tokens(slot_value) == context_tokens
+                for slot_value in candidate_values
+            ):
+                score += 1.0
+            else:
+                score -= 1.0
+            continue
+        if context_name in context_slot_names:
+            score += 1.0
+    return score
+
+
+def _has_numeric_query_token(query_tokens: frozenset[str]) -> bool:
+    """Return whether the query contains any numeric token."""
+    return any(any(char.isdigit() for char in token) for token in query_tokens)
+
+
+def _is_numeric_slot_value(value: Any) -> bool:
+    """Return whether a slot value is numeric-like."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return True
+    if not isinstance(value, str):
+        return False
+    stripped = value.strip()
+    if not stripped:
+        return False
+    try:
+        float(stripped)
+    except ValueError:
+        return False
+    return True
+
+
+def _has_unanchored_numeric_slot(
+    slots: Mapping[str, Any],
+    static_slots: frozenset[str],
+    *,
+    query_has_number: bool,
+) -> bool:
+    """Return whether a non-static numeric slot lacks a numeric query anchor."""
+    if query_has_number:
+        return False
+    return any(
+        slot_name not in static_slots and _is_numeric_slot_value(slot_value)
+        for slot_name, slot_value in slots.items()
     )
+
+
+def _has_unanchored_entity_slot(
+    slots: Mapping[str, Any],
+    static_slots: frozenset[str],
+    query_tokens_tuple: tuple[str, ...],
+) -> bool:
+    """Return whether a non-static entity slot lacks lexical query evidence.
+
+    Static domain/name slots are broad HassIL expansions and are handled by
+    the static-slot conflict checks below.
+    """
+    query_tokens = frozenset(query_tokens_tuple)
+    for slot_name, slot_value in slots.items():
+        if slot_name in static_slots or slot_name not in ENTITY_SLOT_NAME_SET:
+            continue
+        slot_tokens = normalized_slot_value_tokens(slot_value)
+        if not slot_tokens:
+            continue
+        if any(
+            slot_token in query_tokens
+            or any(
+                fuzz.ratio(slot_token, query_token) >= SLOT_TOKEN_MATCH_THRESHOLD
+                for query_token in query_tokens_tuple
+            )
+            for slot_token in slot_tokens
+        ):
+            continue
+        return True
+    return False
+
+
+def _has_entity_only_uncovered_query_tokens(
+    query_tokens: frozenset[str],
+    candidate_tokens: frozenset[str],
+    candidate: Candidate,
+    slots: Mapping[str, Any],
+    static_slots: frozenset[str],
+) -> bool:
+    """Return whether an entity-only candidate leaves query words unexplained."""
+    if candidate.literal_variants or not query_tokens:
+        return False
+    if all(slot_name in static_slots for slot_name in slots):
+        return False
+    if not (candidate.slot_tokens_set & query_tokens):
+        return False
+    return bool(query_tokens - candidate_tokens)
+
+
+def _has_static_entity_uncovered_query_tokens(
+    query_tokens_tuple: tuple[str, ...],
+    candidate_tokens: frozenset[str],
+    slots: Mapping[str, Any],
+    static_slots: frozenset[str],
+) -> bool:
+    """Return whether a broad static entity candidate leaves query tokens unexplained.
+
+    This fires only when static entity slots are the sole entity evidence;
+    candidates with an explicit entity slot are checked by the unanchored
+    entity-slot guard.
+    """
+    if not query_tokens_tuple:
+        return False
+    has_static_entity = any(
+        slot_name in static_slots and slot_name in ENTITY_SLOT_NAME_SET for slot_name in slots
+    )
+    if not has_static_entity:
+        return False
+    has_explicit_entity = any(
+        slot_name not in static_slots and slot_name in ENTITY_SLOT_NAME_SET for slot_name in slots
+    )
+    if has_explicit_entity:
+        return False
+    for query_token in query_tokens_tuple:
+        if query_token in candidate_tokens:
+            continue
+        if all(
+            fuzz.ratio(query_token, candidate_token) < SLOT_TOKEN_MATCH_THRESHOLD
+            for candidate_token in candidate_tokens
+        ):
+            return True
+    return False
+
+
+def _has_static_slot_query_conflict(
+    query_slot_tokens: frozenset[str],
+    candidate_tokens: frozenset[str],
+    slots: Mapping[str, Any],
+    static_slots: frozenset[str],
+) -> bool:
+    """Return whether a broad static slot candidate misses explicit query slots."""
+    if not query_slot_tokens:
+        return False
+    if all(slot_name not in static_slots for slot_name in slots):
+        return False
+    for query_token in query_slot_tokens:
+        if query_token in candidate_tokens:
+            continue
+        if all(
+            fuzz.ratio(query_token, candidate_token) < SLOT_TOKEN_MATCH_THRESHOLD
+            for candidate_token in candidate_tokens
+        ):
+            return True
+    return False
+
+
+def _has_wildcard_known_slot_token_absorption(
+    query_slot_tokens: frozenset[str],
+    wildcard_tokens: frozenset[str],
+    concrete_slot_tokens: frozenset[str],
+) -> bool:
+    """Return whether a wildcard consumed query terms that look like known slots."""
+    return bool(query_slot_tokens and wildcard_tokens and not concrete_slot_tokens) and bool(
+        query_slot_tokens & wildcard_tokens
+    )
+
+
+# ---------------------------------------------------------------------------
+# Wildcard rehydration helpers
+# ---------------------------------------------------------------------------
 
 
 def _rehydrate_and_rescore_wildcard(
@@ -647,6 +1021,7 @@ def rank_candidates(
     candidate_slot_tokens: tuple[frozenset[str], ...] | None = None,
     slot_token_to_indices: dict[str, tuple[int, ...]] | None = None,
     slot_preferences: set[tuple[str, str]] | None = None,
+    intent_context: Mapping[str, Any] | None = None,
     min_confidence: float = DEFAULT_MIN_CONFIDENCE,
 ) -> tuple[RankedCandidate, ...]:
     """Rank candidates for a query using lexical scoring.
@@ -654,6 +1029,8 @@ def rank_candidates(
     Candidate text containing wildcard placeholders is rehydrated from
     *query* before scoring so that real free-text values contribute to
     the semantic match instead of placeholder tokens.
+    ``intent_context`` accepts HassIL-style context mappings and is normalized
+    by ``utils.normalize_intent_context``.
     """
     if max_candidates < 1:
         raise ValueError("max_candidates must be positive")
@@ -698,6 +1075,8 @@ def rank_candidates(
         query_sorted,
         non_entity_tokens,
     ) = _rank_query_setup(query_normalized, positional_literal_tokens)
+    normalized_context = normalize_intent_context(intent_context)
+    query_has_number = _has_numeric_query_token(query_tokens)
     intent_score_cache: dict[tuple[frozenset[str], ...], float] = {}
 
     max_raw_score = 0.0
@@ -768,7 +1147,9 @@ def rank_candidates(
     elif slot_token_to_indices is not None:
         slot_tokens_by_index = {}
         query_slot_tokens = _query_slot_tokens_from_index(
-            query_tokens, top_indices, slot_token_to_indices
+            query_tokens,
+            top_indices,
+            slot_token_to_indices,
         )
     else:
         slot_tokens_by_index = {}
@@ -780,7 +1161,7 @@ def rank_candidates(
     literal_analysis_cache: dict[
         tuple[str, tuple[frozenset[str], ...]], _LiteralVariantAnalysis
     ] = {}
-    ranked_tuples: list[tuple[float, Candidate, float, float, float, float, int, float]] = []
+    ranked_tuples: list[_RankedItem] = []
     for idx in top_indices:
         candidate = candidates[idx]
         bm25_score = bm25_scores[idx]
@@ -966,6 +1347,63 @@ def rank_candidates(
         if slot_penalty < 1.0:
             base_multiplier = min(1.0, max(0.1, min_confidence - 0.05))
             combined *= base_multiplier + (1.0 - base_multiplier) * slot_penalty
+        if _has_wildcard_known_slot_token_absorption(
+            query_slot_tokens,
+            wildcard_tokens,
+            cand_slot_tokens,
+        ):
+            combined *= WILDCARD_KNOWN_SLOT_TOKEN_PENALTY
+
+        slots = _candidate_slots(candidate)
+        slot_specificity = len(slots)
+        if slots:
+            static_slots = _static_slot_names(candidate)
+            if _has_unanchored_numeric_slot(
+                slots,
+                static_slots,
+                query_has_number=query_has_number,
+            ):
+                combined *= NUMERIC_SLOT_WITHOUT_QUERY_PENALTY
+            if _has_unanchored_entity_slot(slots, static_slots, query_tokens_tuple):
+                combined *= UNANCHORED_ENTITY_SLOT_PENALTY
+            if _has_entity_only_uncovered_query_tokens(
+                query_tokens,
+                candidate_tokens,
+                candidate,
+                slots,
+                static_slots,
+            ):
+                combined *= ENTITY_ONLY_UNCOVERED_QUERY_PENALTY
+            if _has_static_entity_uncovered_query_tokens(
+                query_tokens_tuple,
+                candidate_tokens,
+                slots,
+                static_slots,
+            ):
+                combined *= STATIC_ENTITY_UNCOVERED_QUERY_PENALTY
+            if _has_static_slot_query_conflict(
+                query_slot_tokens,
+                candidate_tokens,
+                slots,
+                static_slots,
+            ):
+                combined *= STATIC_SLOT_QUERY_CONFLICT_PENALTY
+
+            context_adjustment = _context_slot_adjustment(
+                slots,
+                _context_slot_names(candidate),
+                normalized_context,
+            )
+        else:
+            context_adjustment = _context_slot_adjustment(
+                {},
+                _context_slot_names(candidate),
+                normalized_context,
+            )
+        if context_adjustment > 0.0:
+            combined = min(1.0, combined + (CONTEXT_SLOT_MATCH_BOOST * context_adjustment))
+        elif context_adjustment < 0.0:
+            combined *= CONTEXT_SLOT_MISMATCH_PENALTY ** abs(context_adjustment)
 
         penalty_val = 0.0
         if idx in _rehydrated_cache:
@@ -975,42 +1413,54 @@ def rank_candidates(
             combined -= penalty_val
             combined = max(combined, 0.0)
         ranked_tuples.append(
-            (
-                combined,
-                candidate,
-                rapidfuzz_score,
-                char_score,
-                bm25_score,
-                intent_score,
-                idx,
-                penalty_val,
+            _RankedItem(
+                final_score=combined,
+                candidate=candidate,
+                rapidfuzz_score=rapidfuzz_score,
+                char_ngram_score=char_score,
+                bm25_score=bm25_score,
+                intent_score=intent_score,
+                index=idx,
+                penalty=penalty_val,
+                slot_specificity=slot_specificity,
             )
         )
 
+    intent_tie_preferences = _intent_tie_preferences_by_index(
+        ranked_tuples,
+        slot_preferences=slot_preferences,
+        rehydrated_cache=_rehydrated_cache,
+    )
     ranked_tuples.sort(
         key=partial(
             _ranked_tuple_sort_key,
             slot_preferences=slot_preferences,
             rehydrated_cache=_rehydrated_cache,
+            intent_tie_preferences=intent_tie_preferences,
         ),
         reverse=True,
     )
     ranked = [
         RankedCandidate(
-            candidate=item[1],
+            candidate=item.candidate,
             scores=ScoreBreakdown(
-                rapidfuzz_score=item[2],
-                char_ngram_score=item[3],
-                bm25_score=item[4],
-                intent_score=item[5],
-                final_score=item[0],
-                penalty=item[7],
+                rapidfuzz_score=item.rapidfuzz_score,
+                char_ngram_score=item.char_ngram_score,
+                bm25_score=item.bm25_score,
+                intent_score=item.intent_score,
+                final_score=item.final_score,
+                penalty=item.penalty,
             ),
         )
         for item in ranked_tuples[:disambiguation_limit]
     ]
     _apply_intent_disambiguation(ranked)
     return tuple(ranked[:max_candidates])
+
+
+# ---------------------------------------------------------------------------
+# Ranked-item sort helpers
+# ---------------------------------------------------------------------------
 
 
 def _candidate_slot_tokens_at(
@@ -1024,23 +1474,121 @@ def _candidate_slot_tokens_at(
     return slot_tokens_by_index.get(index, frozenset())
 
 
-def _ranked_tuple_sort_key(
-    item: tuple[float, Candidate, float, float, float, float, int, float],
+def _ranked_tuple_slot_preference(
+    item: _RankedItem,
     *,
     slot_preferences: set[tuple[str, str]] | None,
     rehydrated_cache: dict[int, tuple[str, dict[str, str]]],
-) -> tuple[float, float, int]:
-    """Return the stable ranking sort key for an intermediate score tuple."""
-    idx = item[6]
-    tb = 0.0
-    if slot_preferences and idx in rehydrated_cache:
-        _, replacements = rehydrated_cache[idx]
-        for slot_name, val in replacements.items():
-            if (slot_name, val.lower()) in slot_preferences:
-                tb = 1.0
-                break
+) -> float:
+    """Return the slot-preference boost for an intermediate score tuple."""
+    idx = item.index
+    if not slot_preferences or idx not in rehydrated_cache:
+        return 0.0
+    _, replacements = rehydrated_cache[idx]
+    return next(
+        (
+            1.0
+            for slot_name, val in replacements.items()
+            if (slot_name, val.lower()) in slot_preferences
+        ),
+        0.0,
+    )
 
-    return (item[0], tb, -idx)
+
+def _intent_tie_preferences_by_index(
+    ranked_tuples: Sequence[_RankedItem],
+    *,
+    slot_preferences: set[tuple[str, str]] | None,
+    rehydrated_cache: dict[int, tuple[str, dict[str, str]]],
+) -> dict[int, tuple[int, float, float]]:
+    """Return intent preferences for known opposing exact structural tie groups.
+
+    Near-ties keep their numeric score ordering; this preference only resolves
+    candidates tied within float noise on final score, slot preference, and
+    slot specificity. Values map candidate index to ``(preference,
+    normalized_final_score, normalized_slot_preference)`` so the final sort key
+    treats epsilon-different structural ties as equal.
+    """
+    tie_groups: list[tuple[float, float, int, list[_RankedItem]]] = []
+    for item in ranked_tuples:
+        slot_preference = _ranked_tuple_slot_preference(
+            item,
+            slot_preferences=slot_preferences,
+            rehydrated_cache=rehydrated_cache,
+        )
+        for group_final, group_slot_preference, group_specificity, group in tie_groups:
+            if (
+                item.slot_specificity == group_specificity
+                and isclose(
+                    item.final_score,
+                    group_final,
+                    rel_tol=0.0,
+                    abs_tol=_STRUCTURAL_TIE_ABS_TOLERANCE,
+                )
+                and isclose(
+                    slot_preference,
+                    group_slot_preference,
+                    rel_tol=0.0,
+                    abs_tol=_STRUCTURAL_TIE_ABS_TOLERANCE,
+                )
+            ):
+                group.append(item)
+                break
+        else:
+            tie_groups.append((item.final_score, slot_preference, item.slot_specificity, [item]))
+
+    preferences_by_index: dict[int, tuple[int, float, float]] = {}
+    for group_final, group_slot_preference, _, group in tie_groups:
+        if len(group) < 2:
+            continue
+        tied_intents = frozenset(item.candidate.intent_name for item in group)
+        group_preferences = {
+            item.index: _intent_tie_preference(item.candidate, tied_intents) for item in group
+        }
+        if not any(group_preferences.values()):
+            continue
+        for item in group:
+            preferences_by_index[item.index] = (
+                group_preferences[item.index],
+                group_final,
+                group_slot_preference,
+            )
+    return preferences_by_index
+
+
+def _ranked_tuple_sort_key(
+    item: _RankedItem,
+    *,
+    slot_preferences: set[tuple[str, str]] | None,
+    rehydrated_cache: dict[int, tuple[str, dict[str, str]]],
+    intent_tie_preferences: Mapping[int, tuple[int, float, float]],
+) -> tuple[float, float, int, int, int]:
+    """Return the stable ranking sort key for an intermediate score tuple."""
+    idx = item.index
+    slot_specificity = item.slot_specificity
+    tb = _ranked_tuple_slot_preference(
+        item,
+        slot_preferences=slot_preferences,
+        rehydrated_cache=rehydrated_cache,
+    )
+    final_score = item.final_score
+    intent_tie_preference = 0
+    if tie_adjustment := intent_tie_preferences.get(idx):
+        intent_tie_preference, final_score, tb = tie_adjustment
+
+    return (final_score, tb, slot_specificity, intent_tie_preference, -idx)
+
+
+def _intent_tie_preference(candidate: Candidate, tied_intents: frozenset[str]) -> int:
+    """Return deterministic preference only for known opposing intent ties."""
+    return next(
+        (
+            preferences.get(candidate.intent_name, 0)
+            for intent_names, preferences in _KNOWN_OPPOSING_INTENT_TIE_PREFERENCES.items()
+            if tied_intents == intent_names
+        ),
+        0,
+    )
 
 
 def _apply_intent_disambiguation(
@@ -1066,6 +1614,103 @@ def _apply_intent_disambiguation(
         ranked[0], ranked[1] = competitor, top
 
 
+def _passes_high_confidence_relaxed_margin(
+    top_candidate: RankedCandidate,
+    margin: float,
+    min_margin: float,
+) -> bool:
+    """Return whether a high-confidence top candidate clears the relaxed margin gate."""
+    if min_margin > DEFAULT_MIN_MARGIN:
+        return False
+    return (
+        top_candidate.scores.final_score >= HIGH_CONFIDENCE_RELAXED_MIN_SCORE
+        and margin >= HIGH_CONFIDENCE_RELAXED_MIN_MARGIN
+    )
+
+
+def _has_weak_zero_intent_evidence(
+    top_candidate: RankedCandidate,
+    margin: float,
+) -> bool:
+    """Return whether a fuzzy top match has no action evidence and a close rival."""
+    return (
+        top_candidate.scores.intent_score <= 0.0
+        and top_candidate.scores.final_score < ZERO_INTENT_EVIDENCE_MAX_SCORE
+        and margin <= ZERO_INTENT_EVIDENCE_MAX_MARGIN
+    )
+
+
+def _uses_broad_static_entity(candidate: Candidate) -> bool:
+    """Return whether a candidate uses static broad-domain entity expansion."""
+    static_slots_text = candidate.metadata.get("static_slots", "")
+    static_slots = (
+        {slot for slot in static_slots_text.split(",") if slot}
+        if isinstance(static_slots_text, str)
+        else set()
+    )
+    return {"domain", "name"} <= static_slots
+
+
+def _has_safe_relaxed_intent_evidence(
+    top_candidate: RankedCandidate,
+    competing_candidate: RankedCandidate,
+    margin: float,
+    min_margin: float,
+) -> bool:
+    """Return whether a close fuzzy winner has enough low-risk evidence."""
+    if min_margin > DEFAULT_MIN_MARGIN:
+        return False
+    top_slots = _candidate_slots(top_candidate.candidate)
+    competing_slots = _candidate_slots(competing_candidate.candidate)
+    if (
+        not top_slots
+        and not competing_slots
+        and top_candidate.scores.final_score >= SAFE_EMPTY_SLOT_RELAXED_MIN_SCORE
+        and margin >= SAFE_EMPTY_SLOT_RELAXED_MIN_MARGIN
+    ):
+        return True
+    intent_advantage = top_candidate.scores.intent_score - competing_candidate.scores.intent_score
+    return (
+        intent_advantage >= SAFE_INTENT_EVIDENCE_MIN_ADVANTAGE
+        and top_candidate.scores.final_score >= SAFE_INTENT_EVIDENCE_MIN_SCORE
+        and top_candidate.scores.final_score < SAFE_INTENT_EVIDENCE_MAX_SCORE
+        and top_candidate.candidate.metadata.get("query_slots") != "name"
+        and not _uses_broad_static_entity(top_candidate.candidate)
+    )
+
+
+def _is_turn_on_off_same_slot_tie(
+    top_candidate: RankedCandidate,
+    competing_candidate: RankedCandidate,
+) -> bool:
+    """Return whether an exact TurnOn/TurnOff tie has identical extracted slots."""
+    if top_candidate.candidate.intent_name != "HassTurnOn":
+        return False
+    if competing_candidate.candidate.intent_name != "HassTurnOff":
+        return False
+    if not isclose(
+        top_candidate.scores.final_score,
+        competing_candidate.scores.final_score,
+        rel_tol=0.0,
+        abs_tol=_STRUCTURAL_TIE_ABS_TOLERANCE,
+    ):
+        return False
+    return _candidate_slots(top_candidate.candidate) == _candidate_slots(
+        competing_candidate.candidate
+    )
+
+
+def _is_same_text_same_slot_competitor(
+    candidate: RankedCandidate,
+    other: RankedCandidate,
+) -> bool:
+    """Return whether a same-text competitor preserves the same slot payload."""
+    return (
+        other.candidate.normalized_text == candidate.candidate.normalized_text
+        and _candidate_slots(other.candidate) == _candidate_slots(candidate.candidate)
+    )
+
+
 def accepted_candidate(
     ranked: Sequence[RankedCandidate],
     min_confidence: float = DEFAULT_MIN_CONFIDENCE,
@@ -1082,7 +1727,7 @@ def accepted_candidate(
             item
             for item in ranked[1:]
             if item.candidate.intent_name != top_candidate.candidate.intent_name
-            and item.candidate.normalized_text != top_candidate.candidate.normalized_text
+            and not _is_same_text_same_slot_competitor(top_candidate, item)
         ),
         None,
     )
@@ -1090,7 +1735,20 @@ def accepted_candidate(
         return top_candidate
     if _is_exact_lexical_match(top_candidate):
         return top_candidate
+    if _is_turn_on_off_same_slot_tie(top_candidate, competing_candidate):
+        return top_candidate
     margin = top_candidate.scores.final_score - competing_candidate.scores.final_score
+    if _has_weak_zero_intent_evidence(top_candidate, margin):
+        return None
+    if _has_safe_relaxed_intent_evidence(
+        top_candidate,
+        competing_candidate,
+        margin,
+        min_margin,
+    ):
+        return top_candidate
+    if _passes_high_confidence_relaxed_margin(top_candidate, margin, min_margin):
+        return top_candidate
     return None if margin < min_margin else top_candidate
 
 
@@ -1108,14 +1766,27 @@ def confidence_gate_rejection_reason(
             item
             for item in ranked[1:]
             if item.candidate.intent_name != top_candidate.candidate.intent_name
-            and item.candidate.normalized_text != top_candidate.candidate.normalized_text
+            and not _is_same_text_same_slot_competitor(top_candidate, item)
         ),
         None,
     )
     if competing_candidate is None or _is_exact_lexical_match(top_candidate):
         return FallbackReason.LOW_CONFIDENCE
     margin = top_candidate.scores.final_score - competing_candidate.scores.final_score
-    return FallbackReason.LOW_MARGIN if margin < min_margin else FallbackReason.LOW_CONFIDENCE
+    if _has_weak_zero_intent_evidence(top_candidate, margin):
+        return FallbackReason.LOW_CONFIDENCE
+    if _has_safe_relaxed_intent_evidence(
+        top_candidate,
+        competing_candidate,
+        margin,
+        min_margin,
+    ):
+        return FallbackReason.LOW_CONFIDENCE
+    if margin < min_margin and not _passes_high_confidence_relaxed_margin(
+        top_candidate, margin, min_margin
+    ):
+        return FallbackReason.LOW_MARGIN
+    return FallbackReason.LOW_CONFIDENCE
 
 
 def _is_exact_lexical_match(ranked_candidate: RankedCandidate) -> bool:

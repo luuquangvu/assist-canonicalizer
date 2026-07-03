@@ -115,6 +115,117 @@ def test_is_fixed_sentence_rejects_hassil_templates() -> None:
     assert not is_fixed_sentence("turn [the] light on")
 
 
+def test_expand_sentence_template_supports_hassil_permutations() -> None:
+    """Expand semicolon-separated HassIL permutations without literal semicolons."""
+    expanded = expand_sentence_template(
+        "(off;{item})",
+        {"item": ("groceries",)},
+        {},
+    )
+
+    assert expanded == ("off groceries", "groceries off")
+
+
+def test_expand_sentence_template_caps_multi_branch_hassil_permutations() -> None:
+    """Cap multi-branch permutations while allowing later branch orders through."""
+    expanded = expand_sentence_template(
+        "(off;{item};now)",
+        {"item": ("groceries", "lights", "fan")},
+        {},
+        max_expansions=4,
+    )
+
+    assert expanded == (
+        "off groceries now",
+        "off lights now",
+        "off fan now",
+        "off now groceries",
+    )
+
+
+def test_build_candidates_uses_text_list_output_values() -> None:
+    """Use HassIL text-list outputs for slot metadata while expanding inputs."""
+    candidates = build_candidates_from_intent_sources(
+        "en",
+        {
+            "builtin": {
+                "lists": {
+                    "volume_step": {
+                        "values": [
+                            {"in": "(up|increase)", "out": "up"},
+                            {"in": "(down|decrease)", "out": "down"},
+                        ]
+                    }
+                },
+                "intents": {
+                    "HassSetVolumeRelative": {"data": [{"sentences": ["volume {volume_step}"]}]}
+                },
+            }
+        },
+    )
+
+    slots_by_text = {
+        candidate.text: orjson.loads(candidate.metadata["slots"]) for candidate in candidates
+    }
+    assert slots_by_text["volume up"]["volume_step"] == "up"
+    assert slots_by_text["volume increase"]["volume_step"] == "up"
+    assert slots_by_text["volume down"]["volume_step"] == "down"
+    assert "volume (up|increase)" not in slots_by_text
+
+
+def test_slot_lists_use_hassil_whole_list_override_precedence() -> None:
+    """Layered same-name lists should replace whole lists like HassIL."""
+    source_config = {
+        "lists": {
+            "level": {
+                "values": [
+                    {"in": "low", "out": 10},
+                    {"in": "medium", "out": 50},
+                ]
+            }
+        }
+    }
+    intent_config = {
+        "lists": {
+            "level": {
+                "values": [
+                    {"in": "medium", "out": 55},
+                    {"in": "high", "out": 90},
+                ]
+            }
+        }
+    }
+    data_item = {"lists": {"level": {"values": [{"in": "high", "out": 100}]}}}
+
+    assert gl._slot_values(source_config, intent_config, data_item)["level"] == ("high",)
+    assert gl._slot_output_value_maps(source_config, intent_config, data_item)["level"] == {
+        "high": 100
+    }
+
+
+def test_build_candidates_records_context_slots() -> None:
+    """Expose HassIL context-provided slots as candidate metadata."""
+    candidates = build_candidates_from_intent_sources(
+        "en",
+        {
+            "builtin": {
+                "intents": {
+                    "HassSetVolumeRelative": {
+                        "data": [
+                            {
+                                "sentences": ["volume up"],
+                                "requires_context": {"area": {"slot": True}},
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+    )
+
+    assert candidates[0].metadata["context_slots"] == "area"
+
+
 def test_build_candidates_from_intent_sources_uses_fixed_sentences_only() -> None:
     """Build custom candidates from Home Assistant conversation source configs."""
     candidates = build_candidates_from_intent_sources(
@@ -160,6 +271,33 @@ def test_expand_sentence_template_uses_lists_optional_groups_and_alternatives() 
         "turn the kitchen light off",
         "turn the desk lamp off",
     }
+
+
+def test_expand_sentence_template_fair_cap_preserves_later_alternative_branches() -> None:
+    """Fair capped expansion should not starve later action alternatives."""
+    many_tails = "|".join(f"tail{i}" for i in range(20))
+    expanded = expand_sentence_template(
+        "(first|second) {item} [<tail>]",
+        {"item": ("value",)},
+        {"tail": f"({many_tails})"},
+        max_expansions=6,
+        fair=True,
+    )
+
+    assert "first value" in expanded
+    assert "second value" in expanded
+
+
+def test_template_literal_variants_cap_preserves_later_alternative_branches() -> None:
+    """Capped literal variants should keep action words from later branches."""
+    many_tails = "|".join(f"tail{i}" for i in range(20))
+    variants = gl._template_literal_token_variants(
+        "(first|second) {item} [<tail>]",
+        {"tail": f"({many_tails})"},
+    )
+
+    assert frozenset({"first"}) in variants
+    assert frozenset({"second"}) in variants
 
 
 def test_expand_sentence_template_deduplicates_cleaned_whitespace() -> None:
@@ -562,6 +700,82 @@ def test_build_candidates_from_intent_sources_expands_range_and_wildcard_lists()
     assert "set volume to 100" in texts
     # Check wildcard list - yields list_name ("message")
     assert "broadcast message" in texts
+
+
+@pytest.mark.parametrize(
+    ("sentence", "expected_text", "expected_slots"),
+    [
+        ("remove {timer_minutes:minutes} from timer", "remove 1 from timer", {"minutes": "1"}),
+        ("remove {timer_seconds:seconds} from timer", "remove 2 from timer", {"seconds": "2"}),
+        ("fan {fan_speed:percentage}", "fan 42", {"percentage": "42"}),
+        ("set volume to {volume:volume_level}", "set volume to 55", {"volume_level": "55"}),
+        ("open {cover_classes:device_class}", "open door", {"device_class": "door"}),
+    ],
+)
+def test_build_candidates_uses_slot_output_names_for_renamed_lists(
+    sentence: str,
+    expected_text: str,
+    expected_slots: dict[str, str],
+) -> None:
+    """Use ``{list_name:entity_name}`` output names in candidate slot metadata."""
+    candidates = build_candidates_from_intent_sources(
+        "en",
+        {
+            "builtin": {
+                "intents": {
+                    "SyntheticIntent": {
+                        "data": [
+                            {
+                                "sentences": [sentence],
+                                "lists": {
+                                    "timer_minutes": {"values": ["1"]},
+                                    "timer_seconds": {"values": ["2"]},
+                                    "fan_speed": {"values": ["42"]},
+                                    "volume": {"values": ["55"]},
+                                    "cover_classes": {"values": ["door"]},
+                                    "unrelated_number": {"values": ["1", "2", "42", "55"]},
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+    )
+
+    assert [candidate.text for candidate in candidates] == [expected_text]
+    slots = orjson.loads(candidates[0].metadata["slots"])
+    assert slots == expected_slots
+
+
+def test_build_candidates_extracts_only_slots_referenced_by_template_rules() -> None:
+    """Do not leak same-valued numeric lists that are unrelated to the template."""
+    candidates = build_candidates_from_intent_sources(
+        "en",
+        {
+            "builtin": {
+                "intents": {
+                    "SyntheticIntent": {
+                        "data": [
+                            {
+                                "sentences": ["remove <duration> from timer"],
+                                "expansion_rules": {"duration": "{timer_minutes:minutes} minutes"},
+                                "lists": {
+                                    "timer_minutes": {"values": ["1"]},
+                                    "fan_speed": {"values": ["1"]},
+                                    "volume": {"values": ["1"]},
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+    )
+
+    assert [candidate.text for candidate in candidates] == ["remove 1 minutes from timer"]
+    slots = orjson.loads(candidates[0].metadata["slots"])
+    assert slots == {"minutes": "1"}
 
 
 class TestRehydrateWildcardText:
@@ -988,6 +1202,38 @@ def test_query_registry_candidates_global_cap_keeps_later_exact_match() -> None:
 
     assert len(candidates) == 1
     assert candidates[0].normalized_text == "turn tail light on"
+
+
+def test_query_registry_candidates_prioritize_exact_base_list_values() -> None:
+    """Prefer base-list numeric values that occur exactly in the query."""
+    candidates = build_query_registry_candidates(
+        "en",
+        {
+            "builtin": {
+                "lists": {
+                    "brightness": {"range": {"from": 0, "to": 100}},
+                    "color_temperature": {"range": {"from": 1000, "to": 10000}},
+                },
+                "intents": {
+                    "HassLightSet": {
+                        "data": [
+                            {"sentences": ["{name} {color_temperature:temperature}"]},
+                            {"sentences": ["{name} {brightness}"]},
+                        ]
+                    }
+                },
+            }
+        },
+        {"name": ("bedroom light",)},
+        "bedroom light 100",
+        max_candidates=1,
+    )
+
+    assert [candidate.text for candidate in candidates] == ["bedroom light 100"]
+    assert orjson.loads(candidates[0].metadata["slots"]) == {
+        "name": "bedroom light",
+        "brightness": 100,
+    }
 
 
 def test_query_registry_candidates_keep_exact_entity_when_partial_slots_hit_cap() -> None:
@@ -1467,6 +1713,31 @@ def test_query_registry_candidates_floor_slot() -> None:
     )
 
     assert [candidate.text for candidate in candidates] == ["turn on upstairs lights"]
+
+
+def test_query_registry_candidates_include_literal_only_templates_without_registry() -> None:
+    """Build exact query candidates for base list templates even without registry slots."""
+    candidates = build_query_registry_candidates(
+        "en",
+        {
+            "builtin": {
+                "lists": {"timer_seconds": {"range": {"from": 1, "to": 2}}},
+                "intents": {
+                    "HassStartTimer": {
+                        "data": [{"sentences": ["timer for {timer_seconds:seconds}( |-)second[s]"]}]
+                    }
+                },
+            }
+        },
+        {},
+        "timer for 1 second",
+        include_literal_only_templates=True,
+        include_area_only_templates=False,
+    )
+
+    assert candidates[0].text == "timer for 1 second"
+    slots = orjson.loads(candidates[0].metadata["slots"])
+    assert slots == {"seconds": 1}
 
 
 def test_query_registry_candidates_excludes_floor_only_when_disabled() -> None:

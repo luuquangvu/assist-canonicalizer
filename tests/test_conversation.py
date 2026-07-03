@@ -2,6 +2,7 @@
 
 import asyncio
 import inspect
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -365,6 +366,116 @@ async def test_empty_static_index_still_uses_dynamic_ranking() -> None:
     assert res == validation_ok_res
     rank.assert_called_once()
     raw.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_runtime_ranking_receives_satellite_area_context() -> None:
+    """Pass Home Assistant satellite/device area context into lexical ranking."""
+    entry = MagicMock()
+    entry.options = {"min_confidence": 0.60, "min_margin": 0.05}
+    entry.entry_id = "test_entry"
+    runtime = CanonicalizerRuntime()
+    runtime.indexes["en"] = MagicMock(candidate_count=1)
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    hass = MagicMock()
+    hass.async_add_executor_job = AsyncMock(side_effect=lambda target, *args: target(*args))
+    entity.hass = hass
+
+    user_input = MockConversationInput("mute", "en")
+    user_input.device_id = "device-1"
+    user_input.satellite_id = "media_player.satellite"
+
+    entity_registry = MagicMock()
+    entity_registry.async_get.return_value = SimpleNamespace(
+        area_id="living-room",
+        device_id="satellite-device",
+    )
+    device_registry = MagicMock()
+    device_registry.async_get.return_value = SimpleNamespace(area_id="office")
+    area_registry = MagicMock()
+    area_registry.async_get_area.return_value = SimpleNamespace(name="Living Room")
+
+    ranked = RankedCandidate(
+        candidate=Candidate(text="mute", intent_name="HassMediaPlayerMute"),
+        scores=ScoreBreakdown(
+            rapidfuzz_score=1.0,
+            char_ngram_score=1.0,
+            bm25_score=1.0,
+            intent_score=1.0,
+            final_score=1.0,
+        ),
+    )
+    validation_ok_res = MagicMock()
+    validation_ok_res.response.error_code = None
+
+    with (
+        patch(
+            "custom_components.assist_canonicalizer.conversation.entity_registry.async_get",
+            return_value=entity_registry,
+        ),
+        patch(
+            "custom_components.assist_canonicalizer.conversation.device_registry.async_get",
+            return_value=device_registry,
+        ),
+        patch(
+            "custom_components.assist_canonicalizer.conversation.area_registry.async_get",
+            return_value=area_registry,
+        ),
+        patch.object(
+            CanonicalizerRuntime,
+            "rank_with_dynamic_candidates",
+            return_value=(ranked,),
+        ) as rank,
+        patch.object(entity, "_delegate_text", AsyncMock(return_value=validation_ok_res)),
+    ):
+        res = await entity._async_process_with_runtime(user_input)
+
+    assert res is validation_ok_res
+    area_registry.async_get_area.assert_called_once_with("living-room")
+    device_registry.async_get.assert_not_called()
+    assert rank.call_args.kwargs["intent_context"] == {
+        "area": {"value": "Living Room", "text": "Living Room"}
+    }
+
+
+def test_area_from_user_input_falls_back_to_original_device_area() -> None:
+    """Use the request device area when a satellite entity has no area or device."""
+    entry = MagicMock()
+    entry.entry_id = "test_entry"
+    runtime = CanonicalizerRuntime()
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    entity.hass = MagicMock()
+
+    user_input = MockConversationInput("mute", "en")
+    user_input.device_id = "device-1"
+    user_input.satellite_id = "media_player.satellite"
+
+    entity_registry = MagicMock()
+    entity_registry.async_get.return_value = SimpleNamespace(area_id=None, device_id=None)
+    device_registry = MagicMock()
+    device_registry.async_get.return_value = SimpleNamespace(area_id="office")
+    area = SimpleNamespace(name="Office")
+    area_registry = MagicMock()
+    area_registry.async_get_area.return_value = area
+
+    with (
+        patch(
+            "custom_components.assist_canonicalizer.conversation.entity_registry.async_get",
+            return_value=entity_registry,
+        ),
+        patch(
+            "custom_components.assist_canonicalizer.conversation.device_registry.async_get",
+            return_value=device_registry,
+        ),
+        patch(
+            "custom_components.assist_canonicalizer.conversation.area_registry.async_get",
+            return_value=area_registry,
+        ),
+    ):
+        assert entity._area_from_user_input(user_input) is area
+
+    device_registry.async_get.assert_called_once_with("device-1")
+    area_registry.async_get_area.assert_called_once_with("office")
 
 
 @pytest.mark.asyncio

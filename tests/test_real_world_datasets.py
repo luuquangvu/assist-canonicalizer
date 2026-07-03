@@ -6,6 +6,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
 
@@ -80,14 +81,14 @@ HASSIL_ALIGN_CATEGORIES = frozenset(
     }
 )
 REQUIRED_CATEGORY_MINIMUMS = {
-    "complex_distortion": 5,
+    "complex_distortion": 10,
     "exact_match": 10,
-    "extra_words": 5,
+    "extra_words": 10,
     "intent_coverage": 15,
-    "missing_words": 5,
-    "semantic_challenge": 5,
-    "spelling_mistake": 5,
-    "synonym_paraphrase": 5,
+    "missing_words": 10,
+    "semantic_challenge": 10,
+    "spelling_mistake": 10,
+    "synonym_paraphrase": 10,
 }
 
 
@@ -119,6 +120,12 @@ def _candidate_slot_keys_cover(
     for expected_slot_key in expected_slot_keys:
         if expected_slot_key in aliases:
             continue
+        if (
+            expected_slot_key == "name"
+            and "domain" in aliases
+            and any(slot_name in aliases for slot_name in benchmark.LOCATION_SLOT_NAMES)
+        ):
+            continue
         if ":" in expected_slot_key and expected_slot_key.split(":", 1)[0] in aliases:
             continue
         return False
@@ -149,7 +156,7 @@ class DatasetContext:
     static_wildcard_texts_by_intent: dict[str, tuple[str, ...]]
     static_candidate_slot_keys_by_intent: dict[str, tuple[frozenset[str], ...]]
     static_normalized_texts: frozenset[str]
-    hassil_results_by_query: dict[str, tuple[Any, ...]]
+    hassil_results_by_query: dict[tuple[str, tuple[tuple[str, Any], ...]], tuple[Any, ...]]
 
     @property
     def static_candidate_pairs(self) -> frozenset[tuple[str, str]]:
@@ -260,7 +267,9 @@ def test_real_world_expected_intents_are_hassil_candidates(
     missing: list[dict[str, Any]] = []
     for case in dataset_context.cases:
         expected_intent = case["expected_intent"]
-        expected_slot_keys = frozenset(case.get("expected_slots", {}))
+        expected_slot_keys = frozenset(case.get("expected_slots", {})) - frozenset(
+            case.get("context", {})
+        )
         candidate_slot_keys = dataset_context.static_candidate_slot_keys_by_intent.get(
             expected_intent, ()
         )
@@ -398,7 +407,7 @@ def test_real_world_expected_intents_align_with_hassil(
     for case in dataset_context.cases:
         if case["category"] not in HASSIL_ALIGN_CATEGORIES:
             continue
-        results = _hassil_results(dataset_context, case["query"])
+        results = _hassil_results(dataset_context, case["query"], case.get("context"))
         if not results:
             continue
         top_result = results[0]
@@ -485,7 +494,7 @@ def test_real_world_expected_slots_align_with_hassil(
             continue
         parses = [
             {name: ent.value for name, ent in result.entities.items()}
-            for result in _hassil_results(dataset_context, case["query"])
+            for result in _hassil_results(dataset_context, case["query"], case.get("context"))
             if benchmark._intents_match(result.intent.name, case["expected_intent"])
         ]
         if not parses:
@@ -525,7 +534,7 @@ def test_real_world_expected_slots_align_with_hassil(
 
 def _recognizes_expected(context: DatasetContext, case: Mapping[str, Any]) -> bool:
     """Return whether HassIL directly recognizes a case as the expected result."""
-    results = _hassil_results(context, case["query"])
+    results = _hassil_results(context, case["query"], case.get("context"))
     expected_slots = case.get("expected_slots", {})
     return any(
         benchmark._intents_match(result.intent.name, case["expected_intent"])
@@ -538,13 +547,36 @@ def _recognizes_expected(context: DatasetContext, case: Mapping[str, Any]) -> bo
     )
 
 
-def _hassil_results(context: DatasetContext, query: str) -> tuple[Any, ...]:
+def _hassil_cache_key(
+    query: str,
+    intent_context: Mapping[str, Any] | None = None,
+) -> tuple[str, tuple[tuple[str, Any], ...]]:
+    """Return a stable HassIL result cache key for query plus context."""
+    context_items = (
+        tuple(sorted(intent_context.items(), key=lambda item: item[0])) if intent_context else ()
+    )
+    return query, context_items
+
+
+def _hassil_results(
+    context: DatasetContext,
+    query: str,
+    intent_context: Mapping[str, Any] | None = None,
+) -> tuple[Any, ...]:
     """Return cached HassIL recognition results for a dataset query."""
-    cached = context.hassil_results_by_query.get(query)
+    cache_key = _hassil_cache_key(query, intent_context)
+    cached = context.hassil_results_by_query.get(cache_key)
     if cached is not None:
         return cached
-    results = tuple(benchmark.run_hassil_recognize_all(query, context.intents, context.slot_lists))
-    context.hassil_results_by_query[query] = results
+    results = tuple(
+        benchmark.run_hassil_recognize_all(
+            query,
+            context.intents,
+            context.slot_lists,
+            intent_context,
+        )
+    )
+    context.hassil_results_by_query[cache_key] = results
     return results
 
 
@@ -662,6 +694,27 @@ def test_benchmark_runtime_slow_query_payload_orders_by_mean() -> None:
     assert payload[0]["dynamic_candidate_count"] == 3
 
 
+def test_benchmark_accuracy_report_exposes_schema_metadata(tmp_path: Path) -> None:
+    """Accuracy reports should advertise additive field/column changes."""
+    report = {
+        "report_schema": "assist_canonicalizer_accuracy",
+        "report_schema_version": benchmark.ACCURACY_REPORT_SCHEMA_VERSION,
+        "languages": {},
+        "overall": {"summary": {}},
+    }
+    json_path = tmp_path / "report.json"
+
+    benchmark._write_json_report(str(json_path), report)
+    payload = orjson.loads(json_path.read_bytes())
+    markdown = benchmark._markdown_report(report)
+    text = benchmark._text_report(report)
+
+    assert payload["report_schema"] == "assist_canonicalizer_accuracy"
+    assert payload["report_schema_version"] == benchmark.ACCURACY_REPORT_SCHEMA_VERSION
+    assert f"**Report schema:** v{benchmark.ACCURACY_REPORT_SCHEMA_VERSION}" in markdown
+    assert f"Report Schema: v{benchmark.ACCURACY_REPORT_SCHEMA_VERSION}" in text
+
+
 def test_benchmark_hassil_missing_list_retry_fails_on_repeat(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -679,6 +732,98 @@ def test_benchmark_hassil_missing_list_retry_fails_on_repeat(
         benchmark.run_hassil_recognize_all("hello", cast(hassil.intents.Intents, object()), {})
 
     assert calls == 2
+
+
+def test_benchmark_validate_test_cases_accepts_context() -> None:
+    """Dataset validation should preserve optional HassIL intent context."""
+    cases = [
+        {
+            "query": "mute",
+            "expected_intent": "HassMediaPlayerMute",
+            "expected_canonical": "mute",
+            "expected_slots": {},
+            "category": "intent_coverage",
+            "context": {"area": "kitchen", "floor": 1, "enabled": True},
+        }
+    ]
+
+    validated = benchmark._validate_test_cases(cases, "en", "test.json")
+
+    assert validated[0]["context"] == {"area": "kitchen", "floor": 1, "enabled": True}
+
+
+def test_benchmark_validate_test_cases_rejects_invalid_context() -> None:
+    """Dataset context must be a flat object with scalar values."""
+    cases = [
+        {
+            "query": "mute",
+            "expected_intent": "HassMediaPlayerMute",
+            "expected_canonical": "mute",
+            "expected_slots": {},
+            "category": "intent_coverage",
+            "context": {"area": ["kitchen"]},
+        }
+    ]
+
+    with pytest.raises(ValueError, match="context entry 'area'"):
+        benchmark._validate_test_cases(cases, "en", "test.json")
+
+
+def test_benchmark_run_hassil_recognize_all_passes_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Benchmark HassIL recognition should forward per-case context."""
+    captured: list[Mapping[str, Any] | None] = []
+
+    def fake_recognize_all(*_args: Any, **kwargs: Any) -> list[Any]:
+        captured.append(kwargs.get("intent_context"))
+        return []
+
+    monkeypatch.setattr(benchmark.hassil, "recognize_all", fake_recognize_all)
+
+    benchmark.run_hassil_recognize_all(
+        "mute",
+        cast(hassil.intents.Intents, object()),
+        {},
+        {"area": "kitchen"},
+    )
+
+    assert captured == [{"area": "kitchen"}]
+
+
+def test_dataset_hassil_cache_includes_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Dataset HassIL cache should not reuse one query across different contexts."""
+    calls: list[dict[str, Any]] = []
+
+    def fake_run_hassil(
+        query: str,
+        _intents: hassil.intents.Intents,
+        _slot_lists: dict[str, hassil.intents.SlotList],
+        intent_context: Mapping[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        assert query == "mute"
+        context = dict(intent_context or {})
+        calls.append(context)
+        return [context]
+
+    monkeypatch.setattr(benchmark, "run_hassil_recognize_all", fake_run_hassil)
+    context = cast(
+        DatasetContext,
+        SimpleNamespace(
+            hassil_results_by_query={},
+            intents=cast(hassil.intents.Intents, object()),
+            slot_lists={},
+        ),
+    )
+
+    kitchen = _hassil_results(context, "mute", {"area": "kitchen"})
+    office = _hassil_results(context, "mute", {"area": "office"})
+    kitchen_again = _hassil_results(context, "mute", {"area": "kitchen"})
+
+    assert kitchen == ({"area": "kitchen"},)
+    assert office == ({"area": "office"},)
+    assert kitchen_again == kitchen
+    assert calls == [{"area": "kitchen"}, {"area": "office"}]
 
 
 def test_slots_match_uses_alias_when_primary_slot_is_sentinel() -> None:

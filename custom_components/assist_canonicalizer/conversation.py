@@ -19,11 +19,8 @@ from homeassistant.helpers import intent
 
 if TYPE_CHECKING:
     from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
-else:
-    try:
-        from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
-    except ImportError:
-        AddConfigEntryEntitiesCallback = Any
+
+from homeassistant.helpers import area_registry, device_registry, entity_registry
 
 from .const import (
     CONF_FALLBACK_AGENT_ID,
@@ -36,7 +33,12 @@ from .const import (
 from .grammar_loader import rehydrate_wildcard_text
 from .ranking import RankedCandidate, accepted_candidate, confidence_gate_rejection_reason
 from .runtime import CanonicalizerRuntime
-from .utils import elapsed_ms, normalize_language, resolve_entry_thresholds
+from .utils import (
+    elapsed_ms,
+    intent_context_from_area_name,
+    normalize_language,
+    resolve_entry_thresholds,
+)
 
 
 async def async_setup_entry(
@@ -142,10 +144,13 @@ class AssistCanonicalizerConversationEntity(
 
         try:
             min_confidence, min_margin = resolve_entry_thresholds(self._entry)
+            intent_context = self._intent_context_from_user_input(user_input)
             ranked = await self.hass.async_add_executor_job(
                 partial(
                     self._runtime.rank_with_dynamic_candidates,
+                    intent_context=intent_context,
                     min_confidence=min_confidence,
+                    min_margin=min_margin,
                 ),
                 language,
                 index,
@@ -189,6 +194,46 @@ class AssistCanonicalizerConversationEntity(
 
         self._runtime.update_diagnostics(last_fallback_reason=FallbackReason.VALIDATION_FAILED)
         return await self._delegate_raw_text(user_input)
+
+    def _intent_context_from_user_input(
+        self, user_input: ConversationInput
+    ) -> dict[str, Any] | None:
+        """Return HassIL-style intent context from satellite or device area."""
+        area = self._area_from_user_input(user_input)
+        if area is None:
+            return None
+        area_name = getattr(area, "name", None)
+        return intent_context_from_area_name(area_name)
+
+    def _area_from_user_input(self, user_input: ConversationInput) -> Any | None:
+        """Return the request area using Home Assistant registry metadata."""
+        try:
+            reg_entity = entity_registry.async_get(self.hass)
+            reg_device = device_registry.async_get(self.hass)
+            reg_area = area_registry.async_get(self.hass)
+        except (AttributeError, RuntimeError):
+            return None
+
+        area_id: str | None = None
+        device_id = user_input.device_id
+        satellite_id = getattr(user_input, "satellite_id", None)
+
+        if (
+            satellite_id is not None
+            and (entity_entry := reg_entity.async_get(satellite_id)) is not None
+        ):
+            area_id = getattr(entity_entry, "area_id", None)
+            if satellite_device_id := getattr(entity_entry, "device_id", None):
+                device_id = satellite_device_id
+
+        if (
+            area_id is None
+            and device_id is not None
+            and (device_entry := reg_device.async_get(device_id)) is not None
+        ):
+            area_id = getattr(device_entry, "area_id", None)
+
+        return None if area_id is None else reg_area.async_get_area(area_id)
 
     async def _async_validate_ranked_candidate(
         self,

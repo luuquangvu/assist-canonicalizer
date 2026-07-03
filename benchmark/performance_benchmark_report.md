@@ -1,78 +1,80 @@
 # Assist Canonicalizer Evaluation
 
-**Dependency versions:** homeassistant=2026.6.4, home-assistant-intents=2026.6.1
+**Report schema:** v1
+
+**Dependency versions:** homeassistant=2026.7.0, home-assistant-intents=2026.6.24
 
 ## Overall
 
-- `hassil`: 45.9% intent/slot, 45.9% canonical, 0.0% mismatch, 54.1% fallback
-- `lexical`: 86.2% intent/slot, 65.2% canonical, 2.3% mismatch, 11.5% fallback
+- `hassil`: 48.3% intent/slot, 48.3% top-1, 48.3% canonical, 0.0% mismatch, 51.7% fallback
+- `lexical`: 91.7% intent/slot, 93.7% top-1, 61.4% canonical, 2.2% mismatch, 6.1% fallback
 
 ## DE
 
 - Builtin intents: 41
 - Candidate intents: 41
 - Dataset intents: 41
-- Candidates: 80849 (build latency: 2993.3ms)
+- Candidates: 89127 (build latency: 2045.8ms)
 - Missing candidate intents: 0
 - Untested candidate intents: 0
 
-| Mode      | Total | Intent/Slot | Canonical | Mismatch | Fallback | Avg ms |
-| :-------- | ----: | ----------: | --------: | -------: | -------: | -----: |
-| `hassil`  |    87 |       50.6% |     50.6% |     0.0% |    49.4% |   44.0 |
-| `lexical` |    87 |       86.2% |     66.7% |     2.3% |    11.5% |   74.7 |
+| Mode      | Total | Intent/Slot | Top-1 | Canonical | Mismatch | Fallback | Avg ms |
+| :-------- | ----: | ----------: | ----: | --------: | -------: | -------: | -----: |
+| `hassil`  |   112 |       50.9% | 50.9% |     50.9% |     0.0% |    49.1% |   47.0 |
+| `lexical` |   112 |       94.6% | 96.4% |     54.5% |     0.9% |     4.5% |   97.9 |
 
 ## EN
 
 - Builtin intents: 41
 - Candidate intents: 41
 - Dataset intents: 41
-- Candidates: 41075 (build latency: 1467.8ms)
+- Candidates: 50725 (build latency: 855.1ms)
 - Missing candidate intents: 0
 - Untested candidate intents: 0
 
-| Mode      | Total | Intent/Slot | Canonical | Mismatch | Fallback | Avg ms |
-| :-------- | ----: | ----------: | --------: | -------: | -------: | -----: |
-| `hassil`  |   111 |       51.4% |     51.4% |     0.0% |    48.6% |    7.2 |
-| `lexical` |   111 |       90.1% |     64.0% |     2.7% |     7.2% |   56.4 |
+| Mode      | Total | Intent/Slot | Top-1 | Canonical | Mismatch | Fallback | Avg ms |
+| :-------- | ----: | ----------: | ----: | --------: | -------: | -------: | -----: |
+| `hassil`  |   121 |       56.2% | 56.2% |     56.2% |     0.0% |    43.8% |    5.0 |
+| `lexical` |   121 |       90.1% | 90.1% |     59.5% |     4.1% |     5.8% |   79.0 |
 
 ## FR
 
-- Builtin intents: 34
-- Candidate intents: 34
-- Dataset intents: 34
-- Candidates: 50602 (build latency: 1264.7ms)
+- Builtin intents: 41
+- Candidate intents: 41
+- Dataset intents: 41
+- Candidates: 59283 (build latency: 1329.2ms)
 - Missing candidate intents: 0
 - Untested candidate intents: 0
 
-| Mode      | Total | Intent/Slot | Canonical | Mismatch | Fallback | Avg ms |
-| :-------- | ----: | ----------: | --------: | -------: | -------: | -----: |
-| `hassil`  |    85 |       49.4% |     49.4% |     0.0% |    50.6% |    7.5 |
-| `lexical` |    85 |       88.2% |     60.0% |     1.2% |    10.6% |   88.6 |
+| Mode      | Total | Intent/Slot | Top-1 | Canonical | Mismatch | Fallback | Avg ms |
+| :-------- | ----: | ----------: | ----: | --------: | -------: | -------: | -----: |
+| `hassil`  |   109 |       51.4% | 51.4% |     51.4% |     0.0% |    48.6% |    4.7 |
+| `lexical` |   109 |       92.7% | 94.5% |     55.0% |     1.8% |     5.5% |  107.5 |
 
 ## NL
 
 - Builtin intents: 41
 - Candidate intents: 41
 - Dataset intents: 41
-- Candidates: 49031 (build latency: 1854.2ms)
+- Candidates: 68891 (build latency: 1477.2ms)
 - Missing candidate intents: 0
 - Untested candidate intents: 0
 
-| Mode      | Total | Intent/Slot | Canonical | Mismatch | Fallback | Avg ms |
-| :-------- | ----: | ----------: | --------: | -------: | -------: | -----: |
-| `hassil`  |   105 |       44.8% |     44.8% |     0.0% |    55.2% |   50.3 |
-| `lexical` |   105 |       82.9% |     72.4% |     1.9% |    15.2% |   72.9 |
+| Mode      | Total | Intent/Slot | Top-1 | Canonical | Mismatch | Fallback | Avg ms |
+| :-------- | ----: | ----------: | ----: | --------: | -------: | -------: | -----: |
+| `hassil`  |   122 |       48.4% | 48.4% |     48.4% |     0.0% |    51.6% |   25.5 |
+| `lexical` |   122 |       89.3% | 93.4% |     73.8% |     2.5% |     8.2% |   82.2 |
 
 ## VI
 
 - Builtin intents: 17
 - Candidate intents: 17
 - Dataset intents: 17
-- Candidates: 17248 (build latency: 773.5ms)
+- Candidates: 17752 (build latency: 539.4ms)
 - Missing candidate intents: 0
 - Untested candidate intents: 0
 
-| Mode      | Total | Intent/Slot | Canonical | Mismatch | Fallback | Avg ms |
-| :-------- | ----: | ----------: | --------: | -------: | -------: | -----: |
-| `hassil`  |    83 |       31.3% |     31.3% |     0.0% |    68.7% |   13.4 |
-| `lexical` |    83 |       83.1% |     61.4% |     3.6% |    13.3% |   53.7 |
+| Mode      | Total | Intent/Slot | Top-1 | Canonical | Mismatch | Fallback | Avg ms |
+| :-------- | ----: | ----------: | ----: | --------: | -------: | -------: | -----: |
+| `hassil`  |    91 |       30.8% | 30.8% |     30.8% |     0.0% |    69.2% |   12.0 |
+| `lexical` |    91 |       92.3% | 94.5% |     63.7% |     1.1% |     6.6% |   56.4 |

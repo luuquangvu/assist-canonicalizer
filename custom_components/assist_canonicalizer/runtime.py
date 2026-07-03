@@ -9,16 +9,18 @@ import inspect
 from collections.abc import Callable, Mapping, Sequence, Set
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, cast
+from typing import Any
 from uuid import uuid4
 
 import orjson
+from homeassistant.helpers import storage
 
 from .builtin_intents import load_language_intent_sources
 from .candidate import Candidate, CandidateSource
 from .const import (
     DEFAULT_MAX_CANDIDATES,
     DEFAULT_MIN_CONFIDENCE,
+    DEFAULT_MIN_MARGIN,
     DOMAIN,
     FallbackReason,
 )
@@ -33,25 +35,13 @@ from .grammar_loader import (
 )
 from .indexer import CanonicalIndex, build_index
 from .normalization import char_ngrams_normalized, normalize_text
-from .ranking import CharNGramIndex, RankedCandidate, rank_candidates
-from .utils import normalize_language
-
-storage: Any = cast(Any, None)
-
-try:
-    from homeassistant.helpers import storage as _storage
-
-    storage = _storage
-    _HAS_STORAGE = True
-except (ImportError, RuntimeError):
-    storage = cast(Any, None)
-    _HAS_STORAGE = False
+from .ranking import CharNGramIndex, RankedCandidate, accepted_candidate, rank_candidates
+from .utils import normalize_language, register_custom_wildcards_from_sources
 
 _STORE_HAS_SERIALIZE_IN_EVENT_LOOP = False
-if _HAS_STORAGE and storage is not None:
-    with contextlib.suppress(Exception):
-        sig = inspect.signature(storage.Store.__init__)
-        _STORE_HAS_SERIALIZE_IN_EVENT_LOOP = "serialize_in_event_loop" in sig.parameters
+with contextlib.suppress(Exception):
+    sig = inspect.signature(storage.Store.__init__)
+    _STORE_HAS_SERIALIZE_IN_EVENT_LOOP = "serialize_in_event_loop" in sig.parameters
 _INDEX_STORE_VERSION = 1
 _INDEX_BUILD_VERSION = 2
 _INDEX_STORE_PREFIX = f"{DOMAIN}.index_"
@@ -261,32 +251,57 @@ class CanonicalizerRuntime:
         max_candidates: int = DEFAULT_MAX_CANDIDATES,
         *,
         slot_preferences: set[tuple[str, str]] | None = None,
+        intent_context: Mapping[str, Any] | None = None,
         min_confidence: float = DEFAULT_MIN_CONFIDENCE,
+        min_margin: float = DEFAULT_MIN_MARGIN,
     ) -> tuple[RankedCandidate, ...]:
-        """Rank cached index candidates plus query-scoped registry expansions."""
+        """Rank cached index candidates plus query-scoped registry expansions.
+
+        ``intent_context`` is forwarded as the HassIL-style mapping consumed by
+        indexed and dynamic ranking paths.
+        """
         language = normalize_language(language)
         ranked = index.rank(
             query,
             max_candidates=max_candidates,
             slot_preferences=slot_preferences,
+            intent_context=intent_context,
             min_confidence=min_confidence,
         )
         self.update_diagnostics(dynamic_candidate_count=0)
         if _is_perfect_rank_result(ranked):
             return ranked
+        intent_sources = self._intent_sources_for_query(language)
+
+        register_custom_wildcards_from_sources(language, intent_sources)
+
         registry_slot_values, registry_slot_index = self._registry_slot_snapshot_for_language(
             language
         )
+        static_accepted = accepted_candidate(
+            ranked,
+            min_confidence=min_confidence,
+            min_margin=min_margin,
+        )
+        numeric_literal_rescue = _query_needs_literal_only_dynamic(query)
+        wildcard_literal_rescue = static_accepted is None and not numeric_literal_rescue
+        include_literal_only_templates = numeric_literal_rescue or wildcard_literal_rescue
         dynamic_candidates = build_query_registry_candidates(
             language,
-            self._intent_sources_for_query(language),
+            intent_sources,
             registry_slot_values,
             query,
             registry_slot_index=registry_slot_index,
             compiled_intents=self._dynamic_registry_intents_for_query(language),
-            include_literal_only_templates=False,
+            include_literal_only_templates=include_literal_only_templates,
             include_area_only_templates=False,
         )
+        if wildcard_literal_rescue:
+            dynamic_candidates = tuple(
+                candidate
+                for candidate in dynamic_candidates
+                if candidate.has_wildcard or candidate.metadata.get("query_slots")
+            )
         if not dynamic_candidates:
             return ranked
         self.update_diagnostics(dynamic_candidate_count=len(dynamic_candidates))
@@ -314,10 +329,18 @@ class CanonicalizerRuntime:
             exact_normalized_lookup=exact_normalized_lookup,
             language=language,
             slot_preferences=slot_preferences,
+            intent_context=intent_context,
             min_confidence=min_confidence,
         )
         if _is_perfect_rank_result(dynamic_ranked):
             return dynamic_ranked
+        if (
+            static_accepted is not None
+            and dynamic_ranked
+            and ranked
+            and dynamic_ranked[0].scores.final_score - ranked[0].scores.final_score < min_margin
+        ):
+            return ranked
         return _merge_ranked_candidates(ranked, dynamic_ranked, max_candidates)
 
     def clear_index(self, language: str | None = None) -> None:
@@ -394,7 +417,7 @@ class CanonicalizerRuntime:
         compiled = compile_dynamic_registry_intents(
             self._intent_sources_for_query(language),
             language,
-            include_literal_only_templates=False,
+            include_literal_only_templates=True,
             include_area_only_templates=False,
         )
         self.dynamic_registry_intents[language] = compiled
@@ -659,7 +682,7 @@ def _canonical_fingerprint_value(value: Any) -> Any:
 
 def _index_store(hass: Any, language: str) -> Any:
     """Return the versioned Home Assistant Store for one language index."""
-    kwargs = {}
+    kwargs: dict[str, Any] = {}
     if _STORE_HAS_SERIALIZE_IN_EVENT_LOOP:
         kwargs["serialize_in_event_loop"] = False
     return storage.Store(
@@ -807,6 +830,11 @@ def _dynamic_exact_normalized_lookup(
         candidate for candidate in candidates if candidate.normalized_text == normalized_query
     ]
     return {normalized_query: exact_matches} if exact_matches else None
+
+
+def _query_needs_literal_only_dynamic(query: str) -> bool:
+    """Return whether static caps are likely to miss exact base-list expansions."""
+    return any(any(char.isdigit() for char in token) for token in normalize_text(query).split())
 
 
 def _ranked_candidate_sort_key(ranked_candidate: RankedCandidate) -> tuple[float, int]:

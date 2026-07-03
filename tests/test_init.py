@@ -1,12 +1,8 @@
 """Tests for Assist Canonicalizer integration entry points."""
 
-import importlib
-import sys
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import homeassistant.components
-import homeassistant.helpers
 import pytest
 
 import custom_components.assist_canonicalizer
@@ -33,65 +29,6 @@ class _IntentSubscriptionRecorder:
         """Mock subscribing to intent changes."""
         self.saved_callback = cb
         return lambda: None
-
-
-def test_init_imports_fallback() -> None:
-    """Test importing the custom component when Home Assistant helper registries are missing."""
-    # Delete attributes from parent modules to force try-except block execution on import/reload
-
-    helpers_attrs = [
-        "area_registry",
-        "entity_registry",
-        "event",
-        "floor_registry",
-    ]
-    old_helpers = {}
-    for attr in helpers_attrs:
-        if hasattr(homeassistant.helpers, attr):
-            old_helpers[attr] = getattr(homeassistant.helpers, attr)
-            delattr(homeassistant.helpers, attr)
-
-    components_attrs = ["conversation", "homeassistant"]
-    old_components = {}
-    for attr in components_attrs:
-        if hasattr(homeassistant.components, attr):
-            old_components[attr] = getattr(homeassistant.components, attr)
-            delattr(homeassistant.components, attr)
-
-    # Patch sys.modules to return None for these modules
-    sys_modules_patch = {
-        "homeassistant.components.conversation": None,
-        "homeassistant.components.homeassistant": None,
-        "homeassistant.helpers.area_registry": None,
-        "homeassistant.helpers.entity_registry": None,
-        "homeassistant.helpers.event": None,
-        "homeassistant.helpers.floor_registry": None,
-    }
-
-    try:
-        with patch.dict(sys.modules, sys_modules_patch):
-            _test_init_imports_fallback()
-    finally:
-        # Restore parent module attributes
-        for attr, val in old_helpers.items():
-            setattr(homeassistant.helpers, attr, val)
-        for attr, val in old_components.items():
-            setattr(homeassistant.components, attr, val)
-
-        # Force restore reload of the module to its original state
-        importlib.reload(custom_components.assist_canonicalizer)
-
-
-def _test_init_imports_fallback() -> None:
-    """Test imports fallback to None when HA registries and services are missing."""
-    importlib.reload(custom_components.assist_canonicalizer)
-
-    assert custom_components.assist_canonicalizer.agent_manager is None
-    assert custom_components.assist_canonicalizer.exposed_entities is None
-    assert custom_components.assist_canonicalizer.area_registry is None
-    assert custom_components.assist_canonicalizer.entity_registry is None
-    assert custom_components.assist_canonicalizer.ha_event is None
-    assert custom_components.assist_canonicalizer.floor_registry is None
 
 
 @pytest.mark.asyncio

@@ -1,10 +1,10 @@
 {
   "test_cases": [
     {
-      "query": "stofzuiger uit",
+      "query": "stofzuiger terug",
       "language": "nl",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "stofzuiger uit",
+      "expected_intent": "HassVacuumReturnToBase",
+      "expected_canonical": "stofzuiger terug",
       "category": "exact_match",
       "expected_slots": {
         "name": "stofzuiger"
@@ -39,7 +39,8 @@
       "expected_canonical": "badkamerventilator uitzetten",
       "category": "exact_match",
       "expected_slots": {
-        "name": "badkamerventilator"
+        "area": "badkamer",
+        "domain": "fan"
       }
     },
     {
@@ -49,7 +50,8 @@
       "expected_canonical": "zet badkamerventilator uit",
       "category": "exact_match",
       "expected_slots": {
-        "name": "badkamerventilator"
+        "area": "badkamer",
+        "domain": "fan"
       }
     },
     {
@@ -59,7 +61,8 @@
       "expected_canonical": "de woonkamerlamp uitzetten",
       "category": "exact_match",
       "expected_slots": {
-        "name": "woonkamerlamp"
+        "area": "woonkamer",
+        "domain": "light"
       }
     },
     {
@@ -79,7 +82,8 @@
       "expected_canonical": "de keukenlamp uitzetten",
       "category": "exact_match",
       "expected_slots": {
-        "name": "keukenlamp"
+        "area": "keuken",
+        "domain": "light"
       }
     },
     {
@@ -135,7 +139,8 @@
       "expected_canonical": "Schakel keukenlamp in",
       "category": "spelling_mistake",
       "expected_slots": {
-        "name": "keukenlamp"
+        "area": "keuken",
+        "domain": "light"
       }
     },
     {
@@ -159,7 +164,8 @@
       "expected_canonical": "badkamerventilator uitzetten",
       "category": "spelling_mistake",
       "expected_slots": {
-        "name": "badkamerventilator"
+        "area": "badkamer",
+        "domain": "fan"
       }
     },
     {
@@ -169,7 +175,8 @@
       "expected_canonical": "de woonkamerlamp uitzetten",
       "category": "extra_words",
       "expected_slots": {
-        "name": "woonkamerlamp"
+        "area": "woonkamer",
+        "domain": "light"
       }
     },
     {
@@ -179,7 +186,8 @@
       "expected_canonical": "keukenlamp aan",
       "category": "extra_words",
       "expected_slots": {
-        "name": "keukenlamp"
+        "area": "keuken",
+        "domain": "light"
       }
     },
     {
@@ -199,8 +207,8 @@
     {
       "query": "sorry maar kun je doe stofzuiger aan",
       "language": "nl",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "doe stofzuiger aan",
+      "expected_intent": "HassVacuumStart",
+      "expected_canonical": "start stofzuiger",
       "category": "extra_words",
       "expected_slots": {
         "name": "stofzuiger"
@@ -213,7 +221,8 @@
       "expected_canonical": "de woonkamerlamp uitzetten",
       "category": "missing_words",
       "expected_slots": {
-        "name": "woonkamerlamp"
+        "area": "woonkamer",
+        "domain": "light"
       }
     },
     {
@@ -234,14 +243,15 @@
       "expected_canonical": "zet badkamerventilator uit",
       "category": "missing_words",
       "expected_slots": {
-        "name": "badkamerventilator"
+        "area": "badkamer",
+        "domain": "fan"
       }
     },
     {
       "query": "stofzuiger nu draaien",
       "language": "nl",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "doe stofzuiger aan",
+      "expected_intent": "HassVacuumStart",
+      "expected_canonical": "start stofzuiger",
       "category": "missing_words",
       "expected_slots": {
         "name": "stofzuiger"
@@ -279,7 +289,8 @@
       "expected_canonical": "badkamerventilator uitzetten",
       "category": "complex_distortion",
       "expected_slots": {
-        "name": "badkamerventilator"
+        "area": "badkamer",
+        "domain": "fan"
       }
     },
     {
@@ -292,8 +303,8 @@
     {
       "query": "kunt u de stoofzuiger voor mij opstarten alstublieft",
       "language": "nl",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "doe stofzuiger aan",
+      "expected_intent": "HassVacuumStart",
+      "expected_canonical": "start stofzuiger",
       "category": "complex_distortion",
       "expected_slots": {
         "name": "stofzuiger"
@@ -335,7 +346,8 @@
       "expected_canonical": "badkamerventilator uitzetten",
       "category": "synonym_paraphrase",
       "expected_slots": {
-        "name": "badkamerventilator"
+        "area": "badkamer",
+        "domain": "fan"
       }
     },
     {
@@ -351,8 +363,8 @@
     {
       "query": "activeer de stofzuiger",
       "language": "nl",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "doe stofzuiger aan",
+      "expected_intent": "HassVacuumStart",
+      "expected_canonical": "start stofzuiger",
       "category": "synonym_paraphrase",
       "expected_slots": {
         "name": "stofzuiger"
@@ -365,7 +377,8 @@
       "expected_canonical": "de woonkamerlamp uitzetten",
       "category": "semantic_challenge",
       "expected_slots": {
-        "name": "woonkamerlamp"
+        "area": "woonkamer",
+        "domain": "light"
       }
     },
     {
@@ -385,7 +398,11 @@
       "expected_canonical": "zet de temperatuur naar 20",
       "category": "semantic_challenge",
       "expected_slots": {
-        "temperature": "20"
+        "temperature": "20",
+        "area": "woonkamer"
+      },
+      "context": {
+        "area": "woonkamer"
       }
     },
     {
@@ -455,14 +472,28 @@
       "language": "nl",
       "expected_intent": "HassClimateSetTemperature",
       "expected_canonical": "zet de temperatuur naar 0",
-      "category": "intent_coverage"
+      "category": "intent_coverage",
+      "context": {
+        "area": "woonkamer"
+      },
+      "expected_slots": {
+        "temperature": "0",
+        "area": "woonkamer"
+      }
     },
     {
       "query": "zet temperatuur naar 0",
       "language": "nl",
       "expected_intent": "HassClimateSetTemperature",
       "expected_canonical": "zet temperatuur naar 0",
-      "category": "intent_coverage"
+      "category": "intent_coverage",
+      "context": {
+        "area": "woonkamer"
+      },
+      "expected_slots": {
+        "temperature": "0",
+        "area": "woonkamer"
+      }
     },
     {
       "query": "slaapkamerraam naar 0",
@@ -471,7 +502,8 @@
       "expected_canonical": "slaapkamerraam naar 0",
       "category": "intent_coverage",
       "expected_slots": {
-        "name": "slaapkamerraam"
+        "name": "slaapkamerraam",
+        "position": "0"
       }
     },
     {
@@ -481,7 +513,9 @@
       "expected_canonical": "slaapkamerlamp 100",
       "category": "intent_coverage",
       "expected_slots": {
-        "name": "slaapkamerlamp"
+        "area": "slaapkamer",
+        "brightness": "100.0",
+        "domain": "light"
       }
     },
     {
@@ -491,7 +525,8 @@
       "expected_canonical": "badkamerventilator naar 100",
       "category": "intent_coverage",
       "expected_slots": {
-        "name": "badkamerventilator"
+        "area": "badkamer",
+        "percentage": "100.0"
       }
     },
     {
@@ -499,7 +534,14 @@
       "language": "nl",
       "expected_intent": "HassSetVolume",
       "expected_canonical": "doe volume op 100",
-      "category": "intent_coverage"
+      "category": "intent_coverage",
+      "context": {
+        "area": "woonkamer"
+      },
+      "expected_slots": {
+        "volume_level": "100.0",
+        "area": "woonkamer"
+      }
     },
     {
       "query": "stop grasmaaien",
@@ -520,14 +562,26 @@
       "language": "nl",
       "expected_intent": "HassMediaPause",
       "expected_canonical": "pauze",
-      "category": "intent_coverage"
+      "category": "intent_coverage",
+      "context": {
+        "area": "woonkamer"
+      },
+      "expected_slots": {
+        "area": "woonkamer"
+      }
     },
     {
       "query": "hervat",
       "language": "nl",
       "expected_intent": "HassMediaUnpause",
       "expected_canonical": "hervat",
-      "category": "intent_coverage"
+      "category": "intent_coverage",
+      "context": {
+        "area": "woonkamer"
+      },
+      "expected_slots": {
+        "area": "woonkamer"
+      }
     },
     {
       "query": "televisie volgende film",
@@ -544,35 +598,63 @@
       "language": "nl",
       "expected_intent": "HassMediaPrevious",
       "expected_canonical": "vorige",
-      "category": "intent_coverage"
+      "category": "intent_coverage",
+      "context": {
+        "area": "woonkamer"
+      },
+      "expected_slots": {
+        "area": "woonkamer"
+      }
     },
     {
       "query": "volume omhoog",
       "language": "nl",
       "expected_intent": "HassSetVolumeRelative",
       "expected_canonical": "volume omhoog",
-      "category": "intent_coverage"
+      "category": "intent_coverage",
+      "context": {
+        "area": "woonkamer"
+      },
+      "expected_slots": {
+        "volume_step": "up",
+        "area": "woonkamer"
+      }
     },
     {
       "query": "demp",
       "language": "nl",
       "expected_intent": "HassMediaPlayerMute",
       "expected_canonical": "demp",
-      "category": "intent_coverage"
+      "category": "intent_coverage",
+      "context": {
+        "area": "woonkamer"
+      },
+      "expected_slots": {
+        "area": "woonkamer"
+      }
     },
     {
       "query": "dempen opheffen",
       "language": "nl",
       "expected_intent": "HassMediaPlayerUnmute",
       "expected_canonical": "dempen opheffen",
-      "category": "intent_coverage"
+      "category": "intent_coverage",
+      "context": {
+        "area": "woonkamer"
+      },
+      "expected_slots": {
+        "area": "woonkamer"
+      }
     },
     {
       "query": "1 minuut timer",
       "language": "nl",
       "expected_intent": "HassStartTimer",
       "expected_canonical": "1 minuut timer",
-      "category": "intent_coverage"
+      "category": "intent_coverage",
+      "expected_slots": {
+        "minutes": "1.0"
+      }
     },
     {
       "query": "timer status",
@@ -600,21 +682,33 @@
       "language": "nl",
       "expected_intent": "HassDecreaseTimer",
       "expected_canonical": "verkort timer met 1 minuut",
-      "category": "intent_coverage"
+      "category": "intent_coverage",
+      "expected_slots": {
+        "minutes": "1.0"
+      }
     },
     {
       "query": "verleng timer met 1 minuut",
       "language": "nl",
       "expected_intent": "HassIncreaseTimer",
       "expected_canonical": "verleng timer met 1 minuut",
-      "category": "intent_coverage"
+      "category": "intent_coverage",
+      "expected_slots": {
+        "minutes": "1.0"
+      }
     },
     {
       "query": "hoe heet is het",
       "language": "nl",
       "expected_intent": "HassClimateGetTemperature",
       "expected_canonical": "hoe heet is het",
-      "category": "intent_coverage"
+      "category": "intent_coverage",
+      "context": {
+        "area": "woonkamer"
+      },
+      "expected_slots": {
+        "area": "woonkamer"
+      }
     },
     {
       "query": "broadcast eten is klaar",
@@ -633,7 +727,7 @@
       "expected_canonical": "zet melk op lijst",
       "category": "intent_coverage",
       "expected_slots": {
-        "shopping_list_item": "melk"
+        "item": "melk"
       }
     },
     {
@@ -643,7 +737,11 @@
       "expected_canonical": "speel jazz",
       "category": "intent_coverage",
       "expected_slots": {
-        "search_query": "jazz"
+        "search_query": "jazz",
+        "area": "woonkamer"
+      },
+      "context": {
+        "area": "woonkamer"
       }
     },
     {
@@ -661,7 +759,11 @@
       "language": "nl",
       "expected_intent": "HassGetState",
       "expected_canonical": "hoe veel mensen zijn thuis",
-      "category": "intent_coverage"
+      "category": "intent_coverage",
+      "expected_slots": {
+        "state": "thuis",
+        "domain": "person"
+      }
     },
     {
       "query": "haal melk van lijst af",
@@ -670,7 +772,7 @@
       "expected_canonical": "haal melk van lijst af",
       "category": "intent_coverage",
       "expected_slots": {
-        "shopping_list_item": "melk"
+        "item": "melk"
       }
     },
     {
@@ -687,8 +789,7 @@
       "expected_canonical": "zet boodschappen op boodschappenlijst",
       "category": "intent_coverage",
       "expected_slots": {
-        "todo_list_item": "boodschappen",
-        "name:todo": "boodschappenlijst",
+        "item": "boodschappen",
         "name": "boodschappenlijst"
       }
     },
@@ -699,8 +800,7 @@
       "expected_canonical": "voeg boodschappen toe aan todolijst",
       "category": "intent_coverage",
       "expected_slots": {
-        "todo_list_item": "boodschappen",
-        "name:todo": "todolijst",
+        "item": "boodschappen",
         "name": "todolijst"
       }
     },
@@ -708,11 +808,10 @@
       "query": "vink boodschappen van boodschappenlijst af",
       "language": "nl",
       "expected_intent": "HassListCompleteItem",
-      "expected_canonical": "vink boodschappen van boodschappenlijst;af",
+      "expected_canonical": "vink boodschappen van boodschappenlijst af",
       "category": "intent_coverage",
       "expected_slots": {
-        "todo_list_item": "boodschappen",
-        "name:todo": "boodschappenlijst",
+        "item": "boodschappen",
         "name": "boodschappenlijst"
       }
     },
@@ -723,8 +822,7 @@
       "expected_canonical": "markeer boodschappen op todolijst als klaar",
       "category": "intent_coverage",
       "expected_slots": {
-        "todo_list_item": "boodschappen",
-        "name:todo": "todolijst",
+        "item": "boodschappen",
         "name": "todolijst"
       }
     },
@@ -735,8 +833,7 @@
       "expected_canonical": "verwijder boodschappen van boodschappenlijst",
       "category": "intent_coverage",
       "expected_slots": {
-        "todo_list_item": "boodschappen",
-        "name:todo": "boodschappenlijst",
+        "item": "boodschappen",
         "name": "boodschappenlijst"
       }
     },
@@ -744,11 +841,10 @@
       "query": "haal boodschappen van todolijst af",
       "language": "nl",
       "expected_intent": "HassListRemoveItem",
-      "expected_canonical": "haal boodschappen van todolijst;af",
+      "expected_canonical": "haal boodschappen van todolijst af",
       "category": "intent_coverage",
       "expected_slots": {
-        "todo_list_item": "boodschappen",
-        "name:todo": "todolijst",
+        "item": "boodschappen",
         "name": "todolijst"
       }
     },
@@ -841,7 +937,8 @@
       "expected_canonical": "de woonkamerlamp uitzetten",
       "category": "extra_words",
       "expected_slots": {
-        "name": "woonkamerlamp"
+        "area": "woonkamer",
+        "domain": "light"
       }
     },
     {
@@ -851,7 +948,8 @@
       "expected_canonical": "de woonkamerlamp uitzetten",
       "category": "extra_words",
       "expected_slots": {
-        "name": "woonkamerlamp"
+        "area": "woonkamer",
+        "domain": "light"
       }
     },
     {
@@ -940,7 +1038,8 @@
       "expected_canonical": "badkamerventilator uitzetten",
       "category": "complex_distortion",
       "expected_slots": {
-        "name": "badkamerventilator"
+        "area": "badkamer",
+        "domain": "fan"
       }
     },
     {
@@ -950,7 +1049,8 @@
       "expected_canonical": "badkamerventilator uitzetten",
       "category": "complex_distortion",
       "expected_slots": {
-        "name": "badkamerventilator"
+        "area": "badkamer",
+        "domain": "fan"
       }
     },
     {
@@ -960,7 +1060,189 @@
       "expected_canonical": "badkamerventilator uitzetten",
       "category": "complex_distortion",
       "expected_slots": {
-        "name": "badkamerventilator"
+        "area": "badkamer",
+        "domain": "fan"
+      }
+    },
+    {
+      "query": "kun je de slaapkamerlamp alsjeblieft aandoen",
+      "language": "nl",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "slaapkamerlamp aan",
+      "category": "extra_words",
+      "expected_slots": {
+        "area": "slaapkamer",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "slaapkamerlamp graag aan",
+      "language": "nl",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "slaapkamerlamp aan",
+      "category": "extra_words",
+      "expected_slots": {
+        "area": "slaapkamer",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "woonkammerlamp aan",
+      "language": "nl",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "woonkamerlamp aan",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "area": "woonkamer",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "woonkamerlamp aanschakelen",
+      "language": "nl",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "woonkamerlamp aan",
+      "category": "synonym_paraphrase",
+      "expected_slots": {
+        "area": "woonkamer",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "aan keukenlamp",
+      "language": "nl",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "keukenlamp aan",
+      "category": "missing_words",
+      "expected_slots": {
+        "area": "keuken",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "uit woonkamerlamp",
+      "language": "nl",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "woonkamerlamp uit",
+      "category": "missing_words",
+      "expected_slots": {
+        "area": "woonkamer",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "uit badkamerventilator",
+      "language": "nl",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "badkamerventilator uit",
+      "category": "missing_words",
+      "expected_slots": {
+        "area": "badkamer",
+        "domain": "fan"
+      }
+    },
+    {
+      "query": "pauze televisie",
+      "language": "nl",
+      "expected_intent": "HassMediaPause",
+      "expected_canonical": "televisie pauze",
+      "category": "missing_words",
+      "expected_slots": {
+        "name": "televisie"
+      }
+    },
+    {
+      "query": "woonkamerlammp uitzetten",
+      "language": "nl",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "de woonkamerlamp uitzetten",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "area": "woonkamer",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "badkamerventilator uitzeteen",
+      "language": "nl",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "badkamerventilator uitzetten",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "area": "badkamer",
+        "domain": "fan"
+      }
+    },
+    {
+      "query": "stfozuiger terug",
+      "language": "nl",
+      "expected_intent": "HassVacuumReturnToBase",
+      "expected_canonical": "stofzuiger terug",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "name": "stofzuiger"
+      }
+    },
+    {
+      "query": "televise uit",
+      "language": "nl",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "televisie uit",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "name": "televisie"
+      }
+    },
+    {
+      "query": "zet de badkamerventilator stil",
+      "language": "nl",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "badkamerventilator uitzetten",
+      "category": "semantic_challenge",
+      "expected_slots": {
+        "area": "badkamer",
+        "domain": "fan"
+      }
+    },
+    {
+      "query": "stuur de stofzuiger terug naar dock",
+      "language": "nl",
+      "expected_intent": "HassVacuumReturnToBase",
+      "expected_canonical": "stofzuiger terug",
+      "category": "semantic_challenge",
+      "expected_slots": {
+        "name": "stofzuiger"
+      }
+    },
+    {
+      "query": "pauze televisie graag",
+      "language": "nl",
+      "expected_intent": "HassMediaPause",
+      "expected_canonical": "televisie pauze",
+      "category": "semantic_challenge",
+      "expected_slots": {
+        "name": "televisie"
+      }
+    },
+    {
+      "query": "maak de badkamerventilator stil",
+      "language": "nl",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "badkamerventilator uitzetten",
+      "category": "semantic_challenge",
+      "expected_slots": {
+        "area": "badkamer",
+        "domain": "fan"
+      }
+    },
+    {
+      "query": "televisie even pauze graag",
+      "language": "nl",
+      "expected_intent": "HassMediaPause",
+      "expected_canonical": "televisie pauze",
+      "category": "semantic_challenge",
+      "expected_slots": {
+        "name": "televisie"
       }
     }
   ],

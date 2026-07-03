@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import logging
 from functools import partial
-from typing import Any, cast
+from typing import Any
 
+from homeassistant.components.conversation import agent_manager
+from homeassistant.components.homeassistant import exposed_entities
 from homeassistant.const import Platform
+from homeassistant.helpers import area_registry, entity_registry, floor_registry
+from homeassistant.helpers import event as ha_event
 
 from .const import (
     ASSISTANT_CONVERSATION,
@@ -18,63 +22,8 @@ from .runtime import CanonicalizerRuntime
 from .services import async_setup_services, async_unload_services
 from .utils import normalize_language
 
-agent_manager: Any = cast(Any, None)
-try:
-    from homeassistant.components.conversation import agent_manager as _agent_manager
-
-    agent_manager = _agent_manager
-except (ImportError, RuntimeError):
-    agent_manager = cast(Any, None)
-
-exposed_entities: Any = cast(Any, None)
-try:
-    from homeassistant.components.homeassistant import exposed_entities as _exposed_entities
-
-    exposed_entities = _exposed_entities
-except (ImportError, RuntimeError):
-    exposed_entities = cast(Any, None)
-
-area_registry: Any = cast(Any, None)
-try:
-    from homeassistant.helpers import area_registry as _area_registry
-
-    area_registry = _area_registry
-except (ImportError, RuntimeError):
-    area_registry = cast(Any, None)
-
-entity_registry: Any = cast(Any, None)
-try:
-    from homeassistant.helpers import entity_registry as _entity_registry
-
-    entity_registry = _entity_registry
-except (ImportError, RuntimeError):
-    entity_registry = cast(Any, None)
-
-ha_event: Any = cast(Any, None)
-try:
-    from homeassistant.helpers import event as _event
-
-    ha_event = _event
-except (ImportError, RuntimeError):
-    ha_event = cast(Any, None)
-
-floor_registry: Any = cast(Any, None)
-try:
-    from homeassistant.helpers import floor_registry as _floor_registry
-
-    floor_registry = _floor_registry
-except (ImportError, RuntimeError):
-    floor_registry = cast(Any, None)
-
-async_get_pipelines: Any = cast(Any, None)
-try:
-    from homeassistant.components.assist_pipeline import (
-        async_get_pipelines as _async_get_pipelines,
-    )
-
-    async_get_pipelines = _async_get_pipelines
-except (ImportError, RuntimeError):
-    async_get_pipelines = cast(Any, None)
+_UNINITIALIZED = object()
+async_get_pipelines: Any = _UNINITIALIZED
 
 type AssistCanonicalizerConfigEntry = Any
 type HomeAssistantInstance = Any
@@ -220,7 +169,17 @@ def _schedule_registry_refresh(
 
 def _discover_pipeline_languages(hass: HomeAssistantInstance) -> set[str]:
     """Return unique language codes from all configured Assist pipelines."""
+    global async_get_pipelines
     languages: set[str] = set()
+    if async_get_pipelines is _UNINITIALIZED:
+        try:
+            from homeassistant.components.assist_pipeline import (
+                async_get_pipelines as _async_get_pipelines,
+            )
+
+            async_get_pipelines = _async_get_pipelines
+        except (ImportError, RuntimeError):
+            async_get_pipelines = None
     if async_get_pipelines is None:
         return languages
 
