@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Sequence
 from functools import partial
@@ -39,6 +40,8 @@ from .utils import (
     normalize_language,
     resolve_entry_thresholds,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
@@ -122,10 +125,60 @@ class AssistCanonicalizerConversationEntity(
             normalize_language(language) if language else None,
         )
 
+    async def _async_try_assist_pipeline_shortcut(
+        self, user_input: ConversationInput
+    ) -> ConversationResult | None:
+        """Attempt to delegate text directly via the assist pipeline shortcut path if allowed."""
+        try:
+            from homeassistant.components.assist_pipeline.const import DOMAIN as PIPELINE_DOMAIN
+
+            pipeline_data = self.hass.data.get(PIPELINE_DOMAIN)
+            current_pipeline = None
+            if (
+                pipeline_data
+                and user_input.context
+                and (pipeline_runs := getattr(pipeline_data, "pipeline_runs", None))
+            ):
+                for runs_dict in getattr(pipeline_runs, "_pipeline_runs", {}).values():
+                    for run in runs_dict.values():
+                        if run.context and run.context.id == user_input.context.id:
+                            current_pipeline = run.pipeline
+                            break
+                    if current_pipeline:
+                        break
+
+            from homeassistant.components.assist_pipeline.pipeline import async_get_pipeline
+
+            pipeline = current_pipeline or async_get_pipeline(self.hass)
+            if pipeline and not getattr(pipeline, "prefer_local_intents", False):
+                shortcut_result = await self._delegate_text(
+                    user_input.text,
+                    user_input,
+                    primary=True,
+                )
+                if not self._result_has_error(shortcut_result):
+                    self._runtime.update_diagnostics(clear_last_error=True)
+                    return shortcut_result
+        except Exception as err:
+            _LOGGER.debug(
+                "Assist pipeline shortcut path not available: %s",
+                err,
+            )
+        return None
+
     async def _async_process_with_runtime(
         self, user_input: ConversationInput
     ) -> ConversationResult:
-        """Rank indexed candidates and delegate to Home Assistant conversation agents."""
+        """Rank indexed candidates and delegate to Home Assistant conversation agents.
+
+        If the assist pipeline shortcut path is active and successful, we update
+        diagnostics to clear the last error and return immediately. Note that early
+        returns from this shortcut bypass the canonicalization index matching, meaning
+        error diagnostics from failed canonicalizations will not be populated.
+        """
+        if shortcut_result := await self._async_try_assist_pipeline_shortcut(user_input):
+            return shortcut_result
+
         language = normalize_language(user_input.language)
         index = self._runtime.get_index(language)
         if index is None:
@@ -240,7 +293,7 @@ class AssistCanonicalizerConversationEntity(
         ranked_candidate: RankedCandidate,
         user_input: ConversationInput,
     ) -> ConversationResult | None:
-        """Validate one accepted canonical candidate through the primary Hassil agent.
+        """Validate one accepted canonical candidate through the primary HassIL agent.
 
         Wildcard placeholders (e.g. ``shopping_list_item``) in candidate text
         are rehydrated from the original query before delegation so that the

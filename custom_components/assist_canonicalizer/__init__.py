@@ -178,7 +178,8 @@ def _discover_pipeline_languages(hass: HomeAssistantInstance) -> set[str]:
             )
 
             async_get_pipelines = _async_get_pipelines
-        except (ImportError, RuntimeError):
+        except (ImportError, RuntimeError) as err:
+            _LOGGER.debug("Assist pipeline import failed: %s", err)
             async_get_pipelines = None
     if async_get_pipelines is None:
         return languages

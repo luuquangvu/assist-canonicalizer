@@ -2,6 +2,7 @@
 
 import asyncio
 import inspect
+import sys
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -803,3 +804,101 @@ async def test_conversation_delegate_and_fallback_agent_logic() -> None:
 
     # 7. Test async_prepare empty/None language branch
     await entity.async_prepare(None)
+
+
+@pytest.mark.asyncio
+async def test_async_process_prefer_local_intents_shortcut(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test prefer_local_intents shortcut behavior when it is False."""
+
+    class DummyPipeline:
+        """Dummy pipeline class for testing."""
+
+        prefer_local_intents = False
+
+    mock_pipeline_module = MagicMock()
+    mock_pipeline_module.async_get_pipeline = MagicMock(return_value=DummyPipeline())
+
+    monkeypatch.setitem(
+        sys.modules,
+        "homeassistant.components.assist_pipeline.pipeline",
+        mock_pipeline_module,
+    )
+
+    entry = MagicMock()
+    runtime = CanonicalizerRuntime()
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    entity.hass = MagicMock()
+    entity.hass.data = {"assist_pipeline": MagicMock()}
+
+    user_input = MockConversationInput("tắt đèn bếp", "vi")
+    validation_ok_res = MagicMock()
+    validation_ok_res.response.error_code = None
+
+    with (
+        patch.object(
+            entity, "_delegate_text", AsyncMock(return_value=validation_ok_res)
+        ) as mock_delegate,
+        patch.object(CanonicalizerRuntime, "rank_with_dynamic_candidates") as mock_rank,
+    ):
+        res = await entity.async_process(user_input)
+        assert res is validation_ok_res
+        mock_delegate.assert_called_once_with(
+            "tắt đèn bếp",
+            user_input,
+            primary=True,
+        )
+        mock_rank.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_async_process_prefer_local_intents_true_no_shortcut(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test prefer_local_intents behavior when it is True (should not run shortcut)."""
+
+    class DummyPipeline:
+        """Dummy pipeline class for testing."""
+
+        prefer_local_intents = True
+
+    mock_pipeline_module = MagicMock()
+    mock_pipeline_module.async_get_pipeline = MagicMock(return_value=DummyPipeline())
+
+    monkeypatch.setitem(
+        sys.modules,
+        "homeassistant.components.assist_pipeline.pipeline",
+        mock_pipeline_module,
+    )
+
+    entry = MagicMock()
+    runtime = CanonicalizerRuntime()
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    entity.hass = MagicMock()
+    entity.hass.data = {"assist_pipeline": MagicMock()}
+    entity.hass.async_add_executor_job = AsyncMock(side_effect=lambda target, *args: target(*args))
+
+    user_input = MockConversationInput("tắt đèn bếp", "vi")
+    validation_ok_res = MagicMock()
+    validation_ok_res.response.error_code = None
+
+    with (
+        patch.object(
+            entity, "_delegate_text", AsyncMock(return_value=validation_ok_res)
+        ) as mock_delegate,
+        patch.object(
+            CanonicalizerRuntime, "rank_with_dynamic_candidates", return_value=()
+        ) as mock_rank,
+        patch.object(
+            entity, "_delegate_raw_text", AsyncMock(return_value=validation_ok_res)
+        ) as mock_delegate_raw,
+        patch.object(
+            CanonicalizerRuntime, "async_rebuild_index", AsyncMock(return_value=MagicMock())
+        ) as mock_rebuild_index,
+    ):
+        await entity.async_process(user_input)
+        mock_delegate.assert_not_called()
+        mock_rebuild_index.assert_awaited_once()
+        mock_rank.assert_called_once()
+        mock_delegate_raw.assert_awaited_once_with(user_input)

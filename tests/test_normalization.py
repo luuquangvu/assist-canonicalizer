@@ -89,3 +89,34 @@ def test_char_ngrams_edge_cases() -> None:
 
     # char_ngrams_normalized normal text
     assert char_ngrams_normalized("abcdef", size=3) == frozenset({"abc", "bcd", "cde", "def"})
+
+
+def test_normalize_text_preserves_target_punctuation() -> None:
+    """Verify that only context-legit punctuation is preserved during normalization."""
+    # Preserved contexts (floats, degrees, percentages, timers)
+    assert (
+        normalize_text("set living room temperature to 27.5")
+        == "set living room temperature to 27.5"
+    )
+    assert normalize_text("set temperature to 20,5") == "set temperature to 20,5"
+    assert normalize_text("ac temperature 27°") == "ac temperature 27°"
+    assert normalize_text("ac temperature 27 °") == "ac temperature 27 °"
+    assert normalize_text("set brightness to 50%") == "set brightness to 50%"
+    assert normalize_text("set brightness to 50 %") == "set brightness to 50 %"
+    assert normalize_text("set timer for 12:30") == "set timer for 12:30"
+    assert normalize_text("set timer for 10-15 minutes") == "set timer for 10-15 minutes"
+    assert normalize_text("set temperature range 20°-25°") == "set temperature range 20°-25°"
+    assert normalize_text("humidity between 50%-60%") == "humidity between 50%-60%"
+    assert normalize_text("set temperature to -5") == "set temperature to -5"
+    assert normalize_text("-27.5 degrees") == "-27.5 degrees"
+    assert normalize_text("minus - 5 spaced") == "minus 5 spaced"
+
+    # Stripped contexts (non-digits or incorrect boundary)
+    assert normalize_text("temperature is.") == "temperature is"
+    assert normalize_text(".5 seconds") == ".5 seconds"
+    assert normalize_text(",5 seconds") == ",5 seconds"
+    assert normalize_text("temperature is 27. degrees") == "temperature is 27 degrees"
+    assert normalize_text("degrees sign ° alone") == "degrees sign alone"
+    assert normalize_text("brightness % generic") == "brightness generic"
+    assert normalize_text("timer: generic") == "timer generic"
+    assert normalize_text("kitchen-light") == "kitchen light"

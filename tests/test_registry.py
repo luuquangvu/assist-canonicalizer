@@ -17,7 +17,7 @@ from custom_components.assist_canonicalizer.registry import (
 
 
 def test_build_registry_slot_values_maps_entities_areas_and_floors() -> None:
-    """Map HA metadata names to common Hassil slot names."""
+    """Map HA metadata names to common HassIL slot names."""
     slot_values = build_registry_slot_values(
         entity_names=["Kitchen Light", "kitchen light", "Desk Lamp"],
         entity_names_by_domain={"light": ["Kitchen Light"], "media_player": ["Speaker"]},

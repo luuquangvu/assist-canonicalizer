@@ -2259,3 +2259,143 @@ def test_slot_matching_penalty_ignores_static_slots() -> None:
     )
 
     assert generic_result.scores.final_score > without_static_result.scores.final_score
+
+
+def test_numeric_slot_mismatch_penalty() -> None:
+    """Verify that candidates with a mismatched numeric slot value are penalized."""
+    cand_mismatch = Candidate(
+        text="set living room temperature to 0",
+        intent_name="HassClimateSetTemperature",
+        language="en",
+        metadata={
+            "slots": orjson.dumps({"name": "living room", "temperature": 0}).decode("utf-8"),
+            "literal_text": "set temperature",
+        },
+        slot_values=("living room", "0"),
+    )
+
+    cand_match = Candidate(
+        text="set living room temperature to 27",
+        intent_name="HassClimateSetTemperature",
+        language="en",
+        metadata={
+            "slots": orjson.dumps({"name": "living room", "temperature": 27}).decode("utf-8"),
+            "literal_text": "set temperature",
+        },
+        slot_values=("living room", "27"),
+    )
+
+    ranked = rank_candidates(
+        query="set living room temperature to 27",
+        candidates=[cand_mismatch, cand_match],
+        max_candidates=2,
+        language="en",
+    )
+    assert len(ranked) == 2
+    assert ranked[0].candidate == cand_match
+
+    mismatch_item = next(r for r in ranked if r.candidate == cand_mismatch)
+    match_item = next(r for r in ranked if r.candidate == cand_match)
+    assert mismatch_item.scores.final_score < match_item.scores.final_score
+
+
+def test_numeric_slot_mismatch_penalty_with_multiplier() -> None:
+    """Verify that range candidates with multipliers are not penalized."""
+    cand = Candidate(
+        text="volume down by 20",
+        intent_name="HassSetVolumeRelative",
+        language="en",
+        metadata={
+            "slots": orjson.dumps({"volume_step": -20}).decode("utf-8"),
+        },
+        slot_values=("-20",),
+    )
+
+    ranked = rank_candidates(
+        query="volume down by 20",
+        candidates=[cand],
+        max_candidates=1,
+        language="en",
+    )
+    assert len(ranked) == 1
+    assert ranked[0].scores.final_score > 0.8
+
+
+def test_numeric_slot_mismatch_penalty_static_number() -> None:
+    """Verify that templates with static numbers are not penalized for mismatches."""
+    cand = Candidate(
+        text="set temperature in area 51 to 20",
+        intent_name="HassClimateSetTemperature",
+        language="en",
+        metadata={
+            "slots": orjson.dumps({"temperature": 20}).decode("utf-8"),
+        },
+        slot_values=("20",),
+    )
+
+    ranked = rank_candidates(
+        query="set temperature to 20",
+        candidates=[cand],
+        max_candidates=1,
+        language="en",
+    )
+    assert len(ranked) == 1
+    assert ranked[0].scores.final_score > 0.6
+
+
+def test_numeric_slot_mismatch_static_number_loophole() -> None:
+    """Verify mismatch penalty is applied despite candidate text containing static numbers."""
+    cand = Candidate(
+        text="set temperature in area 51 to 20",
+        intent_name="HassClimateSetTemperature",
+        language="en",
+        metadata={
+            "slots": orjson.dumps({"temperature": 20}).decode("utf-8"),
+        },
+        slot_values=("20",),
+    )
+
+    # When query has 51, but candidate sets temperature to 20.
+    # The temperature slot (value 20) mismatches 51. So it must be penalized.
+    ranked = rank_candidates(
+        query="set temperature to 51",
+        candidates=[cand],
+        max_candidates=1,
+        language="en",
+    )
+    assert len(ranked) == 1
+    assert ranked[0].scores.final_score < 0.1
+
+
+def test_numeric_slot_mismatch_with_slots_raw() -> None:
+    """Verify mismatch penalty check uses slots_raw when available."""
+    cand = Candidate(
+        text="set timer for 5 minutes",
+        intent_name="HassSetTimer",
+        language="en",
+        metadata={
+            "slots": orjson.dumps({"duration": 300}).decode("utf-8"),
+            "slots_raw": orjson.dumps({"duration": "5"}).decode("utf-8"),
+        },
+        slot_values=("300",),
+    )
+
+    # Query matching raw value (5)
+    ranked = rank_candidates(
+        query="set timer for 5 minutes",
+        candidates=[cand],
+        max_candidates=1,
+        language="en",
+    )
+    assert len(ranked) == 1
+    assert ranked[0].scores.final_score > 0.8
+
+    # Query with mismatching raw value (10)
+    ranked_mismatch = rank_candidates(
+        query="set timer for 10 minutes",
+        candidates=[cand],
+        max_candidates=1,
+        language="en",
+    )
+    assert len(ranked_mismatch) == 1
+    assert ranked_mismatch[0].scores.final_score < 0.1
