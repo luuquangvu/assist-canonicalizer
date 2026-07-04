@@ -6,10 +6,12 @@ import time
 from functools import partial
 from typing import Any
 
+import home_assistant_intents as intents_module
 import voluptuous as vol
 from homeassistant.core import ServiceCall, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.util import language as language_module
 
 from .const import (
     ATTR_ACCEPTED,
@@ -49,11 +51,6 @@ def validate_supported_language(value: Any) -> str:
     lang = cv.string(value)
     if not lang.strip():
         raise vol.Invalid("Language cannot be empty")
-    try:
-        import home_assistant_intents as intents_module
-        from homeassistant.util import language as language_module
-    except ImportError:
-        return lang
 
     get_languages = intents_module.get_languages
     if matches := language_module.matches(lang, set(get_languages())):
@@ -167,6 +164,7 @@ async def _handle_test_match(hass: Any, call: ServiceCall) -> dict[str, Any]:
         partial(
             runtime.rank_with_dynamic_candidates,
             min_confidence=min_confidence,
+            min_margin=min_margin,
         ),
         language,
         index,

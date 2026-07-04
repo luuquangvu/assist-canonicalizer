@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 import voluptuous as vol
 from homeassistant import config_entries
+from homeassistant.components.conversation.agent_manager import get_agent_manager
+from homeassistant.components.conversation.const import DATA_COMPONENT, HOME_ASSISTANT_AGENT
+from homeassistant.components.conversation.entity import ConversationEntity
 from homeassistant.config_entries import ConfigFlowResult
 from homeassistant.helpers.selector import (
     NumberSelector,
@@ -25,37 +28,6 @@ from .const import (
     DOMAIN,
     NAME,
 )
-
-get_agent_manager: Any = cast(Any, None)
-DATA_COMPONENT: Any = cast(Any, None)
-HOME_ASSISTANT_AGENT: Any = cast(Any, None)
-ConversationEntity: Any = cast(Any, None)
-
-try:
-    from homeassistant.components.conversation.agent_manager import (
-        get_agent_manager as _get_agent_manager,
-    )
-    from homeassistant.components.conversation.const import (
-        DATA_COMPONENT as _DATA_COMPONENT,
-    )
-    from homeassistant.components.conversation.const import (
-        HOME_ASSISTANT_AGENT as _HOME_ASSISTANT_AGENT,
-    )
-    from homeassistant.components.conversation.entity import (
-        ConversationEntity as _ConversationEntity,
-    )
-
-    get_agent_manager = _get_agent_manager
-    DATA_COMPONENT = _DATA_COMPONENT
-    HOME_ASSISTANT_AGENT = _HOME_ASSISTANT_AGENT
-    ConversationEntity = _ConversationEntity
-    _HAS_CONVERSATION_AGENTS = True
-except (ImportError, RuntimeError):
-    get_agent_manager = cast(Any, None)
-    DATA_COMPONENT = cast(Any, None)
-    HOME_ASSISTANT_AGENT = cast(Any, None)
-    ConversationEntity = cast(Any, None)
-    _HAS_CONVERSATION_AGENTS = False
 
 
 class AssistCanonicalizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -173,9 +145,6 @@ def _fallback_agent_choices(
 
 def _available_fallback_agents(hass: Any, exclude_agent_id: str | None) -> dict[str, str]:
     """Return conversation agent IDs and labels that can be used as fallback targets."""
-    if not _HAS_CONVERSATION_AGENTS:
-        return {}
-
     agents = {}
     entity_component = hass.data.get(DATA_COMPONENT)
     if entity_component is not None:

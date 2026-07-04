@@ -39,10 +39,19 @@ LOCATION_SLOT_NAME_SET = frozenset(LOCATION_SLOT_NAMES)
 
 DEFAULT_MIN_CONFIDENCE = 0.50
 DEFAULT_MIN_MARGIN = 0.04
+HIGH_CONFIDENCE_RELAXED_MIN_SCORE = 0.80
+HIGH_CONFIDENCE_RELAXED_MIN_MARGIN = 0.005
+SAFE_EMPTY_SLOT_RELAXED_MIN_MARGIN = 0.035
+SAFE_EMPTY_SLOT_RELAXED_MIN_SCORE = 0.60
+SAFE_INTENT_EVIDENCE_MAX_SCORE = 0.74
+SAFE_INTENT_EVIDENCE_MIN_SCORE = 0.57
+SAFE_INTENT_EVIDENCE_MIN_ADVANTAGE = 0.09
+ZERO_INTENT_EVIDENCE_MAX_SCORE = 0.70
+ZERO_INTENT_EVIDENCE_MAX_MARGIN = 0.07
 DEFAULT_MAX_CANDIDATES = 20
 
-DEFAULT_MAX_TOTAL_CANDIDATES_PER_LANGUAGE = 100000
-DEFAULT_MAX_CANDIDATES_PER_INTENT = 4500
+DEFAULT_MAX_TOTAL_CANDIDATES_PER_LANGUAGE = 150000
+DEFAULT_MAX_CANDIDATES_PER_INTENT = 5000
 DEFAULT_MAX_CANDIDATES_PER_TEMPLATE = 150
 DEFAULT_MAX_DYNAMIC_SLOT_VALUES = 20
 DEFAULT_MAX_DYNAMIC_CANDIDATES = 200
@@ -60,6 +69,8 @@ POSITIONAL_SIMILARITY_VERY_SHORT_THRESHOLD = 0.75  # per-pair min_len <= 2
 POSITIONAL_SIMILARITY_SHORT_3_THRESHOLD = 0.66  # per-pair min_len <= 3
 POSITIONAL_SIMILARITY_MEDIUM_THRESHOLD = 0.60  # per-pair min_len <= 5
 POSITIONAL_SIMILARITY_BASE_THRESHOLD = 0.50  # per-pair min_len >= 6
+POSITIONAL_FUZZY_TOKEN_MAX_LENGTH_RATIO = 1.6
+SLOT_FUZZY_TOKEN_MIN_LENGTH = 4
 
 # Partial credit awarded when a literal token positionally matches a query token.
 POSITIONAL_SIMILARITY_PARTIAL_CREDIT = 0.50
@@ -92,7 +103,26 @@ MAX_TOKEN_LENGTH_RATIO = ceil(((2.0 / WILDCARD_STEM_ALIGNMENT_THRESHOLD) - 1.0) 
 # Penalty factor per word in rehydrated wildcard to favor templates with more literal tokens
 WILDCARD_LENGTH_PENALTY_FACTOR = 0.015
 
+# Slot-token fuzzy matching uses RapidFuzz's 0-100 ratio. The 75 threshold is
+# loose enough for minor inflection, pluralization, and diacritic differences,
+# but strict enough that short location/entity words still need most characters
+# to agree. Tune this with the structured penalties below because the same
+# match gate controls unanchored-entity and static-slot conflict detection.
 SLOT_TOKEN_MATCH_THRESHOLD = 75
+
+# Structured ranking adjustments. These are intentionally language-neutral:
+# they use candidate slot metadata, intent context, and numeric-slot shape
+# rather than localized phrases. Boosts are additive and penalties are
+# multiplicative, so lowering a penalty has a larger effect on already weak
+# lexical matches than on high-confidence matches.
+CONTEXT_SLOT_MATCH_BOOST = 0.10
+CONTEXT_SLOT_MISMATCH_PENALTY = 0.85
+ENTITY_ONLY_UNCOVERED_QUERY_PENALTY = 0.72
+NUMERIC_SLOT_WITHOUT_QUERY_PENALTY = 0.78
+STATIC_ENTITY_UNCOVERED_QUERY_PENALTY = 0.82
+STATIC_SLOT_QUERY_CONFLICT_PENALTY = 0.74
+UNANCHORED_ENTITY_SLOT_PENALTY = 0.88
+WILDCARD_KNOWN_SLOT_TOKEN_PENALTY = 0.78
 
 
 class FallbackReason(StrEnum):

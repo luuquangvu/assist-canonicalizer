@@ -445,6 +445,66 @@ def test_rank_with_dynamic_candidates_keeps_generic_area_only_templates_disabled
     assert runtime.diagnostics.dynamic_candidate_count == 0
 
 
+def test_rank_with_dynamic_candidates_rescues_literal_only_templates() -> None:
+    """Use query-time base-list expansion when static caps omit exact variants."""
+    intent_sources: dict[str, Mapping[str, Any]] = {
+        "builtin": {
+            "lists": {"timer_seconds": {"range": {"from": 1, "to": 2}}},
+            "intents": {
+                "HassStartTimer": {
+                    "data": [{"sentences": ["timer for {timer_seconds:seconds}( |-)second[s]"]}]
+                }
+            },
+        }
+    }
+    runtime = CanonicalizerRuntime()
+    runtime.language_intent_sources["en"] = intent_sources
+
+    ranked = runtime.rank_with_dynamic_candidates(
+        "en",
+        build_index("en", []),
+        "timer for 1 second",
+    )
+
+    assert len(ranked) == 1
+    assert ranked[0].candidate.text == "timer for 1 second"
+    assert ranked[0].candidate.intent_name == "HassStartTimer"
+    assert ranked[0].scores.final_score == 1.0
+    assert runtime.diagnostics.dynamic_candidate_count >= 1
+
+
+def test_rank_with_dynamic_candidates_rescues_non_numeric_wildcard_templates() -> None:
+    """Use query-time fair expansion for free-text wildcard templates."""
+    intent_sources: dict[str, Mapping[str, Any]] = {
+        "builtin": {
+            "lists": {"search_query": {"wildcard": True}},
+            "intents": {
+                "HassMediaSearchAndPlay": {"data": [{"sentences": ["(start|play) {search_query}"]}]}
+            },
+        }
+    }
+    runtime = CanonicalizerRuntime()
+    runtime.language_intent_sources["en"] = intent_sources
+
+    ranked = runtime.rank_with_dynamic_candidates(
+        "en",
+        build_index("en", []),
+        "play Jazz",
+    )
+
+    assert ranked[0].candidate.intent_name == "HassMediaSearchAndPlay"
+    assert ranked[0].candidate.text == "play search_query"
+    assert (
+        grammar_loader.rehydrate_wildcard_text(
+            ranked[0].candidate.text,
+            "play Jazz",
+            "en",
+        )
+        == "play Jazz"
+    )
+    assert runtime.diagnostics.dynamic_candidate_count >= 1
+
+
 async def test_rank_with_dynamic_candidates_does_not_starve_later_intents() -> None:
     """Rank exact dynamic candidates from later intents before earlier fuzzy candidates."""
     intent_sources: dict[str, Mapping[str, Any]] = {
@@ -579,6 +639,39 @@ def test_rank_with_dynamic_candidates_keeps_dynamic_for_non_exact_static(
     assert build_counter.calls == 1
     assert ranked[0].candidate.normalized_text == "turn on kitchen light"
     assert ranked[0].scores.final_score == 1.0
+
+
+def test_rank_with_dynamic_candidates_preserves_accepted_static_for_fuzzy_dynamic() -> None:
+    """Avoid letting non-exact query-scoped candidates displace an accepted static match."""
+    intent_sources: dict[str, Mapping[str, Any]] = {
+        "built_in": {
+            "lists": {"color": {"values": ["white"]}},
+            "intents": {
+                "HassLightSet": {
+                    "data": [{"sentences": ["turn {name} {color}"]}],
+                }
+            },
+        }
+    }
+    registry_slots = {"name": ("living room light",)}
+    runtime = CanonicalizerRuntime()
+    runtime.update_registry_slot_values(registry_slots)
+    runtime.language_intent_sources["en"] = intent_sources
+    index = build_index(
+        "en",
+        [
+            Candidate(
+                text="turn living room light on",
+                intent_name="HassTurnOn",
+                language="en",
+            )
+        ],
+    )
+
+    ranked = runtime.rank_with_dynamic_candidates("en", index, "turn living room light")
+
+    assert ranked[0].candidate.intent_name == "HassTurnOn"
+    assert ranked[0].candidate.text == "turn living room light on"
 
 
 def test_rank_with_dynamic_candidates_uses_single_registry_slot_snapshot(

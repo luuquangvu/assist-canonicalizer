@@ -29,7 +29,6 @@ def test_available_fallback_agents_includes_conversation_entities(
     monkeypatch.setattr(config_flow, "get_agent_manager", lambda hass: manager)
     monkeypatch.setattr(config_flow, "DATA_COMPONENT", data_component_key)
     monkeypatch.setattr(config_flow, "HOME_ASSISTANT_AGENT", "conversation.home_assistant")
-    monkeypatch.setattr(config_flow, "_HAS_CONVERSATION_AGENTS", True)
 
     hass = SimpleNamespace(
         data={
@@ -74,7 +73,6 @@ def test_available_fallback_agents_excludes_own_agent_and_entity(
     monkeypatch.setattr(config_flow, "get_agent_manager", lambda hass: manager)
     monkeypatch.setattr(config_flow, "DATA_COMPONENT", data_component_key)
     monkeypatch.setattr(config_flow, "HOME_ASSISTANT_AGENT", "conversation.home_assistant")
-    monkeypatch.setattr(config_flow, "_HAS_CONVERSATION_AGENTS", True)
     monkeypatch.setattr(config_flow, "ConversationEntity", mock_conversation_entity_type)
 
     class MockRegistryEntry:
@@ -132,7 +130,6 @@ def test_available_fallback_agents_excludes_own_agent_and_entity(
 
 def test_config_schema_types(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify that _config_schema returns correct types and validation fields."""
-    monkeypatch.setattr(config_flow, "_HAS_CONVERSATION_AGENTS", True)
     monkeypatch.setattr(config_flow, "HOME_ASSISTANT_AGENT", "conversation.home_assistant")
     monkeypatch.setattr(
         config_flow,

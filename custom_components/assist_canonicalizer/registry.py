@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Iterable, Mapping
-from typing import Any, cast
+from typing import Any
+
+from homeassistant.components.homeassistant.exposed_entities import async_should_expose
+from homeassistant.helpers import area_registry, entity_registry, floor_registry
 
 from .const import (
     AREA_SLOT_NAMES,
@@ -12,31 +15,6 @@ from .const import (
     ENTITY_SLOT_NAMES,
     FLOOR_SLOT_NAMES,
 )
-
-async_should_expose: Any = cast(Any, None)
-ar: Any = cast(Any, None)
-er: Any = cast(Any, None)
-fr: Any = cast(Any, None)
-
-try:
-    from homeassistant.components.homeassistant.exposed_entities import (
-        async_should_expose as _async_should_expose,
-    )
-    from homeassistant.helpers import area_registry as _ar
-    from homeassistant.helpers import entity_registry as _er
-    from homeassistant.helpers import floor_registry as _fr
-
-    async_should_expose = _async_should_expose
-    ar = _ar
-    er = _er
-    fr = _fr
-    _HAS_HA_REGISTRIES = True
-except (ImportError, RuntimeError):
-    async_should_expose = cast(Any, None)
-    ar = cast(Any, None)
-    er = cast(Any, None)
-    fr = cast(Any, None)
-    _HAS_HA_REGISTRIES = False
 
 
 def async_registry_slot_values(hass: Any) -> dict[str, tuple[str, ...]]:
@@ -103,11 +81,8 @@ def _domain_slot_names(slot_names: Iterable[str], domain: str) -> tuple[str, ...
 
 def _exposed_entity_names_by_domain(hass: Any) -> dict[str, tuple[str, ...]]:
     """Return names and aliases for entities exposed to Assist grouped by domain."""
-    if not _HAS_HA_REGISTRIES:
-        return {}
-
     try:
-        entity_registry = er.async_get(hass)
+        reg = entity_registry.async_get(hass)
         states = hass.states.async_all()
     except (AttributeError, RuntimeError):
         return {}
@@ -123,17 +98,17 @@ def _exposed_entity_names_by_domain(hass: Any) -> dict[str, tuple[str, ...]]:
         except (KeyError, RuntimeError):
             continue
         domain = entity_id.split(".", 1)[0]
-        entry = entity_registry.async_get(entity_id)
-        names_by_domain.setdefault(domain, []).extend(_entity_names(hass, er, entry, state))
+        entry = reg.async_get(entity_id)
+        names_by_domain.setdefault(domain, []).extend(_entity_names(hass, entry, state))
     return {domain: tuple(_deduplicate_texts(names)) for domain, names in names_by_domain.items()}
 
 
-def _entity_names(hass: Any, er: Any, entry: Any, state: Any) -> Iterable[str]:
+def _entity_names(hass: Any, entry: Any, state: Any) -> Iterable[str]:
     """Yield spoken entity names from registry aliases or state names."""
     has_yielded = False
     if entry is not None:
         with contextlib.suppress(AttributeError, RuntimeError, ValueError):
-            for alias in er.async_get_entity_aliases(hass, entry, allow_empty=False):
+            for alias in entity_registry.async_get_entity_aliases(hass, entry, allow_empty=False):
                 if isinstance(alias, str) and (cleaned_alias := alias.strip()):
                     yield cleaned_alias
                     has_yielded = True
@@ -151,11 +126,8 @@ def _entity_names(hass: Any, er: Any, entry: Any, state: Any) -> Iterable[str]:
 
 def _area_names(hass: Any) -> tuple[str, ...]:
     """Return area names and aliases."""
-    if not _HAS_HA_REGISTRIES:
-        return ()
-
     try:
-        areas = ar.async_get(hass).async_list_areas()
+        areas = area_registry.async_get(hass).async_list_areas()
     except (AttributeError, RuntimeError):
         return ()
     return tuple(_deduplicate_texts(_entry_names_and_aliases(areas)))
@@ -171,11 +143,8 @@ def _stripped_or_none(value: Any) -> str | None:
 
 def _floor_names(hass: Any) -> tuple[str, ...]:
     """Return floor names and aliases."""
-    if not _HAS_HA_REGISTRIES:
-        return ()
-
     try:
-        floors = fr.async_get(hass).async_list_floors()
+        floors = floor_registry.async_get(hass).async_list_floors()
     except (AttributeError, RuntimeError):
         return ()
     return tuple(_deduplicate_texts(_entry_names_and_aliases(floors)))

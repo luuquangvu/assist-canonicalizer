@@ -143,14 +143,14 @@ The ranking engine was benchmarked against the default Home Assistant Hassil int
 
 <!-- BENCHMARK_OVERALL_START -->
 
-> Benchmark dependency versions: `homeassistant` 2026.6.4, `home-assistant-intents` 2026.6.1.
+> Benchmark dependency versions: `homeassistant` 2026.7.0, `home-assistant-intents` 2026.6.24.
 
-| Mode      | Intent/Slot | Mismatch |  Fallback |
-| :-------- | ----------: | -------: | --------: |
-| `hassil`  |       45.9% |     0.0% |     54.1% |
-| `lexical` |   **86.2%** | **2.3%** | **11.5%** |
+| Mode      | Intent/Slot | Mismatch | Fallback |
+| :-------- | ----------: | -------: | -------: |
+| `hassil`  |       48.3% |     0.0% |    51.7% |
+| `lexical` |   **91.7%** | **2.2%** | **6.1%** |
 
-> Intent/slot accuracy jumped from **45.9% to 86.2%**. The combined error rate (mismatch + fallback) dropped from **54.1% to 13.8%**.
+> Intent/slot accuracy jumped from **48.3% to 91.7%**. The combined error rate (mismatch + fallback) dropped from **51.7% to 8.3%**.
 
 <!-- BENCHMARK_OVERALL_END -->
 
@@ -158,23 +158,23 @@ The ranking engine was benchmarked against the default Home Assistant Hassil int
 
 <!-- BENCHMARK_LANGS_START -->
 
-| Language | Mode      | Intent/Slot | Mismatch |  Fallback |
-| :------- | :-------- | ----------: | -------: | --------: |
-| EN       | `hassil`  |       51.4% |     0.0% |     48.6% |
-| EN       | `lexical` |   **90.1%** | **2.7%** |  **7.2%** |
-| DE       | `hassil`  |       50.6% |     0.0% |     49.4% |
-| DE       | `lexical` |   **86.2%** | **2.3%** | **11.5%** |
-| FR       | `hassil`  |       49.4% |     0.0% |     50.6% |
-| FR       | `lexical` |   **88.2%** | **1.2%** | **10.6%** |
-| NL       | `hassil`  |       44.8% |     0.0% |     55.2% |
-| NL       | `lexical` |   **82.9%** | **1.9%** | **15.2%** |
-| VI       | `hassil`  |       31.3% |     0.0% |     68.7% |
-| VI       | `lexical` |   **83.1%** | **3.6%** | **13.3%** |
+| Language | Mode      | Intent/Slot | Mismatch | Fallback |
+| :------- | :-------- | ----------: | -------: | -------: |
+| EN       | `hassil`  |       56.2% |     0.0% |    43.8% |
+| EN       | `lexical` |   **90.1%** | **4.1%** | **5.8%** |
+| DE       | `hassil`  |       50.9% |     0.0% |    49.1% |
+| DE       | `lexical` |   **94.6%** | **0.9%** | **4.5%** |
+| FR       | `hassil`  |       51.4% |     0.0% |    48.6% |
+| FR       | `lexical` |   **92.7%** | **1.8%** | **5.5%** |
+| NL       | `hassil`  |       48.4% |     0.0% |    51.6% |
+| NL       | `lexical` |   **89.3%** | **2.5%** | **8.2%** |
+| VI       | `hassil`  |       30.8% |     0.0% |    69.2% |
+| VI       | `lexical` |   **92.3%** | **1.1%** | **6.6%** |
 
 <!-- BENCHMARK_LANGS_END -->
 
 > [!NOTE]
-> Candidate counts and build latencies vary by environment (number of entities, areas, floors, and hardware).
+> Accuracy, candidate counts, and latencies can vary depending on the environment, including factors like the number of entities, areas, floors, the Home Assistant version, and the hardware used.
 
 All benchmarks were generated using the real-world test datasets in [`tests/real_world/`](tests/real_world/). The full report is available in the [`benchmark/`](benchmark/) directory. Your results will differ based on your specific Home Assistant configuration.
 

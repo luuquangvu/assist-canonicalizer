@@ -122,12 +122,6 @@ def test_load_built_in_intents_type_error() -> None:
         assert _load_built_in_intents("vi") == {"built_in_key": "built_in_val"}
 
 
-def test_load_custom_sentences_import_error() -> None:
-    """Test _load_custom_sentences returns empty dict on yaml ImportError."""
-    with patch.dict(sys.modules, {"yaml": None}):
-        assert _load_custom_sentences("vi", lambda key, lang: "/some/path") == {}
-
-
 def test_load_custom_sentences_yaml_types_and_recursive_merge() -> None:
     """Test custom sentences yaml loading with lists and recursive dict merging."""
     with tempfile.TemporaryDirectory() as tmpdir:

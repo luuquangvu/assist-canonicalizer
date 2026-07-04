@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 from .bm25 import BM25Index
 from .candidate import Candidate, deduplicate_candidates
@@ -156,9 +157,14 @@ class CanonicalIndex:
         max_candidates: int = DEFAULT_MAX_CANDIDATES,
         *,
         slot_preferences: set[tuple[str, str]] | None = None,
+        intent_context: Mapping[str, Any] | None = None,
         min_confidence: float = DEFAULT_MIN_CONFIDENCE,
     ) -> tuple[RankedCandidate, ...]:
-        """Rank indexed candidates for a query."""
+        """Rank indexed candidates for a query.
+
+        ``intent_context`` follows the HassIL-style mapping normalized by
+        ``normalize_intent_context`` before ranking.
+        """
         return rank_candidates(
             query,
             self.candidates,
@@ -177,6 +183,7 @@ class CanonicalIndex:
             candidate_slot_tokens=self._candidate_slot_tokens,
             slot_token_to_indices=self._slot_token_to_indices,
             slot_preferences=slot_preferences,
+            intent_context=intent_context,
             min_confidence=min_confidence,
         )
 

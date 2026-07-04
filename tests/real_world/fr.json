@@ -17,7 +17,8 @@
       "expected_canonical": "éteins le ventilateur de la salle de bain",
       "category": "exact_match",
       "expected_slots": {
-        "name": "ventilateur de la salle de bain"
+        "name": "ventilateur",
+        "area": "salle de bain"
       }
     },
     {
@@ -47,7 +48,9 @@
       "expected_canonical": "ouvre la fenêtre de la chambre",
       "category": "exact_match",
       "expected_slots": {
-        "name": "fenêtre de la chambre"
+        "device_class": "window",
+        "area": "chambre",
+        "domain": "cover"
       }
     },
     {
@@ -57,7 +60,9 @@
       "expected_canonical": "ferme la fenêtre de la chambre",
       "category": "exact_match",
       "expected_slots": {
-        "name": "fenêtre de la chambre"
+        "device_class": "window",
+        "area": "chambre",
+        "domain": "cover"
       }
     },
     {
@@ -67,7 +72,8 @@
       "expected_canonical": "éteins la lumière du salon",
       "category": "exact_match",
       "expected_slots": {
-        "name": "lumière du salon"
+        "area": "salon",
+        "domain": "light"
       }
     },
     {
@@ -77,7 +83,8 @@
       "expected_canonical": "allume le ventilateur de la salle de bain",
       "category": "exact_match",
       "expected_slots": {
-        "name": "ventilateur de la salle de bain"
+        "area": "salle de bain",
+        "domain": "fan"
       }
     },
     {
@@ -97,7 +104,8 @@
       "expected_canonical": "allume la lumière du salon",
       "category": "exact_match",
       "expected_slots": {
-        "name": "lumière du salon"
+        "area": "salon",
+        "domain": "light"
       }
     },
     {
@@ -117,7 +125,8 @@
       "expected_canonical": "éteins le ventilateur de la salle de bain",
       "category": "spelling_mistake",
       "expected_slots": {
-        "name": "ventilateur de la salle de bain"
+        "name": "ventilateur",
+        "area": "salle de bain"
       }
     },
     {
@@ -137,7 +146,9 @@
       "expected_canonical": "ouvre la fenêtre de la chambre",
       "category": "spelling_mistake",
       "expected_slots": {
-        "name": "fenêtre de la chambre"
+        "device_class": "window",
+        "area": "chambre",
+        "domain": "cover"
       }
     },
     {
@@ -147,7 +158,8 @@
       "expected_canonical": "allume le ventilateur de la salle de bain",
       "category": "spelling_mistake",
       "expected_slots": {
-        "name": "ventilateur de la salle de bain"
+        "area": "salle de bain",
+        "domain": "fan"
       }
     },
     {
@@ -167,7 +179,8 @@
       "expected_canonical": "éteins le ventilateur de la salle de bain",
       "category": "extra_words",
       "expected_slots": {
-        "name": "ventilateur de la salle de bain"
+        "name": "ventilateur",
+        "area": "salle de bain"
       }
     },
     {
@@ -187,7 +200,9 @@
       "expected_canonical": "ferme la fenêtre de la chambre",
       "category": "extra_words",
       "expected_slots": {
-        "name": "fenêtre de la chambre"
+        "device_class": "window",
+        "area": "chambre",
+        "domain": "cover"
       }
     },
     {
@@ -197,7 +212,8 @@
       "expected_canonical": "éteins la lumière du salon",
       "category": "extra_words",
       "expected_slots": {
-        "name": "lumière du salon"
+        "area": "salon",
+        "domain": "light"
       }
     },
     {
@@ -217,7 +233,8 @@
       "expected_canonical": "éteins le ventilateur de la salle de bain",
       "category": "missing_words",
       "expected_slots": {
-        "name": "ventilateur de la salle de bain"
+        "name": "ventilateur",
+        "area": "salle de bain"
       }
     },
     {
@@ -237,7 +254,9 @@
       "expected_canonical": "ferme la fenêtre de la chambre",
       "category": "missing_words",
       "expected_slots": {
-        "name": "fenêtre de la chambre"
+        "device_class": "window",
+        "area": "chambre",
+        "domain": "cover"
       }
     },
     {
@@ -299,7 +318,7 @@
       "expected_canonical": "ajoute du lait à la liste de courses",
       "category": "intent_coverage",
       "expected_slots": {
-        "shopping_list_item": "lait"
+        "item": "lait"
       }
     },
     {
@@ -334,7 +353,12 @@
       "expected_intent": "HassClimateGetTemperature",
       "expected_canonical": "Combien fait-il",
       "category": "intent_coverage",
-      "expected_slots": {}
+      "expected_slots": {
+        "area": "salon"
+      },
+      "context": {
+        "area": "salon"
+      }
     },
     {
       "query": "enlève 1 s au décompte",
@@ -343,9 +367,7 @@
       "expected_canonical": "enlève 1 s au décompte",
       "category": "intent_coverage",
       "expected_slots": {
-        "timer_seconds": "1",
-        "timer_minutes": "1",
-        "timer_hours": "1"
+        "seconds": "1.0"
       }
     },
     {
@@ -356,11 +378,7 @@
       "category": "intent_coverage",
       "expected_slots": {
         "name": "ventilateur",
-        "name:fan": "ventilateur",
-        "brightness": "0",
-        "temperature": "0",
-        "position": "0",
-        "volume": "0"
+        "percentage": "0.0"
       }
     },
     {
@@ -380,9 +398,7 @@
       "expected_canonical": "ajoute 1 s au décompte",
       "category": "intent_coverage",
       "expected_slots": {
-        "timer_seconds": "1",
-        "timer_minutes": "1",
-        "timer_hours": "1"
+        "seconds": "1.0"
       }
     },
     {
@@ -408,12 +424,8 @@
       "expected_canonical": "allume lumière 0%",
       "category": "intent_coverage",
       "expected_slots": {
-        "name:light": "lumière",
         "name": "lumière",
-        "brightness": "0",
-        "temperature": "0",
-        "position": "0",
-        "volume": "0"
+        "brightness": "0.0"
       }
     },
     {
@@ -423,9 +435,8 @@
       "expected_canonical": "mets lait au liste de courses",
       "category": "intent_coverage",
       "expected_slots": {
-        "name:todo": "liste de courses",
-        "name": "liste de courses",
-        "shopping_list_item": "lait"
+        "item": "lait",
+        "name": "liste de courses"
       }
     },
     {
@@ -434,15 +445,25 @@
       "expected_intent": "HassMediaNext",
       "expected_canonical": "suivant",
       "category": "intent_coverage",
-      "expected_slots": {}
+      "expected_slots": {
+        "area": "salon"
+      },
+      "context": {
+        "area": "salon"
+      }
     },
     {
-      "query": "eteint son",
+      "query": "pause",
       "language": "fr",
       "expected_intent": "HassMediaPause",
-      "expected_canonical": "eteint son",
+      "expected_canonical": "pause",
       "category": "intent_coverage",
-      "expected_slots": {}
+      "expected_slots": {
+        "area": "salon"
+      },
+      "context": {
+        "area": "salon"
+      }
     },
     {
       "query": "précédent",
@@ -450,7 +471,12 @@
       "expected_intent": "HassMediaPrevious",
       "expected_canonical": "précédent",
       "category": "intent_coverage",
-      "expected_slots": {}
+      "expected_slots": {
+        "area": "salon"
+      },
+      "context": {
+        "area": "salon"
+      }
     },
     {
       "query": "lis sur télévision",
@@ -459,7 +485,6 @@
       "expected_canonical": "lis sur télévision",
       "category": "intent_coverage",
       "expected_slots": {
-        "name:media_player": "télévision",
         "name": "télévision"
       }
     },
@@ -486,10 +511,11 @@
       "expected_canonical": "règle son 0%",
       "category": "intent_coverage",
       "expected_slots": {
-        "brightness": "0",
-        "temperature": "0",
-        "position": "0",
-        "volume": "0"
+        "volume_level": "0.0",
+        "area": "salon"
+      },
+      "context": {
+        "area": "salon"
       }
     },
     {
@@ -499,7 +525,8 @@
       "expected_canonical": "augmente volume télévision",
       "category": "intent_coverage",
       "expected_slots": {
-        "name": "télévision"
+        "name": "télévision",
+        "volume_step": "up"
       }
     },
     {
@@ -509,9 +536,7 @@
       "expected_canonical": "compte a rebours 1 m",
       "category": "intent_coverage",
       "expected_slots": {
-        "timer_seconds": "1",
-        "timer_minutes": "1",
-        "timer_hours": "1"
+        "minutes": "1.0"
       }
     },
     {
@@ -547,18 +572,18 @@
       "expected_canonical": "lance aspirateur",
       "category": "intent_coverage",
       "expected_slots": {
-        "name:vacuum": "aspirateur",
         "name": "aspirateur"
       }
     },
     {
-      "query": "active lampe du salon",
+      "query": "mets lampe du salon en marche",
       "language": "fr",
       "expected_intent": "HassTurnOn",
       "expected_canonical": "active lumière du salon",
       "category": "semantic_challenge",
       "expected_slots": {
-        "name": "lumière du salon"
+        "area": "salon",
+        "domain": "light"
       }
     },
     {
@@ -568,7 +593,8 @@
       "expected_canonical": "active lumière du salon",
       "category": "synonym_paraphrase",
       "expected_slots": {
-        "name": "lumière du salon"
+        "area": "salon",
+        "domain": "light"
       }
     },
     {
@@ -578,7 +604,8 @@
       "expected_canonical": "démarre salon",
       "category": "synonym_paraphrase",
       "expected_slots": {
-        "area": "salon"
+        "area": "salon",
+        "domain": "light"
       }
     },
     {
@@ -588,7 +615,8 @@
       "expected_canonical": "lumière du salon",
       "category": "synonym_paraphrase",
       "expected_slots": {
-        "name": "lumière du salon"
+        "area": "salon",
+        "domain": "light"
       }
     },
     {
@@ -598,7 +626,8 @@
       "expected_canonical": "lumière du salon",
       "category": "synonym_paraphrase",
       "expected_slots": {
-        "name": "lumière du salon"
+        "area": "salon",
+        "domain": "light"
       }
     },
     {
@@ -618,7 +647,8 @@
       "expected_canonical": "éteins ventilateur de la salle de bain",
       "category": "complex_distortion",
       "expected_slots": {
-        "name": "ventilateur de la salle de bain"
+        "name": "ventilateur",
+        "area": "salle de bain"
       }
     },
     {
@@ -708,7 +738,8 @@
       "expected_canonical": "allume la télévision du salon",
       "category": "extra_words",
       "expected_slots": {
-        "name": "télévision du salon"
+        "name": "télévision",
+        "area": "salon"
       }
     },
     {
@@ -718,7 +749,9 @@
       "expected_canonical": "ferme le volet du salon",
       "category": "extra_words",
       "expected_slots": {
-        "name": "volet du salon"
+        "device_class": "shutter",
+        "area": "salon",
+        "domain": "cover"
       }
     },
     {
@@ -728,7 +761,8 @@
       "expected_canonical": "allume la lumière de la cuisine",
       "category": "spelling_mistake",
       "expected_slots": {
-        "name": "lumière de la cuisine"
+        "area": "cuisine",
+        "domain": "light"
       }
     },
     {
@@ -742,13 +776,14 @@
       }
     },
     {
-      "query": "mets en route la télévision du salon",
+      "query": "allume-moi la télévision du salon",
       "language": "fr",
       "expected_intent": "HassTurnOn",
       "expected_canonical": "allume la télévision du salon",
-      "category": "synonym_paraphrase",
+      "category": "extra_words",
       "expected_slots": {
-        "name": "télévision du salon"
+        "name": "télévision",
+        "area": "salon"
       }
     },
     {
@@ -758,7 +793,9 @@
       "expected_canonical": "ferme le volet de la chambre",
       "category": "synonym_paraphrase",
       "expected_slots": {
-        "name": "volet de la chambre"
+        "device_class": "shutter",
+        "area": "chambre",
+        "domain": "cover"
       }
     },
     {
@@ -768,7 +805,8 @@
       "expected_canonical": "allume la télévision du salon",
       "category": "missing_words",
       "expected_slots": {
-        "name": "télévision du salon"
+        "name": "télévision",
+        "area": "salon"
       }
     },
     {
@@ -778,7 +816,8 @@
       "expected_canonical": "allume la télévision du salon",
       "category": "extra_words",
       "expected_slots": {
-        "name": "télévision du salon"
+        "name": "télévision",
+        "area": "salon"
       }
     },
     {
@@ -798,6 +837,7 @@
       "expected_canonical": "règle température dans salon 0",
       "category": "intent_coverage",
       "expected_slots": {
+        "area": "salon",
         "temperature": "0"
       }
     },
@@ -808,8 +848,10 @@
       "expected_canonical": "ouvre fenêtre de la chambre 0%",
       "category": "intent_coverage",
       "expected_slots": {
-        "name": "fenêtre de la chambre",
-        "position": "0"
+        "device_class": "window",
+        "area": "chambre",
+        "position": "0",
+        "domain": "cover"
       }
     },
     {
@@ -819,7 +861,8 @@
       "expected_canonical": "allume la lumière de la chambre",
       "category": "semantic_challenge",
       "expected_slots": {
-        "name": "lumière de la chambre"
+        "area": "chambre",
+        "domain": "light"
       }
     },
     {
@@ -839,7 +882,278 @@
       "expected_canonical": "allume la lumière du salon",
       "category": "semantic_challenge",
       "expected_slots": {
-        "name": "lumière du salon"
+        "area": "salon",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "coche pain dans liste de courses",
+      "language": "fr",
+      "expected_intent": "HassListCompleteItem",
+      "expected_canonical": "coche pain dans liste de courses",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "item": "pain",
+        "name": "liste de courses"
+      }
+    },
+    {
+      "query": "supprime pain dans liste de courses",
+      "language": "fr",
+      "expected_intent": "HassListRemoveItem",
+      "expected_canonical": "supprime pain dans liste de courses",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "item": "pain",
+        "name": "liste de courses"
+      }
+    },
+    {
+      "query": "mets le son en sourdine",
+      "language": "fr",
+      "expected_intent": "HassMediaPlayerMute",
+      "expected_canonical": "mets le son en sourdine",
+      "category": "intent_coverage",
+      "context": {
+        "area": "salon"
+      },
+      "expected_slots": {
+        "area": "salon"
+      }
+    },
+    {
+      "query": "enlève la sourdine",
+      "language": "fr",
+      "expected_intent": "HassMediaPlayerUnmute",
+      "expected_canonical": "enlève la sourdine",
+      "category": "intent_coverage",
+      "context": {
+        "area": "salon"
+      },
+      "expected_slots": {
+        "area": "salon"
+      }
+    },
+    {
+      "query": "mets Jazz",
+      "language": "fr",
+      "expected_intent": "HassMediaSearchAndPlay",
+      "expected_canonical": "mets Jazz",
+      "category": "intent_coverage",
+      "context": {
+        "area": "salon"
+      },
+      "expected_slots": {
+        "search_query": "Jazz",
+        "area": "salon"
+      }
+    },
+    {
+      "query": "coche pain de ma liste de courses",
+      "language": "fr",
+      "expected_intent": "HassShoppingListCompleteItem",
+      "expected_canonical": "coche pain de ma liste de courses",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "item": "pain"
+      }
+    },
+    {
+      "query": "nettoie salon",
+      "language": "fr",
+      "expected_intent": "HassVacuumCleanArea",
+      "expected_canonical": "nettoie salon",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "area": "salon"
+      }
+    },
+    {
+      "query": "tu peux allumer la lumière de la cuisine s'il te plaît",
+      "language": "fr",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "allume la lumière de la cuisine",
+      "category": "extra_words",
+      "expected_slots": {
+        "area": "cuisine",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "eteind la lumiere du couloir",
+      "language": "fr",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "éteins la lumière du couloir",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "area": "couloir",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "lumière cuisine allumer",
+      "language": "fr",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "allume la lumière de la cuisine",
+      "category": "missing_words",
+      "expected_slots": {
+        "area": "cuisine",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "relance le ventilateur de la chambre",
+      "language": "fr",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "allume le ventilateur de la chambre",
+      "category": "synonym_paraphrase",
+      "expected_slots": {
+        "area": "chambre",
+        "domain": "fan"
+      }
+    },
+    {
+      "query": "allume lumierre cuisine",
+      "language": "fr",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "allume la lumière de la cuisine",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "area": "cuisine",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "lumière salon éteins",
+      "language": "fr",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "éteins la lumière du salon",
+      "category": "missing_words",
+      "expected_slots": {
+        "area": "salon",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "ventilateur chambre allume",
+      "language": "fr",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "allume le ventilateur de la chambre",
+      "category": "missing_words",
+      "expected_slots": {
+        "area": "chambre",
+        "domain": "fan"
+      }
+    },
+    {
+      "query": "etein le ventilateur de la chambre",
+      "language": "fr",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "éteins le ventilateur de la chambre",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "area": "chambre",
+        "domain": "fan"
+      }
+    },
+    {
+      "query": "alume la lumiere de la cuisine",
+      "language": "fr",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "allume la lumière de la cuisine",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "area": "cuisine",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "stp alume lumierre cuisine",
+      "language": "fr",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "allume la lumière de la cuisine",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "area": "cuisine",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "stp eteins ventilateur chambre",
+      "language": "fr",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "éteins le ventilateur de la chambre",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "area": "chambre",
+        "domain": "fan"
+      }
+    },
+    {
+      "query": "ouvre fenetre chambbre stp",
+      "language": "fr",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "ouvre la fenêtre de la chambre",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "device_class": "window",
+        "area": "chambre",
+        "domain": "cover"
+      }
+    },
+    {
+      "query": "ferme fenetre salon svp",
+      "language": "fr",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "ferme la fenêtre du salon",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "device_class": "window",
+        "area": "salon",
+        "domain": "cover"
+      }
+    },
+    {
+      "query": "coupe le ventilateur de la chambre",
+      "language": "fr",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "éteins le ventilateur de la chambre",
+      "category": "semantic_challenge",
+      "expected_slots": {
+        "area": "chambre",
+        "domain": "fan"
+      }
+    },
+    {
+      "query": "arrete le ventilateur de la chambre",
+      "language": "fr",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "éteins le ventilateur de la chambre",
+      "category": "semantic_challenge",
+      "expected_slots": {
+        "area": "chambre",
+        "domain": "fan"
+      }
+    },
+    {
+      "query": "arrête ventilateur chambre maintenant",
+      "language": "fr",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "éteins le ventilateur de la chambre",
+      "category": "semantic_challenge",
+      "expected_slots": {
+        "area": "chambre",
+        "domain": "fan"
+      }
+    },
+    {
+      "query": "démarre le ménage aspirateur",
+      "language": "fr",
+      "expected_intent": "HassVacuumStart",
+      "expected_canonical": "démarre aspirateur",
+      "category": "semantic_challenge",
+      "expected_slots": {
+        "name": "aspirateur"
       }
     }
   ],

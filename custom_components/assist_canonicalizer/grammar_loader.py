@@ -8,6 +8,7 @@ import unicodedata
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
+from itertools import permutations, product
 from typing import Any
 
 import orjson
@@ -23,18 +24,11 @@ from .const import (
     LOCATION_SLOT_NAME_SET,
     LOCATION_SLOT_NAMES,
 )
-from .normalization import (
-    normalize_text,
-    normalize_text_no_diacritics,
-)
+from .normalization import normalize_text, normalize_text_no_diacritics
 from .registry import merge_slot_values
-from .rehydration import (
-    rehydrate_wildcard_slots as rehydrate_wildcard_slots,
-)
-from .rehydration import (
-    rehydrate_wildcard_text as rehydrate_wildcard_text,
-)
-from .utils import wildcard_slot_names as wildcard_slot_names
+from .rehydration import rehydrate_wildcard_slots as rehydrate_wildcard_slots
+from .rehydration import rehydrate_wildcard_text as rehydrate_wildcard_text
+from .utils import register_custom_wildcards_from_sources, wildcard_slot_names
 
 _TEMPLATE_MARKERS = frozenset("{}[]<>|()")
 _SLOT_PATTERN = re.compile(r"{([^{}]+)}")
@@ -44,7 +38,7 @@ _COMPACT_SCRIPT_QUERY_SPAN_MIN_LENGTH = 2
 _COMPACT_SCRIPT_QUERY_SPAN_MAX_LENGTH = 16
 _MAX_COMPOUND_QUERY_TOKENS = 4
 _TEMPLATE_RELEVANCE_EXPANSION_LIMIT = 200
-_TEXT_RUN_STOP_CHARS = frozenset("[]()|{<")
+_TEXT_RUN_STOP_CHARS = frozenset("[]()|{<;")
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +51,28 @@ class RegistrySlotValue:
     position: int
     normalized_no_diacritics: str
     tokens_no_diacritics: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class TemplateSlotReference:
+    """Slot reference parsed from HassIL template syntax."""
+
+    list_name: str
+    output_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class _TemplateCompilationState:
+    """Per-data-item state shared while compiling registry sentence templates."""
+
+    source_key: str
+    expansion_rules: Mapping[str, str]
+    base_data_slot_values: Mapping[str, tuple[str, ...]]
+    slot_output_value_maps: Mapping[str, Mapping[str, Any]]
+    static_slots: Mapping[str, str]
+    context_slots: frozenset[str]
+    domains: tuple[str, ...]
+    language: str | None
 
 
 class RegistrySlotIndex(dict[str, tuple[RegistrySlotValue, ...]]):
@@ -107,7 +123,10 @@ class DynamicRegistryTemplate:
     """Query-independent data needed to expand one registry template."""
 
     sentence: str
+    slot_references: tuple[TemplateSlotReference, ...]
     sentence_slots: frozenset[str]
+    slot_output_names: Mapping[str, tuple[str, ...]]
+    slot_output_values: Mapping[str, Mapping[str, Any]]
     entity_slots: tuple[str, ...]
     query_slots: tuple[str, ...]
     domains: tuple[str, ...]
@@ -137,6 +156,8 @@ def build_candidates_from_intent_sources(
     max_candidates: int | None = DEFAULT_MAX_TOTAL_CANDIDATES_PER_LANGUAGE,
 ) -> tuple[Candidate, ...]:
     """Build a bounded candidate set from conversation intent source configs."""
+    register_custom_wildcards_from_sources(language, intent_sources)
+
     if max_candidates is not None and max_candidates < 1:
         raise ValueError("max_candidates must be positive")
     candidates: list[Candidate] = []
@@ -203,21 +224,18 @@ def build_registry_slot_index(
 
 
 def _compile_template_from_sentence(
-    source_key: str,
+    state: _TemplateCompilationState,
     sentence: str,
-    expansion_rules: Mapping[str, str],
-    base_data_slot_values: Mapping[str, tuple[str, ...]],
-    static_slots: Mapping[str, str],
-    domains: tuple[str, ...],
-    language: str | None,
     *,
     include_literal_only_templates: bool,
     include_area_only_templates: bool,
 ) -> DynamicRegistryTemplate | None:
     """Compile a single sentence into a DynamicRegistryTemplate, or None to skip."""
-    sentence_slots = _template_slot_names(sentence, expansion_rules)
-    literal_text, variants = _template_literals(sentence, expansion_rules)
-    resolved_slots = set(base_data_slot_values) | set(static_slots)
+    slot_references = _template_slot_references(sentence, state.expansion_rules)
+    sentence_slots = frozenset(ref.list_name for ref in slot_references)
+    slot_output_names = _slot_output_names(slot_references)
+    literal_text, variants = _template_literals(sentence, state.expansion_rules)
+    resolved_slots = set(state.base_data_slot_values) | set(state.static_slots)
     unresolved_slots = sentence_slots - resolved_slots
     entity_slots = tuple(sorted(unresolved_slots & ENTITY_SLOT_NAME_SET))
     query_slots = tuple(sorted(unresolved_slots & (ENTITY_SLOT_NAME_SET | LOCATION_SLOT_NAME_SET)))
@@ -225,7 +243,7 @@ def _compile_template_from_sentence(
         not include_area_only_templates
         and query_slots
         and not entity_slots
-        and not _is_domain_scoped_location_template(sentence_slots, domains)
+        and not _is_domain_scoped_location_template(sentence_slots, state.domains)
     ):
         return None
     if not include_literal_only_templates and not query_slots:
@@ -233,31 +251,42 @@ def _compile_template_from_sentence(
     if not query_slots and (not variants or is_fixed_sentence(sentence)):
         return None
     no_diac_variants = tuple(
-        frozenset(_cached_normalize_no_diac(token, language) for token in tokens)
+        frozenset(_cached_normalize_no_diac(token, state.language) for token in tokens)
         for tokens in variants
     )
     base_metadata = _candidate_metadata(
-        source_key,
+        state.source_key,
         sentence,
-        expansion_rules,
+        state.expansion_rules,
         literal_text=literal_text,
         literal_variants=variants,
     )
-    if static_slots:
-        base_metadata["static_slots"] = ",".join(sorted(static_slots.keys()))
-    wildcards = wildcard_slot_names(language)
+    if state.static_slots:
+        base_metadata["static_slots"] = ",".join(sorted(state.static_slots.keys()))
+    if state.context_slots:
+        base_metadata["context_slots"] = ",".join(sorted(state.context_slots))
+    if query_slots:
+        base_metadata["query_slots"] = ",".join(query_slots)
+    wildcards = wildcard_slot_names(state.language)
     if sentence_wildcards := sentence_slots & wildcards:
         base_metadata["wildcard_slots"] = ",".join(sorted(sentence_wildcards))
     return DynamicRegistryTemplate(
         sentence=sentence,
+        slot_references=slot_references,
         sentence_slots=sentence_slots,
+        slot_output_names=slot_output_names,
+        slot_output_values={
+            slot_name: state.slot_output_value_maps[slot_name]
+            for slot_name in sentence_slots
+            if slot_name in state.slot_output_value_maps
+        },
         entity_slots=entity_slots,
         query_slots=query_slots,
-        domains=domains,
-        expansion_rules=expansion_rules,
-        base_data_slot_values=base_data_slot_values,
-        static_slots=static_slots,
-        required_slots=frozenset(_required_slots(sentence, expansion_rules)),
+        domains=state.domains,
+        expansion_rules=state.expansion_rules,
+        base_data_slot_values=state.base_data_slot_values,
+        static_slots=state.static_slots,
+        required_slots=frozenset(_required_slots(sentence, state.expansion_rules)),
         metadata=base_metadata,
         literal_token_variants=variants,
         literal_token_variants_no_diac=no_diac_variants,
@@ -280,20 +309,27 @@ def _compile_templates_from_data_item(
         return []
     expansion_rules = _expansion_rules(source_config, intent_config, data_item)
     base_data_slot_values = _slot_values(source_config, intent_config, data_item)
+    output_value_maps = _slot_output_value_maps(source_config, intent_config, data_item)
     static_slots = _static_slot_values(data_item)
+    context_slots = _context_slot_names(data_item)
     domains = _context_domains(data_item)
+    state = _TemplateCompilationState(
+        source_key=source_key,
+        expansion_rules=expansion_rules,
+        base_data_slot_values=base_data_slot_values,
+        slot_output_value_maps=output_value_maps,
+        static_slots=static_slots,
+        context_slots=context_slots,
+        domains=domains,
+        language=language,
+    )
     templates = []
     for sentence in sentences:
         if not isinstance(sentence, str):
             continue
         template = _compile_template_from_sentence(
-            source_key,
+            state,
             sentence,
-            expansion_rules,
-            base_data_slot_values,
-            static_slots,
-            domains,
-            language,
             include_literal_only_templates=include_literal_only_templates,
             include_area_only_templates=include_area_only_templates,
         )
@@ -310,6 +346,8 @@ def compile_dynamic_registry_intents(
     include_area_only_templates: bool = True,
 ) -> tuple[DynamicRegistryIntent, ...]:
     """Compile query-independent dynamic registry template data."""
+    register_custom_wildcards_from_sources(language, intent_sources)
+
     compiled: list[DynamicRegistryIntent] = []
     for source_key, source_config in intent_sources.items():
         source = _candidate_source_from_key(source_key)
@@ -364,7 +402,7 @@ def build_query_registry_candidates(
     if max_candidates < 1:
         raise ValueError("max_candidates must be positive")
     query_normalized = normalize_text(query)
-    if not query_normalized or not registry_slot_values:
+    if not query_normalized or (not registry_slot_values and not include_literal_only_templates):
         return ()
     query_tokens = frozenset(query_normalized.split())
     if registry_slot_index is None:
@@ -490,12 +528,19 @@ def expand_sentence_template(
     expansion_rules: Mapping[str, str],
     *,
     max_expansions: int = DEFAULT_MAX_CANDIDATES_PER_TEMPLATE,
+    fair: bool = False,
 ) -> tuple[str, ...]:
     """Expand a bounded subset of Hassil sentence template syntax."""
     if max_expansions < 1:
         raise ValueError("max_expansions must be positive")
     top_node = _parse_hassil(sentence)
-    expansions = top_node.expand(slot_values, expansion_rules, frozenset(), max_expansions)
+    expansions = top_node.expand(
+        slot_values,
+        expansion_rules,
+        frozenset(),
+        max_expansions,
+        fair=fair,
+    )
     return tuple(_deduplicate_texts(expansions, max_expansions))
 
 
@@ -506,11 +551,18 @@ def _build_candidate(
     language: str,
     base_metadata: Mapping[str, str],
     presorted_values: dict[str, list[str]],
+    slot_output_names: Mapping[str, tuple[str, ...]] | None = None,
+    slot_output_values: Mapping[str, Mapping[str, Any]] | None = None,
     static_slots_dict: dict[str, str] | None = None,
     literal_variants: tuple[frozenset[str], ...] | None = None,
 ) -> Candidate:
     """Construct a Candidate with extracted slot metadata."""
-    slots = _extract_slots_from_expanded_text(expanded_sentence, presorted_values)
+    slots = _extract_slots_from_expanded_text(
+        expanded_sentence,
+        presorted_values,
+        slot_output_names,
+        slot_output_values,
+    )
     if static_slots_dict:
         slots = {**static_slots_dict, **slots}
     metadata = dict(base_metadata)
@@ -522,7 +574,7 @@ def _build_candidate(
         source=source,
         language=language,
         metadata=metadata,
-        slot_values=tuple(slots.values()),
+        slot_values=tuple(str(value) for value in slots.values() if value is not None),
     )
     if literal_variants is not None:
         object.__setattr__(candidate, "_literal_variants", literal_variants)
@@ -550,11 +602,15 @@ def _data_item_candidates_generator(
         return
     expansion_rules = _expansion_rules(source_config, intent_config, data_item)
     base_data_slot_values = _slot_values(source_config, intent_config, data_item)
+    output_value_maps = _slot_output_value_maps(source_config, intent_config, data_item)
+    context_slots = _context_slot_names(data_item)
 
     for sentence in sentences:
         if not isinstance(sentence, str):
             continue
-        sentence_slots = _template_slot_names(sentence, expansion_rules)
+        slot_references = _template_slot_references(sentence, expansion_rules)
+        sentence_slots = frozenset(ref.list_name for ref in slot_references)
+        slot_output_names = _slot_output_names(slot_references)
         slot_values = merge_slot_values(
             base_data_slot_values,
             _registry_slot_values_for_template(
@@ -581,6 +637,10 @@ def _data_item_candidates_generator(
         if static_slots_dict:
             base_metadata = dict(base_metadata)
             base_metadata["static_slots"] = ",".join(sorted(static_slots_dict.keys()))
+        if context_slots:
+            if not isinstance(base_metadata, dict):
+                base_metadata = dict(base_metadata)
+            base_metadata["context_slots"] = ",".join(sorted(context_slots))
 
         wildcards = wildcard_slot_names(language)
         if sentence_wildcards := sentence_slots & wildcards:
@@ -588,7 +648,9 @@ def _data_item_candidates_generator(
                 base_metadata = dict(base_metadata)
             base_metadata["wildcard_slots"] = ",".join(sorted(sentence_wildcards))
 
-        presorted_values = _presort_slot_values(slot_values)
+        presorted_values = _presort_slot_values(
+            _referenced_slot_values(slot_values, slot_references)
+        )
         expanded_sentences = _candidate_texts(sentence, slot_values, expansion_rules)
         # Sort each sentence's candidates by length (word count, then character length)
         sorted_sentences = sorted(expanded_sentences, key=_expanded_text_length_key)
@@ -600,6 +662,8 @@ def _data_item_candidates_generator(
                 language,
                 base_metadata,
                 presorted_values,
+                slot_output_names,
+                output_value_maps,
                 static_slots_dict,
                 literal_variants=variants,
             )
@@ -810,7 +874,9 @@ def _append_query_template_candidates(
     limit: int,
 ) -> None:
     """Append query-expanded template candidates until the template limit is reached."""
-    presorted_values = _presort_slot_values(slot_values)
+    presorted_values = _presort_slot_values(
+        _referenced_slot_values(slot_values, template.slot_references)
+    )
     static_slots_dict = dict(template.static_slots)
     for expanded_sentence in _query_candidate_texts(
         template.sentence,
@@ -838,6 +904,8 @@ def _append_query_template_candidates(
                 language,
                 template.metadata,
                 presorted_values,
+                template.slot_output_names,
+                template.slot_output_values,
                 static_slots_dict,
                 literal_variants=template.literal_token_variants,
             )
@@ -885,7 +953,7 @@ def _exact_slot_preferred_value_maps(
 
     exact_slots = _exact_query_slot_values(
         slot_values,
-        template.query_slots,
+        template.sentence_slots,
         query_normalized,
         query_no_diac,
         language,
@@ -893,9 +961,15 @@ def _exact_slot_preferred_value_maps(
     if not exact_slots:
         return ()
 
-    preferred: list[dict[str, tuple[str, ...]]] = []
     optional_location_slots = set(LOCATION_SLOT_NAMES) - template.required_slots
-
+    values = dict(slot_values)
+    for slot_name, exact_values in exact_slots.items():
+        values[slot_name] = exact_values
+    if exact_slots.keys() & set(template.entity_slots):
+        for location_slot in optional_location_slots:
+            if location_slot not in exact_slots:
+                values.pop(location_slot, None)
+    preferred: list[dict[str, tuple[str, ...]]] = [values]
     for slot_name in template.entity_slots:
         if exact_values := exact_slots.get(slot_name):
             values = dict(slot_values)
@@ -1413,7 +1487,9 @@ def _presort_slot_values(
 def _extract_slots_from_expanded_text(
     text: str,
     slot_values: Mapping[str, Sequence[str]],
-) -> dict[str, str]:
+    slot_output_names: Mapping[str, tuple[str, ...]] | None = None,
+    slot_output_values: Mapping[str, Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Extract slot values present in the expanded text.
 
     Values must be pre-sorted longest-first (see :func:`_presort_slot_values`).
@@ -1429,8 +1505,33 @@ def _extract_slots_from_expanded_text(
             previous_values = values
             previous_match = matched
         if matched is not None:
-            slots[slot_name] = matched
+            output_value = (
+                slot_output_values.get(slot_name, {}).get(matched, matched)
+                if slot_output_values is not None
+                else matched
+            )
+            output_names = (
+                slot_output_names.get(slot_name, (slot_name,))
+                if slot_output_names is not None
+                else (slot_name,)
+            )
+            for output_name in output_names:
+                slots.setdefault(output_name, output_value)
     return slots
+
+
+def _referenced_slot_values(
+    slot_values: Mapping[str, tuple[str, ...]],
+    slot_references: Iterable[TemplateSlotReference],
+) -> dict[str, tuple[str, ...]]:
+    """Return only slot values referenced by the current template."""
+    selected = {}
+    for reference in slot_references:
+        if reference.list_name in selected:
+            continue
+        if values := slot_values.get(reference.list_name):
+            selected[reference.list_name] = values
+    return selected
 
 
 def _candidate_texts(
@@ -1467,6 +1568,7 @@ def _query_candidate_texts(
             DEFAULT_MAX_CANDIDATES_PER_TEMPLATE,
             _TEMPLATE_RELEVANCE_EXPANSION_LIMIT,
         ),
+        fair=True,
     )
     return tuple(
         sorted(
@@ -1731,6 +1833,25 @@ def _unique_capped_with_empty(items: Iterable[str], limit: int) -> tuple[str, ..
     return tuple(unique.keys())
 
 
+def _interleave_unique_capped(groups: Sequence[Sequence[str]], limit: int) -> tuple[str, ...]:
+    """Return unique items from each group without starving later groups."""
+    if limit < 1:
+        return ()
+    max_len = max((len(group) for group in groups), default=0)
+    unique: dict[str, None] = {}
+    for offset in range(max_len):
+        for group in groups:
+            if offset >= len(group):
+                continue
+            item = group[offset]
+            if item in unique:
+                continue
+            unique[item] = None
+            if len(unique) >= limit:
+                return tuple(unique.keys())
+    return tuple(unique.keys())
+
+
 class _HassilNode:
     """Base class for Hassil template AST nodes."""
 
@@ -1753,6 +1874,8 @@ class _HassilNode:
         rules: Mapping[str, str],
         seen: frozenset[str],
         limit: int,
+        *,
+        fair: bool = False,
     ) -> tuple[str, ...]:
         """Expand node into all spoken text variants using slots and rules."""
         raise NotImplementedError()
@@ -1784,6 +1907,8 @@ class _HassilTextNode(_HassilNode):
         rules: Mapping[str, str],
         seen: frozenset[str],
         limit: int,
+        *,
+        fair: bool = False,
     ) -> tuple[str, ...]:
         """Expand node into all spoken text variants using slots and rules."""
         return (self.text,)
@@ -1815,6 +1940,8 @@ class _HassilSlotNode(_HassilNode):
         rules: Mapping[str, str],
         seen: frozenset[str],
         limit: int,
+        *,
+        fair: bool = False,
     ) -> tuple[str, ...]:
         """Expand node into all spoken text variants using slots and rules."""
         base_name = self.name.split(":")[0]
@@ -1860,6 +1987,8 @@ class _HassilRuleNode(_HassilNode):
         rules: Mapping[str, str],
         seen: frozenset[str],
         limit: int,
+        *,
+        fair: bool = False,
     ) -> tuple[str, ...]:
         """Expand node into all spoken text variants using slots and rules."""
         if self.name in seen:
@@ -1868,7 +1997,7 @@ class _HassilRuleNode(_HassilNode):
         if rule_text is None:
             return ()
         node = _parse_hassil(rule_text)
-        return node.expand(slot_values, rules, seen | {self.name}, limit)
+        return node.expand(slot_values, rules, seen | {self.name}, limit, fair=fair)
 
 
 class _HassilOptionalNode(_HassilNode):
@@ -1897,9 +2026,14 @@ class _HassilOptionalNode(_HassilNode):
         rules: Mapping[str, str],
         seen: frozenset[str],
         limit: int,
+        *,
+        fair: bool = False,
     ) -> tuple[str, ...]:
         """Expand node into all spoken text variants using slots and rules."""
-        return _unique_capped_with_empty(self.child.expand(slot_values, rules, seen, limit), limit)
+        return _unique_capped_with_empty(
+            self.child.expand(slot_values, rules, seen, limit, fair=fair),
+            limit,
+        )
 
 
 class _HassilAlternativeNode(_HassilNode):
@@ -1923,17 +2057,8 @@ class _HassilAlternativeNode(_HassilNode):
         limit: int,
     ) -> tuple[str, ...]:
         """Return unique literal word variants for this node."""
-        unique_variants: dict[str, None] = {}
-        for branch in self.branches:
-            remaining = limit - len(unique_variants)
-            if remaining < 1:
-                break
-            for var in branch.literal_variants(rules, seen, remaining):
-                if var not in unique_variants:
-                    unique_variants[var] = None
-                    if len(unique_variants) >= limit:
-                        break
-        return tuple(unique_variants.keys())
+        branch_variants = [branch.literal_variants(rules, seen, limit) for branch in self.branches]
+        return _interleave_unique_capped(branch_variants, limit)
 
     def expand(
         self,
@@ -1941,19 +2066,84 @@ class _HassilAlternativeNode(_HassilNode):
         rules: Mapping[str, str],
         seen: frozenset[str],
         limit: int,
+        *,
+        fair: bool = False,
     ) -> tuple[str, ...]:
         """Expand node into all spoken text variants using slots and rules."""
+        if fair:
+            branch_expansions = [
+                branch.expand(slot_values, rules, seen, limit, fair=True)
+                for branch in self.branches
+            ]
+            return _interleave_unique_capped(branch_expansions, limit)
         unique_expansions: dict[str, None] = {}
         for branch in self.branches:
             remaining = limit - len(unique_expansions)
             if remaining < 1:
                 break
-            for val in branch.expand(slot_values, rules, seen, remaining):
+            for val in branch.expand(slot_values, rules, seen, remaining, fair=False):
                 if val not in unique_expansions:
                     unique_expansions[val] = None
                     if len(unique_expansions) >= limit:
                         break
         return tuple(unique_expansions.keys())
+
+
+class _HassilPermutationNode(_HassilNode):
+    """AST node representing a HassIL permutation group."""
+
+    def __init__(self, branches: list[_HassilNode]):
+        """Initialize PermutationNode."""
+        self.branches = branches
+
+    def required_slots(self, rules: Mapping[str, str], seen: frozenset[str]) -> set[str]:
+        """Return slot names required by this node."""
+        required = set()
+        for branch in self.branches:
+            required.update(branch.required_slots(rules, seen))
+        return required
+
+    def literal_variants(
+        self,
+        rules: Mapping[str, str],
+        seen: frozenset[str],
+        limit: int,
+    ) -> tuple[str, ...]:
+        """Return unique literal word variants for this node."""
+        return self._permuted_texts(
+            [branch.literal_variants(rules, seen, limit) for branch in self.branches],
+            limit,
+        )
+
+    def expand(
+        self,
+        slot_values: Mapping[str, tuple[str, ...]],
+        rules: Mapping[str, str],
+        seen: frozenset[str],
+        limit: int,
+        *,
+        fair: bool = False,
+    ) -> tuple[str, ...]:
+        """Expand node into all spoken text variants using slots and rules."""
+        return self._permuted_texts(
+            [branch.expand(slot_values, rules, seen, limit, fair=fair) for branch in self.branches],
+            limit,
+        )
+
+    @staticmethod
+    def _permuted_texts(branch_fragments: list[tuple[str, ...]], limit: int) -> tuple[str, ...]:
+        """Return capped text variants for every branch order."""
+        if not branch_fragments:
+            return ("",)
+        unique: dict[str, None] = {}
+        for ordered_fragments in permutations(branch_fragments):
+            for fragments in product(*ordered_fragments):
+                text = " ".join(fragment.strip() for fragment in fragments if fragment.strip())
+                if text not in unique:
+                    unique[text] = None
+                    if len(unique) >= limit:
+                        return tuple(unique.keys())
+        return tuple(unique.keys())
 
 
 class _HassilSequenceNode(_HassilNode):
@@ -1974,6 +2164,8 @@ class _HassilSequenceNode(_HassilNode):
         self,
         child_fragments: list[tuple[str, ...]],
         limit: int,
+        *,
+        fair: bool,
     ) -> tuple[str, ...]:
         """Cartesian-product accumulation of child fragments with deduplication."""
         if not child_fragments:
@@ -1981,8 +2173,10 @@ class _HassilSequenceNode(_HassilNode):
         current = ("",)
         for fragments in child_fragments:
             next_results: dict[str, None] = {}
-            for prefix in current:
-                for fragment in fragments:
+            outer_values, inner_values = (fragments, current) if fair else (current, fragments)
+            for outer in outer_values:
+                for inner in inner_values:
+                    prefix, fragment = (inner, outer) if fair else (outer, inner)
                     combined = f"{prefix}{fragment}"
                     if combined not in next_results:
                         next_results[combined] = None
@@ -2005,7 +2199,7 @@ class _HassilSequenceNode(_HassilNode):
         if not self.children:
             return ("",)
         child_fragments = [child.literal_variants(rules, seen, limit) for child in self.children]
-        return self._accumulate(child_fragments, limit)
+        return self._accumulate(child_fragments, limit, fair=True)
 
     def expand(
         self,
@@ -2013,12 +2207,16 @@ class _HassilSequenceNode(_HassilNode):
         rules: Mapping[str, str],
         seen: frozenset[str],
         limit: int,
+        *,
+        fair: bool = False,
     ) -> tuple[str, ...]:
         """Expand node into all spoken text variants using slots and rules."""
         if not self.children:
             return ("",)
-        child_fragments = [child.expand(slot_values, rules, seen, limit) for child in self.children]
-        return self._accumulate(child_fragments, limit)
+        child_fragments = [
+            child.expand(slot_values, rules, seen, limit, fair=fair) for child in self.children
+        ]
+        return self._accumulate(child_fragments, limit, fair=fair)
 
 
 _PARSED_TEMPLATE_CACHE: dict[str, _HassilNode] = {}
@@ -2057,6 +2255,7 @@ def _parse_hassil_expr(text: str, i: int, close_char: str | None = None) -> tupl
     """Parse a Hassil expression from a given index."""
     current_branch: list[_HassilNode] = []
     branches: list[_HassilNode] = []
+    branch_separator: str | None = None
 
     while i < len(text):
         char = text[i]
@@ -2074,6 +2273,20 @@ def _parse_hassil_expr(text: str, i: int, close_char: str | None = None) -> tupl
                 child, i = _parse_hassil_expr(text, i + 1, ")")
                 current_branch.append(child)
             case "|":
+                if branch_separator == ";":
+                    current_branch.append(_HassilTextNode(char))
+                    i += 1
+                    continue
+                branch_separator = "|"
+                branches.append(_make_branch_node(current_branch))
+                current_branch = []
+                i += 1
+            case ";":
+                if branch_separator == "|":
+                    current_branch.append(_HassilTextNode(char))
+                    i += 1
+                    continue
+                branch_separator = ";"
                 branches.append(_make_branch_node(current_branch))
                 current_branch = []
                 i += 1
@@ -2093,6 +2306,8 @@ def _parse_hassil_expr(text: str, i: int, close_char: str | None = None) -> tupl
     branches.append(_make_branch_node(current_branch))
     if len(branches) == 1:
         return branches[0], i
+    if branch_separator == ";":
+        return _HassilPermutationNode(branches), i
     return _HassilAlternativeNode(branches), i
 
 
@@ -2112,21 +2327,65 @@ def _template_slot_names(
     seen_rules: frozenset[str] = frozenset(),
 ) -> frozenset[str]:
     """Return slot names referenced by a sentence template and its rules."""
-    slots = {match.group(1).split(":")[0].strip() for match in _SLOT_PATTERN.finditer(text)}
+    return frozenset(
+        reference.list_name
+        for reference in _template_slot_references(text, expansion_rules, seen_rules)
+    )
+
+
+def _template_slot_references(
+    text: str,
+    expansion_rules: Mapping[str, str],
+    seen_rules: frozenset[str] = frozenset(),
+) -> tuple[TemplateSlotReference, ...]:
+    """Return slot references from a sentence template and its rules."""
+    references: list[TemplateSlotReference] = []
+    seen_references: set[tuple[str, str]] = set()
+
+    def add_reference(reference: TemplateSlotReference) -> None:
+        if not reference.list_name:
+            return
+        key = (reference.list_name, reference.output_name)
+        if key in seen_references:
+            return
+        seen_references.add(key)
+        references.append(reference)
+
+    for match in _SLOT_PATTERN.finditer(text):
+        add_reference(_slot_reference(match.group(1)))
     for rule_match in _RULE_PATTERN.finditer(text):
         rule_name = rule_match.group(1).strip()
         if rule_name in seen_rules:
             continue
         rule_text = expansion_rules.get(rule_name)
         if rule_text is not None:
-            slots.update(
-                _template_slot_names(
-                    rule_text,
-                    expansion_rules,
-                    seen_rules | frozenset({rule_name}),
-                )
-            )
-    return frozenset(slots)
+            for reference in _template_slot_references(
+                rule_text,
+                expansion_rules,
+                seen_rules | frozenset({rule_name}),
+            ):
+                add_reference(reference)
+    return tuple(references)
+
+
+def _slot_reference(raw: str) -> TemplateSlotReference:
+    """Parse a HassIL slot reference into expansion list and output slot names."""
+    list_name, separator, output_name = raw.partition(":")
+    list_name = list_name.strip()
+    output_name = output_name.strip() if separator else list_name
+    return TemplateSlotReference(list_name=list_name, output_name=output_name or list_name)
+
+
+def _slot_output_names(
+    slot_references: Iterable[TemplateSlotReference],
+) -> dict[str, tuple[str, ...]]:
+    """Return output slot names keyed by expansion list name."""
+    output_names: dict[str, list[str]] = {}
+    for reference in slot_references:
+        names = output_names.setdefault(reference.list_name, [])
+        if reference.output_name not in names:
+            names.append(reference.output_name)
+    return {list_name: tuple(names) for list_name, names in output_names.items()}
 
 
 def _context_domains(data_item: Mapping[str, Any]) -> tuple[str, ...]:
@@ -2138,6 +2397,20 @@ def _context_domains(data_item: Mapping[str, Any]) -> tuple[str, ...]:
             continue
         domains.extend(_domain_values(context.get("domain")))
     return tuple(_deduplicate_texts(domains, len(domains) or 1))
+
+
+def _context_slot_names(data_item: Mapping[str, Any]) -> frozenset[str]:
+    """Return context keys that HassIL injects as slots."""
+    requires_context = data_item.get("requires_context", {})
+    if not isinstance(requires_context, Mapping):
+        return frozenset()
+    return frozenset(
+        slot_name
+        for slot_name, slot_config in requires_context.items()
+        if isinstance(slot_name, str)
+        and isinstance(slot_config, Mapping)
+        and slot_config.get("slot") is True
+    )
 
 
 def _domain_values(value: Any) -> Iterable[str]:
@@ -2165,6 +2438,27 @@ def _scoped_slot_values(
     return tuple(_deduplicate_texts(values, DEFAULT_MAX_CANDIDATES_PER_INTENT))
 
 
+def _effective_list_configs(
+    source_config: Mapping[str, Any],
+    intent_config: Mapping[str, Any],
+    data_item: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return HassIL-effective list configs by list name.
+
+    HassIL combines root/external lists with data-item lists by dictionary
+    override, so a later same-named list replaces the whole earlier list.
+    """
+    list_configs: dict[str, Any] = {}
+    for config in (source_config, intent_config, data_item):
+        lists = config.get("lists", {})
+        if not isinstance(lists, Mapping):
+            continue
+        for list_name, list_config in lists.items():
+            if isinstance(list_name, str):
+                list_configs[list_name] = list_config
+    return list_configs
+
+
 def _slot_values(
     source_config: Mapping[str, Any],
     intent_config: Mapping[str, Any],
@@ -2172,14 +2466,13 @@ def _slot_values(
 ) -> dict[str, tuple[str, ...]]:
     """Return available slot input values for template expansion."""
     values: dict[str, tuple[str, ...]] = {}
-    for config in (source_config, intent_config, data_item):
-        lists = config.get("lists", {})
-        if isinstance(lists, Mapping):
-            for list_name, list_config in lists.items():
-                if isinstance(list_name, str) and (
-                    extracted := tuple(_values_from_list_config(list_config, list_name))
-                ):
-                    values[list_name] = extracted
+    for list_name, list_config in _effective_list_configs(
+        source_config,
+        intent_config,
+        data_item,
+    ).items():
+        if extracted := tuple(_values_from_list_config(list_config, list_name)):
+            values[list_name] = extracted
     slots = data_item.get("slots", {})
     if isinstance(slots, Mapping):
         for slot_name, slot_value in slots.items():
@@ -2190,6 +2483,27 @@ def _slot_values(
             ):
                 values[slot_name] = extracted
     return values
+
+
+def _slot_output_value_maps(
+    source_config: Mapping[str, Any],
+    intent_config: Mapping[str, Any],
+    data_item: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Return spoken-input to output-value maps for text slot lists.
+
+    When a list appears in multiple config layers, later layers replace the
+    whole list, matching HassIL's effective slot-list precedence.
+    """
+    maps: dict[str, dict[str, Any]] = {}
+    for list_name, list_config in _effective_list_configs(
+        source_config,
+        intent_config,
+        data_item,
+    ).items():
+        if output_map := dict(_value_outputs_from_list_config(list_config, list_name)):
+            maps[list_name] = output_map
+    return maps
 
 
 def _static_slot_values(data_item: Mapping[str, Any]) -> dict[str, str]:
@@ -2228,7 +2542,8 @@ def _values_from_list_config(list_config: Any, list_name: str | None = None) -> 
             values = list_config.get("values", [])
             if isinstance(values, list):
                 for value in values:
-                    yield from _value_item_inputs(value)
+                    for input_value, _ in _value_item_input_outputs(value):
+                        yield input_value
             return
 
         if "range" in list_config:
@@ -2249,18 +2564,74 @@ def _values_from_list_config(list_config: Any, list_name: str | None = None) -> 
 
     if isinstance(list_config, list):
         for value in list_config:
-            yield from _value_item_inputs(value)
+            for input_value, _ in _value_item_input_outputs(value):
+                yield input_value
 
 
-def _value_item_inputs(value: Any) -> Iterable[str]:
-    """Yield spoken inputs from one list value item."""
+def _value_outputs_from_list_config(
+    list_config: Any,
+    list_name: str | None = None,
+) -> Iterable[tuple[str, Any]]:
+    """Yield spoken input to output value pairs from a Hassil list config."""
+    if isinstance(list_config, Mapping):
+        if "values" in list_config:
+            values = list_config.get("values", [])
+            if isinstance(values, list):
+                for value in values:
+                    yield from _value_item_input_outputs(value)
+            return
+
+        if "range" in list_config:
+            range_data = list_config["range"]
+            try:
+                from_val = range_data.get("from", 0)
+                to_val = range_data.get("to", 100)
+            except (AttributeError, ValueError, TypeError):
+                from_val = "1"
+                to_val = "100"
+            for value in (from_val, to_val):
+                text_value = str(value)
+                yield text_value, value
+            return
+
+        if list_config.get("wildcard"):
+            wildcard = list_name or "wildcard"
+            yield wildcard, wildcard
+            return
+
+    if isinstance(list_config, list):
+        for value in list_config:
+            yield from _value_item_input_outputs(value)
+
+
+def _value_item_input_outputs(value: Any) -> Iterable[tuple[str, Any]]:
+    """Yield expanded spoken inputs paired with one output value."""
     if isinstance(value, str):
-        yield value
+        for input_value in _expand_list_input_value(value):
+            yield input_value, input_value
         return
     if not isinstance(value, Mapping):
         return
-    input_value = value.get("in")
-    yield from _string_values(input_value)
+    output_value = value.get("out")
+    for raw_input in _string_values(value.get("in")):
+        expanded_inputs = tuple(_expand_list_input_value(raw_input))
+        for input_value in expanded_inputs:
+            yield input_value, output_value if "out" in value else input_value
+
+
+def _expand_list_input_value(value: str) -> Iterable[str]:
+    """Yield spoken variants from one text-list input value."""
+    if not value.strip():
+        return
+    if is_fixed_sentence(value):
+        yield _clean_expanded_text(value)
+        return
+    yield from expand_sentence_template(
+        value,
+        {},
+        {},
+        max_expansions=DEFAULT_MAX_CANDIDATES_PER_TEMPLATE,
+    )
 
 
 def _string_values(value: Any) -> Iterable[str]:

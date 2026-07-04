@@ -67,6 +67,8 @@ RUNTIME_SLOW_QUERY_LIMIT = 10
 MODE_ACCURACY = "accuracy"
 MODE_PERFORMANCE = "performance"
 BENCHMARK_MODES = (MODE_ACCURACY, MODE_PERFORMANCE)
+ACCURACY_REPORT_SCHEMA_VERSION = 1
+PERFORMANCE_REPORT_SCHEMA_VERSION = 1
 
 PROFILING_TARGETS = ("evaluate", "build_index", "rank", "runtime", "components", "all")
 GRANULARITY_LEVELS = ("coarse", "medium", "fine")
@@ -598,51 +600,92 @@ def _dataset_registry_slots(data: Mapping[str, Any], lang: str) -> dict[str, tup
     return slots
 
 
+def _validate_expected_slots(expected_slots: Any, path: str, index: int) -> dict[str, str]:
+    """Validate and return expected slots dict, checking that it's string->non-empty-string."""
+    if not isinstance(expected_slots, dict):
+        raise ValueError(f"{path}: test case #{index} expected_slots must be an object")
+    for key, value in expected_slots.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise ValueError(
+                f"{path}: test case #{index} expected_slots entry {key!r} must be string→string"
+            )
+        if not value.strip():
+            raise ValueError(
+                f"{path}: test case #{index} expected_slots entry {key!r} value is empty"
+            )
+    return expected_slots
+
+
+def _validate_context(
+    raw_context: Any, path: str, index: int
+) -> dict[str, str | int | float | bool]:
+    """Validate and return context dict, checking keys and scalar values."""
+    if not isinstance(raw_context, dict):
+        raise ValueError(f"{path}: test case #{index} context must be an object")
+    intent_context: dict[str, str | int | float | bool] = {}
+    for key, value in raw_context.items():
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError(f"{path}: test case #{index} context keys must be strings")
+        if not isinstance(value, (str, int, float, bool)):
+            raise ValueError(
+                f"{path}: test case #{index} context entry {key!r} "
+                "must be a string, number, or boolean"
+            )
+        if isinstance(value, str) and not value.strip():
+            raise ValueError(f"{path}: test case #{index} context entry {key!r} value is empty")
+        intent_context[key] = value
+    return intent_context
+
+
+def _validate_single_test_case(case: Any, lang: str, path: str, index: int) -> dict[str, Any]:
+    """Validate a single test case object and return its validated representation."""
+    if not isinstance(case, dict):
+        raise ValueError(f"{path}: test case #{index} must be an object")
+    required = ("query", "expected_intent", "expected_canonical", "category")
+    if missing := [
+        key for key in required if not isinstance(case.get(key), str) or not case[key].strip()
+    ]:
+        raise ValueError(f"{path}: test case #{index} missing fields: {missing}")
+    case_lang = case.get("language", lang)
+    if case_lang != lang:
+        raise ValueError(
+            f"{path}: test case #{index} language '{case_lang}' does not match dataset"
+        )
+    query = case["query"]
+    expected_intent = case["expected_intent"]
+    expected_canonical = case["expected_canonical"]
+
+    expected_slots = _validate_expected_slots(case.get("expected_slots", {}), path, index)
+    intent_context = _validate_context(case.get("context", {}), path, index)
+
+    validated_case = {
+        "query": query,
+        "expected_intent": expected_intent,
+        "expected_canonical": expected_canonical,
+        "expected_slots": expected_slots,
+        "category": case["category"],
+    }
+    if intent_context:
+        validated_case["context"] = intent_context
+    if "drift" in case:
+        validated_case["drift"] = case["drift"]
+    return validated_case
+
+
 def _validate_test_cases(test_cases: list[Any], lang: str, path: str) -> list[dict[str, Any]]:
     """Validate and return real-world test cases from one dataset."""
     validated: list[dict[str, Any]] = []
-    required = ("query", "expected_intent", "expected_canonical", "category")
     seen: set[tuple[str, str, str]] = set()
     for index, case in enumerate(test_cases, start=1):
-        if not isinstance(case, dict):
-            raise ValueError(f"{path}: test case #{index} must be an object")
-        if missing := [
-            key for key in required if not isinstance(case.get(key), str) or not case[key].strip()
-        ]:
-            raise ValueError(f"{path}: test case #{index} missing fields: {missing}")
-        case_lang = case.get("language", lang)
-        if case_lang != lang:
-            raise ValueError(
-                f"{path}: test case #{index} language '{case_lang}' does not match dataset"
-            )
-        query = case["query"]
-        expected_intent = case["expected_intent"]
-        expected_canonical = case["expected_canonical"]
-        expected_slots = case.get("expected_slots", {})
-        if not isinstance(expected_slots, dict):
-            raise ValueError(f"{path}: test case #{index} expected_slots must be an object")
-        for key, value in expected_slots.items():
-            if not isinstance(key, str) or not isinstance(value, str):
-                raise ValueError(
-                    f"{path}: test case #{index} expected_slots entry {key!r} must be string→string"
-                )
-            if not value.strip():
-                raise ValueError(
-                    f"{path}: test case #{index} expected_slots entry {key!r} value is empty"
-                )
-        dedup_key = (query, expected_intent, expected_canonical)
+        validated_case = _validate_single_test_case(case, lang, path, index)
+        dedup_key = (
+            validated_case["query"],
+            validated_case["expected_intent"],
+            validated_case["expected_canonical"],
+        )
         if dedup_key in seen:
             continue
         seen.add(dedup_key)
-        validated_case = {
-            "query": query,
-            "expected_intent": expected_intent,
-            "expected_canonical": expected_canonical,
-            "expected_slots": expected_slots,
-            "category": case["category"],
-        }
-        if "drift" in case:
-            validated_case["drift"] = case["drift"]
         validated.append(validated_case)
     return validated
 
@@ -698,13 +741,17 @@ def run_hassil_recognize_all(
     query: str,
     intents: hassil.intents.Intents,
     slot_lists: dict[str, hassil.intents.SlotList],
+    intent_context: Mapping[str, Any] | None = None,
 ) -> list[Any]:
     """Run HassIL recognize_all with lazy slot-list injection on MissingListError."""
     working_lists = dict(slot_lists)
     stubbed: set[str] = set()
     while True:
         try:
-            return list(hassil.recognize_all(query, intents, slot_lists=working_lists))
+            kwargs: dict[str, Any] = {"slot_lists": working_lists}
+            if intent_context:
+                kwargs["intent_context"] = dict(intent_context)
+            return list(hassil.recognize_all(query, intents, **kwargs))
         except hassil.errors.MissingListError as err:
             match = _MISSING_LIST_RE.search(str(err))
             if match is None:
@@ -863,6 +910,7 @@ class CategoryStats:
     intent_correct: int = 0
     slots_correct: int = 0
     intent_slots_correct: int = 0
+    top1_intent_slots_correct: int = 0
     fallback: int = 0
     latency_ms_total: float = 0.0
     drift: int = 0
@@ -897,6 +945,12 @@ class CategoryStats:
         return (self.intent_slots_correct / den * 100) if den else 0.0
 
     @property
+    def top1_intent_slot_accuracy(self) -> float:
+        """Return percentage of top-ranked candidates with correct intent+slots."""
+        den = self.total - self.drift
+        return (self.top1_intent_slots_correct / den * 100) if den else 0.0
+
+    @property
     def mismatch(self) -> int:
         """Return count of cases that are not fallback but still wrong."""
         return self.total - self.intent_slots_correct - self.fallback - self.drift
@@ -920,6 +974,7 @@ class CategoryStats:
         self.intent_correct += other.intent_correct
         self.slots_correct += other.slots_correct
         self.intent_slots_correct += other.intent_slots_correct
+        self.top1_intent_slots_correct += other.top1_intent_slots_correct
         self.fallback += other.fallback
         self.latency_ms_total += other.latency_ms_total
         self.drift += other.drift
@@ -932,6 +987,7 @@ class CategoryStats:
             "intent_correct": self.intent_correct,
             "slots_correct": self.slots_correct,
             "intent_slots_correct": self.intent_slots_correct,
+            "top1_intent_slots_correct": self.top1_intent_slots_correct,
             "fallback": self.fallback,
             "drift": self.drift,
             "mismatch": self.mismatch,
@@ -939,6 +995,7 @@ class CategoryStats:
             "intent_accuracy": self.intent_accuracy,
             "slots_accuracy": self.slots_accuracy,
             "intent_slot_accuracy": self.intent_slot_accuracy,
+            "top1_intent_slot_accuracy": self.top1_intent_slot_accuracy,
             "mismatch_rate": self.mismatch_rate,
             "fallback_rate": self.fallback_rate,
             "average_latency_ms": self.average_latency_ms,
@@ -1141,6 +1198,7 @@ def _get_actual_slots(
     query: str | None,
     hassil_intents: Any,
     hassil_slot_lists: dict[str, Any],
+    intent_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Extract slots from candidate text using HassIL, falling back to static slots."""
     if selected is None:
@@ -1148,7 +1206,12 @@ def _get_actual_slots(
     actual_text = selected.candidate.text
     if query is not None:
         actual_text = rehydrate_wildcard_text(actual_text, query, selected.candidate.language)
-    results = run_hassil_recognize_all(actual_text, hassil_intents, hassil_slot_lists)
+    results = run_hassil_recognize_all(
+        actual_text,
+        hassil_intents,
+        hassil_slot_lists,
+        intent_context,
+    )
     matching = [r for r in results if r.intent.name == selected.candidate.intent_name]
     if matching:
         return {name: entity.value for name, entity in matching[0].entities.items()}
@@ -1160,10 +1223,17 @@ def _case_actual_slots(
     query: str | None,
     hassil_intents: Any | None,
     hassil_slot_lists: dict[str, Any] | None,
+    intent_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return the slots observed for a selected case result."""
     if hassil_intents is not None and hassil_slot_lists is not None:
-        return _get_actual_slots(selected, query, hassil_intents, hassil_slot_lists)
+        return _get_actual_slots(
+            selected,
+            query,
+            hassil_intents,
+            hassil_slot_lists,
+            intent_context,
+        )
     return _slots_from_candidate(selected, query)
 
 
@@ -1218,6 +1288,44 @@ def _record_case_counters(
         stats.intent_slots_correct += 1
 
 
+def _record_top1_case_counter(
+    stats: CategoryStats,
+    ranked: tuple[RankedCandidate, ...] | None,
+    selected: RankedCandidate | None,
+    selected_slots: Mapping[str, Any],
+    expected_intent: str,
+    expected_slots: Sequence[Mapping[str, Any]],
+    *,
+    query: str | None,
+    language: str | None,
+    hassil_intents: Any | None,
+    hassil_slot_lists: dict[str, Any] | None,
+    intent_context: Mapping[str, Any] | None,
+) -> None:
+    """Record whether rank position 1 would have matched intent+slots."""
+    if not ranked:
+        return
+    top = ranked[0]
+    top_slots = (
+        dict(selected_slots)
+        if selected is top
+        else _case_actual_slots(
+            top,
+            query,
+            hassil_intents,
+            hassil_slot_lists,
+            intent_context,
+        )
+    )
+    lang = language or top.candidate.language
+    if _intents_match(top.candidate.intent_name, expected_intent) and _slots_match_any(
+        top_slots,
+        expected_slots,
+        language=lang,
+    ):
+        stats.top1_intent_slots_correct += 1
+
+
 def _case_failure_reason(canonical_ok: bool, intent_ok: bool, slots_ok: bool) -> str:
     """Return the joined mismatch reason labels for a completed case."""
     reasons = []
@@ -1243,12 +1351,32 @@ def _record_case_result(
     is_drift: bool = False,
     hassil_intents: Any | None = None,
     hassil_slot_lists: dict[str, Any] | None = None,
+    intent_context: Mapping[str, Any] | None = None,
 ) -> tuple[bool, str, dict[str, Any], RankedCandidate | None]:
     """Record one evaluated case and return whether it matched completely."""
     _record_case_attempt(stats, latency_ms, is_drift)
-    actual_slots = _case_actual_slots(selected, query, hassil_intents, hassil_slot_lists)
+    actual_slots = _case_actual_slots(
+        selected,
+        query,
+        hassil_intents,
+        hassil_slot_lists,
+        intent_context,
+    )
     if is_drift:
         return False, "drift", actual_slots, selected
+    _record_top1_case_counter(
+        stats,
+        ranked,
+        selected,
+        actual_slots,
+        expected_intent,
+        expected_slots,
+        query=query,
+        language=language,
+        hassil_intents=hassil_intents,
+        hassil_slot_lists=hassil_slot_lists,
+        intent_context=intent_context,
+    )
     if selected is None:
         stats.fallback += 1
         return False, "fallback", actual_slots, selected
@@ -1268,7 +1396,13 @@ def _record_case_result(
             is_intent_ok,
         )
         if selected is not original_selected:
-            actual_slots = _case_actual_slots(selected, query, hassil_intents, hassil_slot_lists)
+            actual_slots = _case_actual_slots(
+                selected,
+                query,
+                hassil_intents,
+                hassil_slot_lists,
+                intent_context,
+            )
 
     lang = language or (selected.candidate.language if selected else None)
     is_slots_ok = _slots_match_any(actual_slots, expected_slots, language=lang)
@@ -1315,6 +1449,7 @@ def _case_row(
         "mode": mode_name,
         "category": case["category"],
         "query": case["query"],
+        "context": dict(case.get("context", {})),
         "expected_canonical": case["expected_canonical"],
         "actual_canonical": actual_text,
         "expected_intent": case["expected_intent"],
@@ -1373,6 +1508,7 @@ def _failure_detail(
             "mode": mode_name,
             "category": case["category"],
             "query": case["query"],
+            "context": dict(case.get("context", {})),
             "reason": reason,
             "expected": case["expected_canonical"],
             "actual": None,
@@ -1390,6 +1526,7 @@ def _failure_detail(
         "mode": mode_name,
         "category": case["category"],
         "query": case["query"],
+        "context": dict(case.get("context", {})),
         "reason": reason,
         "expected": case["expected_canonical"],
         "actual": rehydrate_wildcard_text(
@@ -1487,16 +1624,21 @@ def _summary_payload(results: dict[str, dict[str, CategoryStats]]) -> dict[str, 
 def _print_summary_table(title: str, results: dict[str, dict[str, CategoryStats]]) -> None:
     """Print aggregate metrics for one language or the global run."""
     print(f"\n{title}")
-    print("-" * 166)
+    print("-" * 186)
     headers = (
-        f"{'Category':<24} | {'Total':<5} | "
-        f"{'Hass Acc':<17} | {'Lex Acc':<17} | "
-        f"{'Hass Mis':<17} | {'Lex Mis':<17} | "
-        f"{'Hass Fall':<17} | {'Lex Fall':<17} | "
+        f"{'Category':<24} | "
+        f"{'Total':<5} | "
+        f"{'Hass Acc':<17} | "
+        f"{'Lex Acc':<17} | "
+        f"{'Lex Top-1':<17} | "
+        f"{'Hass Mis':<17} | "
+        f"{'Lex Mis':<17} | "
+        f"{'Hass Fall':<17} | "
+        f"{'Lex Fall':<17} | "
         f"{'Lex ms':<8}"
     )
     print(headers)
-    print("-" * 166)
+    print("-" * 186)
     categories = sorted(results["lexical"].keys())
     for category in categories:
         hass_stats = results["hassil"].get(category, CategoryStats())
@@ -1507,6 +1649,7 @@ def _print_summary_table(title: str, results: dict[str, dict[str, CategoryStats]
             f"{category:<24} | {lex_stats.total:<5} | "
             f"{_metric_str(hass_stats.intent_slots_correct, hass_slots_den):<17} | "
             f"{_metric_str(lex_stats.intent_slots_correct, lex_slots_den):<17} | "
+            f"{_metric_str(lex_stats.top1_intent_slots_correct, lex_slots_den):<17} | "
             f"{_metric_str(hass_stats.mismatch, hass_slots_den):<17} | "
             f"{_metric_str(lex_stats.mismatch, lex_slots_den):<17} | "
             f"{_metric_str(hass_stats.fallback, hass_slots_den):<17} | "
@@ -1517,18 +1660,19 @@ def _print_summary_table(title: str, results: dict[str, dict[str, CategoryStats]
     lex_total = _aggregate_mode_stats(results, "lexical")
     hass_overall_den = hass_total.total - hass_total.drift
     lex_overall_den = lex_total.total - lex_total.drift
-    print("-" * 166)
+    print("-" * 186)
     print(
         f"{'Overall':<24} | {lex_total.total:<5} | "
         f"{_metric_str(hass_total.intent_slots_correct, hass_overall_den):<17} | "
         f"{_metric_str(lex_total.intent_slots_correct, lex_overall_den):<17} | "
+        f"{_metric_str(lex_total.top1_intent_slots_correct, lex_overall_den):<17} | "
         f"{_metric_str(hass_total.mismatch, hass_overall_den):<17} | "
         f"{_metric_str(lex_total.mismatch, lex_overall_den):<17} | "
         f"{_metric_str(hass_total.fallback, hass_overall_den):<17} | "
         f"{_metric_str(lex_total.fallback, lex_overall_den):<17} | "
         f"{lex_total.average_latency_ms:<8.1f}"
     )
-    print("-" * 166)
+    print("-" * 186)
 
 
 def _print_ablation_table(title: str, ablations: dict[str, dict[str, CategoryStats]]) -> None:
@@ -1565,6 +1709,8 @@ def _print_failure_details(failures: list[dict[str, Any]], failure_limit: int) -
             f"- [{item['mode']}][{item['category']}] {item['query']!r} "
             f"reason={item['reason']} final={final_score_str}"
         )
+        if item_context := item.get("context"):
+            print(f"  context={item_context}")
         print(
             f"  expected={item['expected']!r} ({item['expected_intent']}, "
             f"slots={item['expected_slots']})"
@@ -1582,6 +1728,7 @@ def _record_ablations(
     language: str | None = None,
     hassil_intents: Any | None = None,
     hassil_slot_lists: dict[str, Any] | None = None,
+    intent_context: Mapping[str, Any] | None = None,
 ) -> None:
     """Record component-only top-1 metrics for one ranked candidate set."""
     for component in ABLATION_COMPONENTS:
@@ -1597,6 +1744,7 @@ def _record_ablations(
             language=language,
             hassil_intents=hassil_intents,
             hassil_slot_lists=hassil_slot_lists,
+            intent_context=intent_context,
         )
 
 
@@ -1604,6 +1752,7 @@ def _markdown_metric(stats: Mapping[str, Any]) -> str:
     """Return a compact Markdown metric string."""
     return (
         f"{stats['intent_slot_accuracy']:.1f}% intent/slot, "
+        f"{stats.get('top1_intent_slot_accuracy', 0):.1f}% top-1, "
         f"{stats['canonical_accuracy']:.1f}% canonical, "
         f"{stats['mismatch_rate']:.1f}% mismatch, "
         f"{stats['fallback_rate']:.1f}% fallback"
@@ -1621,6 +1770,7 @@ class _MarkdownReportRow:
         "intent_slot_s",
         "lang",
         "mismatch_s",
+        "top1_s",
         "total_s",
     )
 
@@ -1630,6 +1780,7 @@ class _MarkdownReportRow:
         self.backticked_mode = f"`{mode_name}`"
         self.total_s = str(int(stats.get("total", 0)))
         self.intent_slot_s = f"{stats.get('intent_slot_accuracy', 0):.1f}%"
+        self.top1_s = f"{stats.get('top1_intent_slot_accuracy', 0):.1f}%"
         self.canonical_s = f"{stats.get('canonical_accuracy', 0):.1f}%"
         self.mismatch_s = f"{stats.get('mismatch_rate', 0):.1f}%"
         self.fallback_s = f"{stats.get('fallback_rate', 0):.1f}%"
@@ -1663,18 +1814,28 @@ def _markdown_data_row(row: _MarkdownReportRow, col_widths: list[int]) -> str:
         f" {row.backticked_mode:<{col_widths[0]}} ",
         f" {row.total_s:>{col_widths[1]}} ",
         f" {row.intent_slot_s:>{col_widths[2]}} ",
-        f" {row.canonical_s:>{col_widths[3]}} ",
-        f" {row.mismatch_s:>{col_widths[4]}} ",
-        f" {row.fallback_s:>{col_widths[5]}} ",
-        f" {row.avg_ms_s:>{col_widths[6]}} ",
+        f" {row.top1_s:>{col_widths[3]}} ",
+        f" {row.canonical_s:>{col_widths[4]}} ",
+        f" {row.mismatch_s:>{col_widths[5]}} ",
+        f" {row.fallback_s:>{col_widths[6]}} ",
+        f" {row.avg_ms_s:>{col_widths[7]}} ",
     )
     return "|" + "|".join(cols) + "|"
 
 
 def _markdown_report(report: Mapping[str, Any]) -> str:
     """Return a human-readable Markdown report with dynamically aligned columns."""
-    _headers = ("Mode", "Total", "Intent/Slot", "Canonical", "Mismatch", "Fallback", "Avg ms")
-    _col_aligns = ("<", ">", ">", ">", ">", ">", ">")
+    _headers = (
+        "Mode",
+        "Total",
+        "Intent/Slot",
+        "Top-1",
+        "Canonical",
+        "Mismatch",
+        "Fallback",
+        "Avg ms",
+    )
+    _col_aligns = ("<", ">", ">", ">", ">", ">", ">", ">")
     _col_widths: list[int] = [len(h) for h in _headers]
 
     _all_rows: list[_MarkdownReportRow] = []
@@ -1689,6 +1850,7 @@ def _markdown_report(report: Mapping[str, Any]) -> str:
                 row.backticked_mode,
                 row.total_s,
                 row.intent_slot_s,
+                row.top1_s,
                 row.canonical_s,
                 row.mismatch_s,
                 row.fallback_s,
@@ -1703,6 +1865,8 @@ def _markdown_report(report: Mapping[str, Any]) -> str:
     versions = _format_dependency_versions(report.get("dependency_versions", {}))
     lines = [
         "# Assist Canonicalizer Evaluation",
+        "",
+        f"**Report schema:** v{report.get('report_schema_version', 1)}",
         "",
         f"**Dependency versions:** {versions}",
         "",
@@ -1758,6 +1922,7 @@ def _text_report(report: Mapping[str, Any]) -> str:
     lines.extend(
         (
             f"Failure Detail Limit: {report.get('failure_limit', 0)}",
+            f"Report Schema: v{report.get('report_schema_version', 1)}",
             f"Dependency Versions: {versions}",
             "=" * 120,
         )
@@ -1839,6 +2004,7 @@ def _text_summary_table(title: str, payload: Mapping[str, Any]) -> list[str]:
         "Total",
         "Hass Acc",
         "Lex Acc",
+        "Lex Top-1",
         "Hass Mis",
         "Lex Mis",
         "Hass Fall",
@@ -1860,6 +2026,7 @@ def _text_summary_table(title: str, payload: Mapping[str, Any]) -> list[str]:
                 str(lex_total),
                 _metric_str(hass_cat.get("intent_slots_correct", 0), hass_cat.get("total", 0)),
                 _metric_str(lex_cat.get("intent_slots_correct", 0), lex_cat.get("total", 0)),
+                _metric_str(lex_cat.get("top1_intent_slots_correct", 0), lex_cat.get("total", 0)),
                 _metric_str(hass_cat.get("mismatch", 0), hass_cat.get("total", 0)),
                 _metric_str(lex_cat.get("mismatch", 0), lex_cat.get("total", 0)),
                 _metric_str(hass_cat.get("fallback", 0), hass_cat.get("total", 0)),
@@ -1875,6 +2042,10 @@ def _text_summary_table(title: str, payload: Mapping[str, Any]) -> list[str]:
         str(lex_overall.get("total", 0)),
         _metric_str(hass_overall.get("intent_slots_correct", 0), hass_overall.get("total", 0)),
         _metric_str(lex_overall.get("intent_slots_correct", 0), lex_overall.get("total", 0)),
+        _metric_str(
+            lex_overall.get("top1_intent_slots_correct", 0),
+            lex_overall.get("total", 0),
+        ),
         _metric_str(hass_overall.get("mismatch", 0), hass_overall.get("total", 0)),
         _metric_str(lex_overall.get("mismatch", 0), lex_overall.get("total", 0)),
         _metric_str(hass_overall.get("fallback", 0), hass_overall.get("total", 0)),
@@ -1948,7 +2119,13 @@ def _regenerate_case_expectations(
     if not expected_canonical or not expected_intent:
         return 0, False
 
-    results = run_hassil_recognize_all(expected_canonical, hassil_intents, hassil_slot_lists)
+    intent_context = case.get("context")
+    results = run_hassil_recognize_all(
+        expected_canonical,
+        hassil_intents,
+        hassil_slot_lists,
+        intent_context,
+    )
     matching = [r for r in results if r.intent.name == expected_intent]
     if not matching:
         query_val = case.get("query")
@@ -2086,13 +2263,23 @@ def _evaluate_mode_candidates(
     expected_canonical: str,
     expected_intent: str,
     expected_slots: Sequence[Mapping[str, Any]],
+    intent_context: Mapping[str, Any] | None = None,
 ) -> tuple[RankedCandidate, ...]:
     """Run candidate generation and ranking for the given mode."""
     if mode_name != "hassil":
         return runtime.rank_with_dynamic_candidates(
-            lang, index, query, slot_preferences=benchmark_slot_prefs
+            lang,
+            index,
+            query,
+            slot_preferences=benchmark_slot_prefs,
+            intent_context=intent_context,
         )
-    res_list = run_hassil_recognize_all(query, hassil_intents, hassil_slot_lists)
+    res_list = run_hassil_recognize_all(
+        query,
+        hassil_intents,
+        hassil_slot_lists,
+        intent_context,
+    )
     res = None
     for r in res_list:
         actual_slots = {name: entity.value for name, entity in r.entities.items()}
@@ -2142,9 +2329,15 @@ def _evaluate_case(
     expected_canonical = case["expected_canonical"]
     expected_intent = case["expected_intent"]
     static_slots = case.get("expected_slots", {})
+    intent_context = case.get("context")
 
     # Resolve expected slots dynamically using HassIL on the clean canonical text
-    results = run_hassil_recognize_all(expected_canonical, hassil_intents, hassil_slot_lists)
+    results = run_hassil_recognize_all(
+        expected_canonical,
+        hassil_intents,
+        hassil_slot_lists,
+        intent_context,
+    )
     matching = [r for r in results if _intents_match(r.intent.name, expected_intent)]
 
     is_drift = case.get("drift", False)
@@ -2168,6 +2361,7 @@ def _evaluate_case(
         expected_canonical,
         expected_intent,
         expected_slots,
+        intent_context,
     )
 
     selected, gate = _select_accepted_with_gate(ranked)
@@ -2185,6 +2379,7 @@ def _evaluate_case(
         is_drift=is_drift,
         hassil_intents=hassil_intents,
         hassil_slot_lists=hassil_slot_lists,
+        intent_context=intent_context,
     )
     row = _case_row(
         lang,
@@ -2335,6 +2530,7 @@ def _evaluate_language_mode(
                 language=context.language,
                 hassil_intents=context.hassil_intents,
                 hassil_slot_lists=context.hassil_slot_lists,
+                intent_context=case.get("context"),
             )
         if not result.is_ok:
             failures.append(
@@ -2468,6 +2664,8 @@ async def run_evaluation(
     all_case_rows: list[dict[str, Any]] = []
     benchmark_slot_prefs = _load_benchmark_slot_preferences(datasets)
     report: dict[str, Any] = {
+        "report_schema": "assist_canonicalizer_accuracy",
+        "report_schema_version": ACCURACY_REPORT_SCHEMA_VERSION,
         "languages": {},
         "datasets_dir": datasets_dir,
         "total_languages": len(datasets),
@@ -2951,6 +3149,7 @@ class ReportGenerator:
         print("\n" + "=" * 90)
         print("ALGORITHMIC PERFORMANCE PROFILING REPORT")
         print("=" * 90)
+        print(f"Report Schema:   v{report.get('report_schema_version', 1)}")
         print(f"Target:          {report.get('target', 'unknown')}")
         print(f"Iterations:      {report.get('iterations', 0)}")
         print(f"Warmup:          {report.get('warmup', 0)}")
@@ -3033,6 +3232,7 @@ class ReportGenerator:
         lines: list[str] = [
             "# Assist Canonicalizer - Algorithmic Performance Profile",
             "",
+            f"**Report schema:** v{report.get('report_schema_version', 1)}  ",
             f"**Target:** `{report.get('target', 'unknown')}`  ",
             f"**Iterations:** {report.get('iterations', 0)} | "
             f"**Warmup:** {report.get('warmup', 0)} | "
@@ -3253,6 +3453,7 @@ class ReportGenerator:
         lines: list[str] = [
             "ALGORITHMIC PERFORMANCE PROFILING REPORT",
             "=" * 80,
+            f"Report Schema: v{report.get('report_schema_version', 1)}",
             f"Target: {report.get('target', 'unknown')}",
             f"Iterations: {report.get('iterations', 0)}",
             f"Warmup: {report.get('warmup', 0)}",
@@ -4763,6 +4964,8 @@ def _build_report(
 ) -> dict[str, Any]:
     """Construct a unified report dict by combining timers, monitor data and baseline comparison."""
     report: dict[str, Any] = {
+        "report_schema": "assist_canonicalizer_performance",
+        "report_schema_version": PERFORMANCE_REPORT_SCHEMA_VERSION,
         "target": target,
         "iterations": iterations,
         "warmup": warmup,
@@ -4934,6 +5137,8 @@ def _write_profile_all_markdown(all_reports: dict[str, Any], path: str) -> None:
         "This report aggregates performance statistics across all measured profiling targets.",
         "",
         *(
+            f"**Report schema:** v{PERFORMANCE_REPORT_SCHEMA_VERSION}",
+            "",
             f"**Dependency versions:** {_format_dependency_versions(dependency_versions)}",
             "",
         ),
@@ -5037,6 +5242,7 @@ def _write_profile_all_text(all_reports: dict[str, Any], path: str) -> None:
     lines: list[str] = [
         "ALGORITHMIC PERFORMANCE PROFILING REPORT (ALL TARGETS)",
         "=" * 90,
+        f"Report Schema: v{PERFORMANCE_REPORT_SCHEMA_VERSION}",
         f"Dependency Versions: {dependency_versions}",
         "",
     ]

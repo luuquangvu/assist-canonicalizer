@@ -39,6 +39,7 @@ from custom_components.assist_canonicalizer.rehydration import (
 )
 from custom_components.assist_canonicalizer.utils import (
     normalize_language,
+    register_custom_wildcards_from_sources,
     wildcard_slot_names,
     wildcard_slot_names_sorted,
 )
@@ -67,6 +68,30 @@ def test_wildcard_slot_names_import_error_stability() -> None:
             assert wildcard_slot_names("en") == frozenset()
         finally:
             wildcard_slot_names.cache_clear()
+
+
+def test_wildcard_slot_names_cache_clear_can_scope_custom_language() -> None:
+    """Scoped cache clearing should not drop other languages' custom wildcards."""
+    wildcard_slot_names.cache_clear()
+    try:
+        register_custom_wildcards_from_sources(
+            "xx-one",
+            {"custom": {"lists": {"one_custom_wildcard": {"wildcard": True}}}},
+        )
+        register_custom_wildcards_from_sources(
+            "xx-two",
+            {"custom": {"lists": {"two_custom_wildcard": {"wildcard": True}}}},
+        )
+
+        assert "one_custom_wildcard" in wildcard_slot_names("xx-one")
+        assert "two_custom_wildcard" in wildcard_slot_names("xx-two")
+
+        wildcard_slot_names.cache_clear("xx-one")
+
+        assert "one_custom_wildcard" not in wildcard_slot_names("xx-one")
+        assert "two_custom_wildcard" in wildcard_slot_names("xx-two")
+    finally:
+        wildcard_slot_names.cache_clear()
 
 
 def test_wildcard_slot_names_exceptions_and_types_stability() -> None:
@@ -440,95 +465,86 @@ def test_bm25_stability() -> None:
         full_index.score_custom_documents("query", ("doc1",), b=1.5)
 
 
-def test_config_flow_available_fallback_agents_no_agents_stability() -> None:
-    """Verify config flow queries fail gracefully when conversation is absent."""
-    with patch(
-        "custom_components.assist_canonicalizer.config_flow._HAS_CONVERSATION_AGENTS", False
-    ):
-        assert cf._available_fallback_agents(MagicMock(), None) == {}
-
-
 def test_config_flow_available_fallback_agents_filtering_stability(
     fallback_agent_manager_factory: Any,
     mock_conversation_entity_type: type,
 ) -> None:
     """Verify fallback agent choices filter unavailable, entity, or excluded agents."""
-    with patch("custom_components.assist_canonicalizer.config_flow._HAS_CONVERSATION_AGENTS", True):
 
-        class MockEntity:
-            """Mock Entity representation for test purposes."""
+    class MockEntity:
+        """Mock Entity representation for test purposes."""
 
-            def __init__(
-                self,
-                entity_id: str | None,
-                name: str | None = None,
-                unique_id: str | None = None,
-                registry_entry: Any = None,
-            ) -> None:
-                """Initialize mock entity attributes."""
-                self.entity_id = entity_id
-                self.name = name
-                self.unique_id = unique_id
-                self.registry_entry = registry_entry
+        def __init__(
+            self,
+            entity_id: str | None,
+            name: str | None = None,
+            unique_id: str | None = None,
+            registry_entry: Any = None,
+        ) -> None:
+            """Initialize mock entity attributes."""
+            self.entity_id = entity_id
+            self.name = name
+            self.unique_id = unique_id
+            self.registry_entry = registry_entry
 
-        class MockState:
-            """Mock State representation for test purposes."""
+    class MockState:
+        """Mock State representation for test purposes."""
 
-            def __init__(self, name: str) -> None:
-                """Initialize mock state."""
-                self.name = name
+        def __init__(self, name: str) -> None:
+            """Initialize mock state."""
+            self.name = name
 
-        class MockStates:
-            """Mock States collection for test purposes."""
+    class MockStates:
+        """Mock States collection for test purposes."""
 
-            def get(self, entity_id: str) -> MockState | None:
-                """Get state representation by entity_id."""
-                if entity_id == "conversation.state_name":
-                    return MockState("State Name Agent")
-                return None
+        def get(self, entity_id: str) -> MockState | None:
+            """Get state representation by entity_id."""
+            if entity_id == "conversation.state_name":
+                return MockState("State Name Agent")
+            return None
 
-        hass = MagicMock()
-        hass.states = MockStates()
+    hass = MagicMock()
+    hass.states = MockStates()
 
-        entity_component = MagicMock()
-        entity_component.entities = [
-            MockEntity(None),
-            MockEntity(""),
-            MockEntity("conversation.excluded", unique_id="conversation.excluded"),
-            MockEntity("conversation.state_name", name="Ignored Name"),
-            MockEntity(
-                "conversation.registered",
-                name="Registered Agent",
-                registry_entry=MagicMock(config_entry_id="conversation.excluded"),
-            ),
-        ]
-        hass.data = {cf.DATA_COMPONENT: entity_component}
+    entity_component = MagicMock()
+    entity_component.entities = [
+        MockEntity(None),
+        MockEntity(""),
+        MockEntity("conversation.excluded", unique_id="conversation.excluded"),
+        MockEntity("conversation.state_name", name="Ignored Name"),
+        MockEntity(
+            "conversation.registered",
+            name="Registered Agent",
+            registry_entry=MagicMock(config_entry_id="conversation.excluded"),
+        ),
+    ]
+    hass.data = {cf.DATA_COMPONENT: entity_component}
 
-        manager = fallback_agent_manager_factory(
-            [
-                SimpleNamespace(id=None, name="No ID"),
-                SimpleNamespace(id="conversation.excluded", name="Excluded"),
-                SimpleNamespace(id="conversation.entry_agent", name="Entry Agent"),
-                SimpleNamespace(id="conversation.entity_agent", name="Entity Agent"),
-            ],
-            {"conversation.entity_agent": mock_conversation_entity_type()},
-        )
+    manager = fallback_agent_manager_factory(
+        [
+            SimpleNamespace(id=None, name="No ID"),
+            SimpleNamespace(id="conversation.excluded", name="Excluded"),
+            SimpleNamespace(id="conversation.entry_agent", name="Entry Agent"),
+            SimpleNamespace(id="conversation.entity_agent", name="Entity Agent"),
+        ],
+        {"conversation.entity_agent": mock_conversation_entity_type()},
+    )
 
-        with (
-            patch(
-                "custom_components.assist_canonicalizer.config_flow.get_agent_manager",
-                return_value=manager,
-            ),
-            patch(
-                "custom_components.assist_canonicalizer.config_flow.ConversationEntity",
-                mock_conversation_entity_type,
-            ),
-        ):
-            choices = cf._available_fallback_agents(hass, "conversation.excluded")
+    with (
+        patch(
+            "custom_components.assist_canonicalizer.config_flow.get_agent_manager",
+            return_value=manager,
+        ),
+        patch(
+            "custom_components.assist_canonicalizer.config_flow.ConversationEntity",
+            mock_conversation_entity_type,
+        ),
+    ):
+        choices = cf._available_fallback_agents(hass, "conversation.excluded")
 
-            assert "conversation.state_name" in choices
-            assert choices["conversation.state_name"] == "State Name Agent"
-            assert "conversation.entry_agent" in choices
-            assert choices["conversation.entry_agent"] == "Entry Agent"
-            assert "conversation.registered" not in choices
-            assert "conversation.entity_agent" not in choices
+        assert "conversation.state_name" in choices
+        assert choices["conversation.state_name"] == "State Name Agent"
+        assert "conversation.entry_agent" in choices
+        assert choices["conversation.entry_agent"] == "Entry Agent"
+        assert "conversation.registered" not in choices
+        assert "conversation.entity_agent" not in choices
