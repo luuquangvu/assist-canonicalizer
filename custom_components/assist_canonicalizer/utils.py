@@ -3,14 +3,41 @@
 from __future__ import annotations
 
 import contextlib
+import re
 from collections.abc import Mapping
 from functools import lru_cache
+from math import isclose
+from string import whitespace
 from time import monotonic
 from typing import Any
 
 from .builtin_intents import language_variant_for
-from .const import CONF_MIN_CONFIDENCE, CONF_MIN_MARGIN, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_MARGIN
+from .const import (
+    CONF_MIN_CONFIDENCE,
+    CONF_MIN_MARGIN,
+    DEFAULT_MIN_CONFIDENCE,
+    DEFAULT_MIN_MARGIN,
+    PRESERVED_UNIT_SUFFIXES,
+)
 from .normalization import normalize_text
+
+_RANGE_EPSILON = 1e-9  # Tolerance for float comparison when validating range values.
+_HALVES_FRACTIONS = (0.0, 0.5)  # Permitted fractional offsets when set to "halves".
+_TENTHS_FRACTIONS = (
+    0.0,
+    0.1,
+    0.2,
+    0.3,
+    0.4,
+    0.5,
+    0.6,
+    0.7,
+    0.8,
+    0.9,
+)  # Permitted fractional offsets when set to "tenths".
+
+_STRIPPED_CHARS = "".join(PRESERVED_UNIT_SUFFIXES) + whitespace
+_HAS_DIGIT_RE = re.compile(r"\d")
 
 _CUSTOM_WILDCARD_SLOTS: dict[str, set[str]] = {}
 NormalizedIntentContext = Mapping[str, frozenset[str]]
@@ -195,3 +222,67 @@ def wildcard_slot_names_sorted(language: str | None = None) -> tuple[str, ...]:
     """Return all known wildcard slot names sorted by length descending (cached)."""
     names = wildcard_slot_names(language)
     return tuple(sorted(names, key=len, reverse=True))
+
+
+@lru_cache(maxsize=1024)
+def parse_float(val_str: str) -> float | None:
+    """Parse a string to float with a fast character check to avoid exceptions.
+
+    This function aligns with the placeholder-based normalization in `normalization.py`.
+    It strips trailing unit suffixes (e.g. '°' or '%') using `_STRIPPED_CHARS` (which
+    inherits from `PRESERVED_UNIT_SUFFIXES`) and handles both comma and dot decimal
+    separators by normalizing them to standard Python floats (replacing ',' with '.').
+    """
+    if not isinstance(val_str, str):
+        return None
+    if _HAS_DIGIT_RE.search(val_str) is None:
+        return None
+    val_str = val_str.strip().rstrip(_STRIPPED_CHARS)
+    if not val_str:
+        return None
+    with contextlib.suppress(ValueError):
+        return float(val_str.replace(",", "."))
+
+
+def is_valid_range_value(
+    val: float,
+    from_val: float,
+    step: float | None,
+    fraction_type: str | None,
+) -> bool:
+    """Return True if a float value satisfies range step and fraction constraints.
+
+    A value is valid if it lies on a grid defined by:
+        val = from_val + (k * step) + fraction_offset
+    where k is an integer, and fraction_offset is one of the allowed offsets
+    based on the fraction_type (e.g. halves or tenths).
+
+    Note: When `step` is `None` (omitted in intent configuration), it defaults to a step
+    size of 1.0. This enforces an integer grid relative to `from_val` (e.g. accepting 7
+    but rejecting 7.3), strictly aligning with HassIL range list specification matching logic.
+
+    Tolerance check uses absolute tolerance (`_RANGE_EPSILON` = 1e-9) to determine
+    closeness to the grid.
+    """
+    if step is not None and isclose(step, 0.0):
+        return False
+    s = step if step is not None else 1.0
+    if fraction_type == "halves":
+        fractions = _HALVES_FRACTIONS
+    elif fraction_type == "tenths":
+        fractions = _TENTHS_FRACTIONS
+    else:
+        fractions = (0.0,)
+
+    # Check if the remaining difference after subtracting each fraction offset
+    # is a multiple of the step size (i.e. diff / step is close to an integer).
+    for f in fractions:
+        diff = val - f - from_val
+        if isclose(diff / s, round(diff / s), abs_tol=_RANGE_EPSILON):
+            return True
+    return False
+
+
+def to_output_value(val_float: float) -> int | float:
+    """Convert float value to int if it represents an integer, else return float."""
+    return int(val_float) if val_float.is_integer() else val_float

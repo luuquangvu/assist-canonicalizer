@@ -14,7 +14,7 @@ import orjson
 from rapidfuzz import fuzz
 
 from .bm25 import BM25Index
-from .candidate import Candidate
+from .candidate import Candidate, candidate_raw_slot_map
 from .const import (
     BM25_WEIGHT,
     CHAR_NGRAM_WEIGHT,
@@ -31,6 +31,7 @@ from .const import (
     INTENT_ACTION_WEIGHT,
     LOCATION_SLOT_NAME_SET,
     NON_ENTITY_PENALTY_BLEND,
+    NUMERIC_SLOT_MISMATCH_PENALTY,
     NUMERIC_SLOT_WITHOUT_QUERY_PENALTY,
     POSITIONAL_FUZZY_TOKEN_MAX_LENGTH_RATIO,
     POSITIONAL_SIMILARITY_BASE_THRESHOLD,
@@ -63,7 +64,12 @@ from .normalization import (
     normalize_text_no_diacritics,
 )
 from .rehydration import get_wildcard_rehydration, wildcard_variants_analysis
-from .utils import NormalizedIntentContext, normalize_intent_context, normalized_slot_value_tokens
+from .utils import (
+    NormalizedIntentContext,
+    normalize_intent_context,
+    normalized_slot_value_tokens,
+    parse_float,
+)
 
 _LiteralVariantAnalysis = list[tuple[int, int, list[frozenset[str]]]]
 _KNOWN_OPPOSING_INTENT_TIE_PAIRS: tuple[tuple[str, str], ...] = (
@@ -82,6 +88,7 @@ _KNOWN_OPPOSING_INTENT_TIE_PREFERENCES: Mapping[frozenset[str], Mapping[str, int
     for preferred_intent, other_intent in _KNOWN_OPPOSING_INTENT_TIE_PAIRS
 }
 _STRUCTURAL_TIE_ABS_TOLERANCE = 1e-12
+_NUMERIC_MATCH_ABS_TOLERANCE = 1e-5
 
 
 @dataclass(frozen=True, slots=True)
@@ -839,6 +846,64 @@ def _has_unanchored_numeric_slot(
     )
 
 
+def _query_numeric_values(query_tokens: frozenset[str]) -> set[float]:
+    """Extract all numeric values from query tokens."""
+    vals = set()
+    for token in query_tokens:
+        val = parse_float(token)
+        if val is not None:
+            vals.add(val)
+    return vals
+
+
+def _has_numeric_slot_mismatch(
+    candidate: Candidate,
+    slots_dict: Mapping[str, Any],
+    query_numbers: set[float],
+    static_slots: frozenset[str],
+) -> bool:
+    """Return whether any dynamic numeric slot value does not match any query number.
+
+    To verify if slot numbers match the query numbers:
+    1. We extract dynamic (non-static) slots.
+    2. We prefer looking up the original spoken text from `slots_raw` (which maps to
+       the unmultiplied raw spoken token) so that multipliers (e.g. converting
+       "volume down by 20" to a slot value of -20) do not cause a false-positive mismatch.
+    3. If `slots_raw` is not populated, we fall back to checking both the output value
+       and its negation (e.g., matching `-20` against `20`) to handle multipliers.
+    """
+    if not query_numbers:
+        return False
+
+    raw_slots_dict = candidate_raw_slot_map(candidate)
+    dynamic_numeric_values = []
+    for name, value in slots_dict.items():
+        if name in static_slots:
+            continue
+        # Get raw value if available, else fall back to multiplied output value
+        raw_val = raw_slots_dict.get(name, value)
+        val_float = None
+        if isinstance(raw_val, str):
+            val_float = parse_float(raw_val)
+        elif isinstance(raw_val, (int, float)) and not isinstance(raw_val, bool):
+            val_float = float(raw_val)
+
+        if val_float is not None:
+            dynamic_numeric_values.append(val_float)
+
+    if not dynamic_numeric_values:
+        return False
+
+    return any(
+        not any(
+            isclose(q_num, val, abs_tol=_NUMERIC_MATCH_ABS_TOLERANCE)
+            or isclose(q_num, -val, abs_tol=_NUMERIC_MATCH_ABS_TOLERANCE)
+            for q_num in query_numbers
+        )
+        for val in dynamic_numeric_values
+    )
+
+
 def _has_unanchored_entity_slot(
     slots: Mapping[str, Any],
     static_slots: frozenset[str],
@@ -1077,6 +1142,7 @@ def rank_candidates(
     ) = _rank_query_setup(query_normalized, positional_literal_tokens)
     normalized_context = normalize_intent_context(intent_context)
     query_has_number = _has_numeric_query_token(query_tokens)
+    query_numbers = _query_numeric_values(query_tokens)
     intent_score_cache: dict[tuple[frozenset[str], ...], float] = {}
 
     max_raw_score = 0.0
@@ -1364,6 +1430,8 @@ def rank_candidates(
                 query_has_number=query_has_number,
             ):
                 combined *= NUMERIC_SLOT_WITHOUT_QUERY_PENALTY
+            if _has_numeric_slot_mismatch(candidate, slots, query_numbers, static_slots):
+                combined *= NUMERIC_SLOT_MISMATCH_PENALTY
             if _has_unanchored_entity_slot(slots, static_slots, query_tokens_tuple):
                 combined *= UNANCHORED_ENTITY_SLOT_PENALTY
             if _has_entity_only_uncovered_query_tokens(

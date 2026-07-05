@@ -6,10 +6,15 @@ import re
 import unicodedata
 from functools import lru_cache
 
-from .const import GENERIC_LATIN_REPLACEMENTS, LANGUAGE_SPECIFIC_OVERRIDES
+from .const import (
+    GENERIC_LATIN_REPLACEMENTS,
+    LANGUAGE_SPECIFIC_OVERRIDES,
+    PRESERVED_UNIT_SUFFIXES,
+)
 
 _PUNCTUATION_RE = re.compile(r"[^\w\s]", re.UNICODE)
 _WHITESPACE_RE = re.compile(r"\s+")
+_HAS_DIGIT_RE = re.compile(r"\d")
 
 # Precomputed BMP translation table that deletes all Unicode combining marks.
 # Built once at import; covers all diacritics used by DE, EN, FR, NL, VI and
@@ -23,9 +28,106 @@ _COMBINING_TABLE: dict[int, None] = {
 _GENERIC_LATIN_CHARS: frozenset[str] = frozenset(GENERIC_LATIN_REPLACEMENTS)
 
 
+def _make_placeholder(name: str) -> str:
+    """Generate a highly unique placeholder to temporarily represent preserved punctuation.
+
+    The prefix '__ASSIST_CANONICALIZER_' and suffix '__' ensure that these internal
+    placeholders do not collide with any valid user input sentences.
+    """
+    return f"__ASSIST_CANONICALIZER_{name}__"
+
+
+# Regex patterns to find and temporarily replace punctuation in their proper contexts:
+# - Decimal/comma floats: 27.5, 20,5
+# - Temperature degrees: 27° or 27 °
+# - Percentage: 50% or 50 %
+# - Timer colon/hyphen: 12:30, 10-15
+class _PunctuationPlaceholderManager:
+    """Manages context-aware punctuation placeholders during normalization.
+
+    Translates special characters (e.g. decimal points, suffixes, colons, hyphens) to
+    unique placeholders before punctuation stripping, and restores them afterwards.
+
+    This ensures that:
+    1. Decimals (both dots '.' and commas ',') are preserved in numbers so they can be
+       parsed by `parse_float` during range-slot resolution.
+    2. Suffixes (defined in `PRESERVED_UNIT_SUFFIXES` in `const.py`, currently '°' and '%')
+       remain attached to numbers during normalization to avoid being stripped as normal
+       punctuation, maintaining alignment during lexical matching.
+    3. They are subsequently stripped inside `parse_float` when converting tokens to actual
+       floats for range check validation.
+    """
+
+    def __init__(self) -> None:
+        """Initialize the pre-compiled regex patterns for punctuation placeholders."""
+        self.placeholders: list[tuple[re.Pattern[str], str, str, str]] = [
+            (
+                re.compile(r"(?<!\w)\.(?=\d)|(?<=\d)\.(?=\d)"),
+                _make_placeholder("F_DOT"),
+                _make_placeholder("F_DOT"),
+                ".",
+            ),
+            (
+                re.compile(r"(?<!\w),(?=\d)|(?<=\d),(?=\d)"),
+                _make_placeholder("F_COMMA"),
+                _make_placeholder("F_COMMA"),
+                ",",
+            ),
+            (
+                re.compile(r"(?<=\d):(?=\d)"),
+                _make_placeholder("T_COLON"),
+                _make_placeholder("T_COLON"),
+                ":",
+            ),
+            (
+                re.compile(r"(?<=\d)-(?=\d)"),
+                _make_placeholder("T_HYPHEN"),
+                _make_placeholder("T_HYPHEN"),
+                "-",
+            ),
+            (
+                re.compile(r"(?<!\w)-(?=\d)"),
+                _make_placeholder("N_MINUS"),
+                _make_placeholder("N_MINUS"),
+                "-",
+            ),
+        ]
+        for _char, _name in PRESERVED_UNIT_SUFFIXES.items():
+            _pl = _make_placeholder(_name)
+            self.placeholders.append(
+                (re.compile(r"(?<=\d)(\s*)" + re.escape(_char)), r"\1" + _pl, _pl, _char)
+            )
+
+    def apply(self, text: str) -> str:
+        """Apply temporary placeholders to the text before stripping punctuation."""
+        for pattern, replacement, _, _ in self.placeholders:
+            text = pattern.sub(replacement, text)
+        return text
+
+    def restore(self, text: str) -> str:
+        """Restore original punctuation characters from their temporary placeholders."""
+        for _, _, placeholder, restore_val in self.placeholders:
+            text = text.replace(placeholder, restore_val)
+        return text
+
+
+_PLACEHOLDER_MANAGER = _PunctuationPlaceholderManager()
+
+
 def normalize_text(text: str) -> str:
-    """Normalize text without applying language-specific rules."""
+    """Normalize text without applying language-specific rules.
+
+    We preserve numeric punctuation (decimals, degrees, percentages, signs) using
+    placeholders before stripping normal punctuation. This ensures numeric values
+    in canonicalized templates correctly match numeric values in input queries.
+    """
     normalized = unicodedata.normalize("NFKC", text).casefold()
+    if _HAS_DIGIT_RE.search(normalized) is not None:
+        with_placeholders = _PLACEHOLDER_MANAGER.apply(normalized)
+        without_punctuation = _PUNCTUATION_RE.sub(" ", with_placeholders)
+        collapsed = _WHITESPACE_RE.sub(" ", without_punctuation).strip()
+        return _PLACEHOLDER_MANAGER.restore(collapsed)
+
     without_punctuation = _PUNCTUATION_RE.sub(" ", normalized)
     return _WHITESPACE_RE.sub(" ", without_punctuation).strip()
 

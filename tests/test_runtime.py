@@ -772,6 +772,110 @@ def _test_runtime_registry_snapshot_update_replaces_dynamic_aliases(
     assert ranked[0].candidate.normalized_text == query
 
 
+def test_rank_with_dynamic_candidates_preserves_decimal_range_selection() -> None:
+    """Do not let normalized decimal tokens demote the matching range candidate."""
+    intent_sources: dict[str, Mapping[str, Any]] = {
+        "builtin": {
+            "lists": {
+                "temperature": {
+                    "range": {
+                        "type": "temperature",
+                        "from": 0,
+                        "to": 100,
+                        "fractions": "halves",
+                    }
+                }
+            },
+            "intents": {
+                "HassClimateSetTemperature": {
+                    "data": [{"sentences": ["set [the] {name} temperature to {temperature}"]}]
+                }
+            },
+        }
+    }
+    static_index = build_index(
+        "en",
+        [
+            Candidate(
+                text="what's Large Bedroom temperature",
+                intent_name="HassClimateGetTemperature",
+                language="en",
+                metadata={"literal_text": "what's temperature"},
+            )
+        ],
+    )
+    runtime = CanonicalizerRuntime()
+    runtime.language_intent_sources["en"] = intent_sources
+    runtime.update_registry_slot_values(
+        {
+            "name": ("Large Bedroom AC",),
+            "name:climate": ("Large Bedroom AC",),
+            "area": ("Large Bedroom",),
+        }
+    )
+
+    ranked = runtime.rank_with_dynamic_candidates(
+        "en",
+        static_index,
+        "set large bedroom temperature to 27.5",
+    )
+
+    assert ranked[0].candidate.intent_name == "HassClimateSetTemperature"
+    assert ranked[0].candidate.text == "set Large Bedroom AC temperature to 27.5"
+
+
+def test_rank_with_dynamic_candidates_preserves_comma_decimal_range_selection() -> None:
+    """Do not let normalized comma-decimal tokens demote the matching range candidate."""
+    intent_sources: dict[str, Mapping[str, Any]] = {
+        "builtin": {
+            "lists": {
+                "temperature": {
+                    "range": {
+                        "type": "temperature",
+                        "from": 0,
+                        "to": 100,
+                        "fractions": "halves",
+                    }
+                }
+            },
+            "intents": {
+                "HassClimateSetTemperature": {
+                    "data": [{"sentences": ["set [the] {name} temperature to {temperature}"]}]
+                }
+            },
+        }
+    }
+    static_index = build_index(
+        "en",
+        [
+            Candidate(
+                text="what's Large Bedroom temperature",
+                intent_name="HassClimateGetTemperature",
+                language="en",
+                metadata={"literal_text": "what's temperature"},
+            )
+        ],
+    )
+    runtime = CanonicalizerRuntime()
+    runtime.language_intent_sources["en"] = intent_sources
+    runtime.update_registry_slot_values(
+        {
+            "name": ("Large Bedroom AC",),
+            "name:climate": ("Large Bedroom AC",),
+            "area": ("Large Bedroom",),
+        }
+    )
+
+    ranked = runtime.rank_with_dynamic_candidates(
+        "en",
+        static_index,
+        "set large bedroom temperature to 27,5",
+    )
+
+    assert ranked[0].candidate.intent_name == "HassClimateSetTemperature"
+    assert ranked[0].candidate.text == "set Large Bedroom AC temperature to 27,5"
+
+
 def test_runtime_intent_update_invalidates_compiled_dynamic_templates() -> None:
     """Discard compiled templates when subscribed intent sources change."""
     runtime = CanonicalizerRuntime()

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import re
 import unicodedata
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from itertools import permutations, product
 from typing import Any
@@ -28,9 +29,18 @@ from .normalization import normalize_text, normalize_text_no_diacritics
 from .registry import merge_slot_values
 from .rehydration import rehydrate_wildcard_slots as rehydrate_wildcard_slots
 from .rehydration import rehydrate_wildcard_text as rehydrate_wildcard_text
-from .utils import register_custom_wildcards_from_sources, wildcard_slot_names
+from .utils import (
+    is_valid_range_value,
+    parse_float,
+    register_custom_wildcards_from_sources,
+    to_output_value,
+    wildcard_slot_names,
+)
+
+_LOGGER = logging.getLogger(__name__)
 
 _TEMPLATE_MARKERS = frozenset("{}[]<>|()")
+_CLEAN_ANCHOR_STRIP_CHARS = "[](){}<>|:,.?!;\"'"
 _SLOT_PATTERN = re.compile(r"{([^{}]+)}")
 _RULE_PATTERN = re.compile(r"<([^<>]+)>")
 _COMPACT_SLOT_TOKEN_MIN_LENGTH = 4
@@ -39,6 +49,7 @@ _COMPACT_SCRIPT_QUERY_SPAN_MAX_LENGTH = 16
 _MAX_COMPOUND_QUERY_TOKENS = 4
 _TEMPLATE_RELEVANCE_EXPANSION_LIMIT = 200
 _TEXT_RUN_STOP_CHARS = frozenset("[]()|{<;")
+_CONTEXT_ANCHOR_WINDOW = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +84,8 @@ class _TemplateCompilationState:
     context_slots: frozenset[str]
     domains: tuple[str, ...]
     language: str | None
+    range_slots: Mapping[str, tuple[float, float]] = field(default_factory=dict)
+    range_step_multipliers: Mapping[str, RangeStepMultiplier] = field(default_factory=dict)
 
 
 class RegistrySlotIndex(dict[str, tuple[RegistrySlotValue, ...]]):
@@ -119,6 +132,16 @@ class RegistrySlotIndex(dict[str, tuple[RegistrySlotValue, ...]]):
 
 
 @dataclass(frozen=True, slots=True)
+class RangeStepMultiplier:
+    """Step, multiplier, fraction type, and original boundaries for a range slot."""
+
+    step: float | None
+    multiplier: float | None
+    fraction_type: str | None
+    original_from: float | None
+
+
+@dataclass(frozen=True, slots=True)
 class DynamicRegistryTemplate:
     """Query-independent data needed to expand one registry template."""
 
@@ -137,6 +160,11 @@ class DynamicRegistryTemplate:
     metadata: Mapping[str, str]
     literal_token_variants: tuple[frozenset[str], ...]
     literal_token_variants_no_diac: tuple[frozenset[str], ...]
+    range_slots: Mapping[str, tuple[float, float]] = field(default_factory=dict)
+    range_step_multipliers: Mapping[str, RangeStepMultiplier] = field(default_factory=dict)
+    range_slot_anchors: Mapping[str, list[tuple[str | None, str | None]]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,6 +298,11 @@ def _compile_template_from_sentence(
     wildcards = wildcard_slot_names(state.language)
     if sentence_wildcards := sentence_slots & wildcards:
         base_metadata["wildcard_slots"] = ",".join(sorted(sentence_wildcards))
+    range_slots = {
+        slot_name: state.range_slots[slot_name]
+        for slot_name in sentence_slots
+        if slot_name in state.range_slots
+    }
     return DynamicRegistryTemplate(
         sentence=sentence,
         slot_references=slot_references,
@@ -290,6 +323,15 @@ def _compile_template_from_sentence(
         metadata=base_metadata,
         literal_token_variants=variants,
         literal_token_variants_no_diac=no_diac_variants,
+        range_slots=range_slots,
+        range_step_multipliers={
+            slot_name: state.range_step_multipliers[slot_name]
+            for slot_name in sentence_slots
+            if slot_name in state.range_step_multipliers
+        },
+        range_slot_anchors={
+            slot_name: _find_slot_context_anchors(sentence, slot_name) for slot_name in range_slots
+        },
     )
 
 
@@ -309,6 +351,9 @@ def _compile_templates_from_data_item(
         return []
     expansion_rules = _expansion_rules(source_config, intent_config, data_item)
     base_data_slot_values = _slot_values(source_config, intent_config, data_item)
+    range_slots, range_step_multipliers = _compile_range_data(
+        source_config, intent_config, data_item
+    )
     output_value_maps = _slot_output_value_maps(source_config, intent_config, data_item)
     static_slots = _static_slot_values(data_item)
     context_slots = _context_slot_names(data_item)
@@ -322,6 +367,8 @@ def _compile_templates_from_data_item(
         context_slots=context_slots,
         domains=domains,
         language=language,
+        range_slots=range_slots,
+        range_step_multipliers=range_step_multipliers,
     )
     templates = []
     for sentence in sentences:
@@ -418,6 +465,14 @@ def build_query_registry_candidates(
     query_no_diac = normalize_text_no_diacritics(query, language)
     query_tokens_no_diac = frozenset(query_no_diac.split())
 
+    # Precompute query numeric tokens once per query search run
+    q_tokens = query_normalized.split()
+    query_numeric_tokens: list[tuple[str, float, int]] = []
+    for idx, token in enumerate(q_tokens):
+        val = parse_float(token)
+        if val is not None:
+            query_numeric_tokens.append((token, val, idx))
+
     candidates: list[Candidate] = []
     relevant_cache: dict[int, tuple[str, ...]] = {}
     scoped_cache: dict[tuple[str, tuple[str, ...]], tuple[RegistrySlotValue, ...]] = {}
@@ -436,6 +491,7 @@ def build_query_registry_candidates(
             query_tokens_no_diac=query_tokens_no_diac,
             include_literal_only_templates=include_literal_only_templates,
             include_area_only_templates=include_area_only_templates,
+            query_numeric_tokens=query_numeric_tokens,
         )
         if not intent_candidates:
             continue
@@ -518,7 +574,7 @@ def _text_relevance_key(
 
 
 def is_fixed_sentence(sentence: str) -> bool:
-    """Return whether a sentence has no Hassil template syntax."""
+    """Return whether a sentence has no HassIL template syntax."""
     return bool(sentence.strip()) and all(marker not in sentence for marker in _TEMPLATE_MARKERS)
 
 
@@ -530,7 +586,7 @@ def expand_sentence_template(
     max_expansions: int = DEFAULT_MAX_CANDIDATES_PER_TEMPLATE,
     fair: bool = False,
 ) -> tuple[str, ...]:
-    """Expand a bounded subset of Hassil sentence template syntax."""
+    """Expand a bounded subset of HassIL sentence template syntax."""
     if max_expansions < 1:
         raise ValueError("max_expansions must be positive")
     top_node = _parse_hassil(sentence)
@@ -557,7 +613,7 @@ def _build_candidate(
     literal_variants: tuple[frozenset[str], ...] | None = None,
 ) -> Candidate:
     """Construct a Candidate with extracted slot metadata."""
-    slots = _extract_slots_from_expanded_text(
+    slots, raw_slots = _extract_slots_from_expanded_text(
         expanded_sentence,
         presorted_values,
         slot_output_names,
@@ -565,9 +621,11 @@ def _build_candidate(
     )
     if static_slots_dict:
         slots = {**static_slots_dict, **slots}
+        raw_slots = {**static_slots_dict, **raw_slots}
     metadata = dict(base_metadata)
     if slots:
         metadata["slots"] = orjson.dumps(slots).decode("utf-8")
+        metadata["slots_raw"] = orjson.dumps(raw_slots).decode("utf-8")
     candidate = Candidate(
         text=expanded_sentence,
         intent_name=intent_name,
@@ -754,6 +812,162 @@ def _is_area_only_excluded(
     return not _is_domain_scoped_location_template(template.sentence_slots, template.domains)
 
 
+def _resolve_range_grid_params(
+    template: DynamicRegistryTemplate,
+    slot_name: str,
+    from_val: float,
+) -> tuple[float | None, str | None, float]:
+    """Resolve step, fraction_type, and grid_start for a range slot."""
+    range_info = template.range_step_multipliers.get(slot_name)
+    step = range_info.step if range_info else None
+    fraction_type = range_info.fraction_type if range_info else None
+    original_from = range_info.original_from if range_info else None
+    grid_start = original_from if original_from is not None else from_val
+    return step, fraction_type, grid_start
+
+
+def _find_slot_context_anchors(
+    sentence: str,
+    slot_name: str,
+) -> list[tuple[str | None, str | None]]:
+    """Return list of (prev_anchor, next_anchor) pairs for a slot in the template.
+
+    Anchors are simple literal word tokens adjacent to the range slot in the
+    original template, skipping over optional or alternative tokens. They are used
+    to map numbers in ambiguous multi-number queries to the correct range slot.
+    """
+    t_raw_tokens = sentence.split()
+    t_clean_tokens = [t.strip(_CLEAN_ANCHOR_STRIP_CHARS) for t in t_raw_tokens]
+
+    def is_literal(w: str) -> bool:
+        return all(marker not in w for marker in _TEMPLATE_MARKERS)
+
+    pat1 = f"{{{slot_name}}}"
+    pat2 = f"{{{slot_name}:"
+    pat3 = f"<{slot_name}>"
+    pat4 = f"<{slot_name}:"
+    pat5 = f":{slot_name}}}"
+    pat6 = f":{slot_name}>"
+    pat7 = f":{slot_name}:"
+
+    anchors = []
+    for i, raw_t in enumerate(t_raw_tokens):
+        if (
+            pat1 in raw_t
+            or pat2 in raw_t
+            or pat3 in raw_t
+            or pat4 in raw_t
+            or pat5 in raw_t
+            or pat6 in raw_t
+            or pat7 in raw_t
+        ):
+            prev_anchor = None
+            idx_left = i - 1
+            while idx_left >= 0:
+                if is_literal(t_raw_tokens[idx_left]):
+                    candidate_anchor = normalize_text(t_clean_tokens[idx_left])
+                    if len(candidate_anchor.split()) == 1:
+                        prev_anchor = candidate_anchor
+                        break
+                idx_left -= 1
+
+            next_anchor = None
+            idx_right = i + 1
+            while idx_right < len(t_raw_tokens):
+                if is_literal(t_raw_tokens[idx_right]):
+                    candidate_anchor = normalize_text(t_clean_tokens[idx_right])
+                    if len(candidate_anchor.split()) == 1:
+                        next_anchor = candidate_anchor
+                        break
+                idx_right += 1
+
+            anchors.append((prev_anchor, next_anchor))
+    return anchors
+
+
+def _matches_context(
+    q_tokens: list[str],
+    j: int,
+    anchors: list[tuple[str | None, str | None]],
+) -> bool:
+    """Return True if the query numeric token at index j matches any anchor context.
+
+    If the slot has literal neighbor words in the template, we require that the numeric
+    token in the query is adjacent (or close to, in case of intermediate optional tokens)
+    to the corresponding literal neighbor.
+    """
+    if not anchors:
+        return True
+    if all(p is None and n is None for p, n in anchors):
+        return True
+    for p, n in anchors:
+        if p is not None and j > 0:
+            left_window = q_tokens[max(0, j - _CONTEXT_ANCHOR_WINDOW) : j]
+            if p in left_window:
+                return True
+        if n is not None and j < len(q_tokens) - 1:
+            right_window = q_tokens[j + 1 : j + 1 + _CONTEXT_ANCHOR_WINDOW]
+            if n in right_window:
+                return True
+    return False
+
+
+def _resolve_range_slot_values(
+    template: DynamicRegistryTemplate,
+    query_normalized: str,
+    query_numeric_tokens: Sequence[tuple[str, float, int]] | None = None,
+) -> Mapping[str, tuple[str, ...]]:
+    """Resolve and return matched numeric values for range slots.
+
+    This function checks if numeric tokens from the query fall within the range bounds,
+    validating step/fraction alignment. Accepts precomputed query_numeric_tokens.
+    """
+    if not template.range_slots:
+        return template.base_data_slot_values
+
+    base_data_slot_values = dict(template.base_data_slot_values)
+    q_tokens = query_normalized.split()
+    if query_numeric_tokens is None:
+        query_numeric_tokens = []
+        for idx, token in enumerate(q_tokens):
+            val = parse_float(token)
+            if val is not None:
+                query_numeric_tokens.append((token, val, idx))
+
+    for slot_name, (from_val, to_val) in template.range_slots.items():
+        step, fraction_type, grid_start = _resolve_range_grid_params(template, slot_name, from_val)
+        # Find context anchors to map the number to the intended slot
+        anchors = template.range_slot_anchors.get(slot_name, [])
+
+        # If we have multiple numeric tokens in the query but no meaningful context anchors
+        # defined in the template, we skip automatic range resolution for this slot to
+        # prevent assigning arbitrary/mismatched numbers when the query is ambiguous.
+        if len(query_numeric_tokens) > 1 and (
+            not anchors or all(p is None and n is None for p, n in anchors)
+        ):
+            continue
+
+        matched_numbers = []
+        matched_numbers.extend(
+            token
+            for token, val, idx in query_numeric_tokens
+            if (
+                from_val <= val <= to_val
+                and is_valid_range_value(val, grid_start, step, fraction_type)
+                and (len(query_numeric_tokens) <= 1 or _matches_context(q_tokens, idx, anchors))
+            )
+        )
+        if matched_numbers:
+            existing = base_data_slot_values.get(slot_name, ())
+            merged = list(existing) if existing else []
+            for token in matched_numbers:
+                if token not in merged:
+                    merged.append(token)
+            base_data_slot_values[slot_name] = tuple(merged)
+
+    return base_data_slot_values
+
+
 def _resolve_template_slot_values(
     template: DynamicRegistryTemplate,
     registry_slot_values: Mapping[str, tuple[str, ...]],
@@ -765,6 +979,7 @@ def _resolve_template_slot_values(
     *,
     query_no_diac: str | None = None,
     query_tokens_no_diac: frozenset[str] | None = None,
+    query_numeric_tokens: Sequence[tuple[str, float, int]] | None = None,
 ) -> Mapping[str, tuple[str, ...]] | None:
     """Return merged slot values for a template, or None if required slots are missing."""
     if template.query_slots:
@@ -783,7 +998,14 @@ def _resolve_template_slot_values(
             return None
     else:
         dynamic_registry_slots = {}
-    slot_values = merge_slot_values(template.base_data_slot_values, dynamic_registry_slots)
+
+    base_data_slot_values = _resolve_range_slot_values(
+        template,
+        query_normalized,
+        query_numeric_tokens=query_numeric_tokens,
+    )
+
+    slot_values = merge_slot_values(base_data_slot_values, dynamic_registry_slots)
     if any(not slot_values.get(slot) for slot in template.required_slots):
         return None
     return slot_values
@@ -858,6 +1080,59 @@ def _expand_template_candidates(
     return tuple(candidates)
 
 
+def _process_range_slot_output(
+    template: DynamicRegistryTemplate,
+    slot_name: str,
+    from_val: float,
+    to_val: float,
+    values: tuple[str, ...],
+    slot_map: dict[str, Any],
+) -> None:
+    """Process output mappings for a single range slot."""
+    for val_str in values:
+        if val_str not in slot_map:
+            val_float = parse_float(val_str)
+            if val_float is not None and from_val <= val_float <= to_val:
+                step, fraction_type, grid_start = _resolve_range_grid_params(
+                    template, slot_name, from_val
+                )
+                if is_valid_range_value(val_float, grid_start, step, fraction_type):
+                    range_info = template.range_step_multipliers.get(slot_name)
+                    multiplier = range_info.multiplier if range_info else None
+                    mult_val = val_float
+                    if multiplier is not None:
+                        mult_val = val_float * multiplier
+                    slot_map[val_str] = to_output_value(mult_val)
+
+
+def _build_slot_output_values(
+    template: DynamicRegistryTemplate,
+    slot_values: Mapping[str, tuple[str, ...]],
+) -> Mapping[str, Mapping[str, Any]]:
+    """Build slot output value mapping by processing range slots and base configurations.
+
+    This scales the matched numeric tokens by the slot multiplier to build the final
+    output slot dictionary (e.g. converting "volume down by 20" to a slot value of -20).
+    """
+    slot_output_values = dict(template.slot_output_values)
+    if not template.range_slots:
+        return slot_output_values
+
+    for slot_name, (from_val, to_val) in template.range_slots.items():
+        if values := slot_values.get(slot_name):
+            slot_map = dict(slot_output_values.get(slot_name, {}))
+            _process_range_slot_output(
+                template,
+                slot_name,
+                from_val,
+                to_val,
+                values,
+                slot_map,
+            )
+            slot_output_values[slot_name] = slot_map
+    return slot_output_values
+
+
 def _append_query_template_candidates(
     candidates: list[Candidate],
     seen: set[tuple[str, str]],
@@ -877,7 +1152,11 @@ def _append_query_template_candidates(
     presorted_values = _presort_slot_values(
         _referenced_slot_values(slot_values, template.slot_references)
     )
+    slot_output_values = _build_slot_output_values(template, slot_values)
     static_slots_dict = dict(template.static_slots)
+
+    base_metadata = dict(template.metadata)
+
     for expanded_sentence in _query_candidate_texts(
         template.sentence,
         slot_values,
@@ -902,10 +1181,10 @@ def _append_query_template_candidates(
                 intent_name,
                 source,
                 language,
-                template.metadata,
+                base_metadata,
                 presorted_values,
                 template.slot_output_names,
-                template.slot_output_values,
+                slot_output_values,
                 static_slots_dict,
                 literal_variants=template.literal_token_variants,
             )
@@ -1157,6 +1436,7 @@ def _query_candidates_from_compiled_intent(
     query_tokens_no_diac: frozenset[str] | None = None,
     include_literal_only_templates: bool = True,
     include_area_only_templates: bool = True,
+    query_numeric_tokens: Sequence[tuple[str, float, int]] | None = None,
 ) -> tuple[Candidate, ...]:
     """Expand one compiled intent using query-relevant registry values."""
     candidates: list[Candidate] = []
@@ -1194,6 +1474,7 @@ def _query_candidates_from_compiled_intent(
             scoped_cache,
             query_no_diac=query_no_diac,
             query_tokens_no_diac=query_tokens_no_diac,
+            query_numeric_tokens=query_numeric_tokens,
         )
         if slot_values is None:
             continue
@@ -1489,12 +1770,13 @@ def _extract_slots_from_expanded_text(
     slot_values: Mapping[str, Sequence[str]],
     slot_output_names: Mapping[str, tuple[str, ...]] | None = None,
     slot_output_values: Mapping[str, Mapping[str, Any]] | None = None,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """Extract slot values present in the expanded text.
 
     Values must be pre-sorted longest-first (see :func:`_presort_slot_values`).
     """
     slots = {}
+    raw_slots = {}
     previous_values: Sequence[str] | None = None
     previous_match: str | None = None
     for slot_name, values in slot_values.items():
@@ -1517,7 +1799,8 @@ def _extract_slots_from_expanded_text(
             )
             for output_name in output_names:
                 slots.setdefault(output_name, output_value)
-    return slots
+                raw_slots.setdefault(output_name, matched)
+    return slots, raw_slots
 
 
 def _referenced_slot_values(
@@ -1608,7 +1891,7 @@ def _registry_slot_values_for_template(
     base_data_slot_values: Mapping[str, tuple[str, ...]],
     registry_slot_values: Mapping[str, tuple[str, ...]],
 ) -> dict[str, tuple[str, ...]]:
-    """Return registry slots constrained by Hassil context and template shape."""
+    """Return registry slots constrained by HassIL context and template shape."""
     registry_slots = sentence_slots - set(base_data_slot_values)
     domains = _context_domains(data_item)
     constrained = _registry_slot_values_for_slots(
@@ -1750,7 +2033,7 @@ def _template_literal_text(
     text: str,
     expansion_rules: Mapping[str, str],
 ) -> str:
-    """Return localized literal words from a Hassil sentence template."""
+    """Return localized literal words from a HassIL sentence template."""
     literal_text, _ = _template_literals(text, expansion_rules)
     return literal_text
 
@@ -1853,7 +2136,7 @@ def _interleave_unique_capped(groups: Sequence[Sequence[str]], limit: int) -> tu
 
 
 class _HassilNode:
-    """Base class for Hassil template AST nodes."""
+    """Base class for HassIL template AST nodes."""
 
     def required_slots(self, rules: Mapping[str, str], seen: frozenset[str]) -> set[str]:
         """Return slot names required by this node."""
@@ -2241,7 +2524,7 @@ def _parse_delimited_node(
 
 
 def _parse_hassil(text: str) -> _HassilNode:
-    """Parse Hassil template string into an AST node, caching the results."""
+    """Parse HassIL template string into an AST node, caching the results."""
     cached = _PARSED_TEMPLATE_CACHE.get(text)
     if cached is not None:
         return cached
@@ -2252,7 +2535,7 @@ def _parse_hassil(text: str) -> _HassilNode:
 
 
 def _parse_hassil_expr(text: str, i: int, close_char: str | None = None) -> tuple[_HassilNode, int]:
-    """Parse a Hassil expression from a given index."""
+    """Parse a HassIL expression from a given index."""
     current_branch: list[_HassilNode] = []
     branches: list[_HassilNode] = []
     branch_separator: str | None = None
@@ -2389,7 +2672,7 @@ def _slot_output_names(
 
 
 def _context_domains(data_item: Mapping[str, Any]) -> tuple[str, ...]:
-    """Return required entity domains for one Hassil data item."""
+    """Return required entity domains for one HassIL data item."""
     domains: list[str] = []
     for key in ("requires_context", "slots"):
         context = data_item.get(key, {})
@@ -2414,7 +2697,7 @@ def _context_slot_names(data_item: Mapping[str, Any]) -> frozenset[str]:
 
 
 def _domain_values(value: Any) -> Iterable[str]:
-    """Yield domain names from Hassil context values."""
+    """Yield domain names from HassIL context values."""
     if isinstance(value, str) and value.strip():
         yield value.strip()
         return
@@ -2457,6 +2740,71 @@ def _effective_list_configs(
             if isinstance(list_name, str):
                 list_configs[list_name] = list_config
     return list_configs
+
+
+def _compile_range_data(
+    source_config: Mapping[str, Any],
+    intent_config: Mapping[str, Any],
+    data_item: Mapping[str, Any],
+) -> tuple[dict[str, tuple[float, float]], dict[str, RangeStepMultiplier]]:
+    """Compile range boundaries and step multipliers in a single pass."""
+    ranges: dict[str, tuple[float, float]] = {}
+    step_mult: dict[str, RangeStepMultiplier] = {}
+    for list_name, list_config in _effective_list_configs(
+        source_config,
+        intent_config,
+        data_item,
+    ).items():
+        if not isinstance(list_config, Mapping):
+            continue
+
+        range_data = list_config.get("range")
+        if not isinstance(range_data, Mapping):
+            continue
+
+        if "from" not in range_data or "to" not in range_data:
+            continue
+
+        try:
+            from_val = float(range_data["from"])
+            to_val = float(range_data["to"])
+        except (ValueError, TypeError):
+            continue
+
+        low, high = sorted((from_val, to_val))
+        ranges[list_name] = (low, high)
+
+        step = None
+        if "step" in range_data:
+            with contextlib.suppress(ValueError, TypeError):
+                step = float(range_data["step"])
+                step = step if step > 0 else None
+
+        multiplier = None
+        if "multiplier" in range_data:
+            with contextlib.suppress(ValueError, TypeError):
+                multiplier = float(range_data["multiplier"])
+
+        fraction_type = range_data.get("fractions")
+        if isinstance(fraction_type, str):
+            if fraction_type not in ("halves", "tenths"):
+                _LOGGER.debug(
+                    "Invalid fraction type '%s' in range config for list '%s', ignoring.",
+                    fraction_type,
+                    list_name,
+                )
+                fraction_type = None
+        else:
+            fraction_type = None
+
+        step_mult[list_name] = RangeStepMultiplier(
+            step=step,
+            multiplier=multiplier,
+            fraction_type=fraction_type,
+            original_from=from_val,
+        )
+
+    return ranges, step_mult
 
 
 def _slot_values(
@@ -2507,7 +2855,7 @@ def _slot_output_value_maps(
 
 
 def _static_slot_values(data_item: Mapping[str, Any]) -> dict[str, str]:
-    """Return static string slots declared on a Hassil data item."""
+    """Return static string slots declared on a HassIL data item."""
     static_slots: dict[str, str] = {}
     slots = data_item.get("slots", {})
     if not isinstance(slots, Mapping):
@@ -2536,7 +2884,7 @@ def _expansion_rules(
 
 
 def _values_from_list_config(list_config: Any, list_name: str | None = None) -> Iterable[str]:
-    """Yield spoken values from a Hassil list config."""
+    """Yield spoken values from a HassIL list config."""
     if isinstance(list_config, Mapping):
         if "values" in list_config:
             values = list_config.get("values", [])
@@ -2572,7 +2920,7 @@ def _value_outputs_from_list_config(
     list_config: Any,
     list_name: str | None = None,
 ) -> Iterable[tuple[str, Any]]:
-    """Yield spoken input to output value pairs from a Hassil list config."""
+    """Yield spoken input to output value pairs from a HassIL list config."""
     if isinstance(list_config, Mapping):
         if "values" in list_config:
             values = list_config.get("values", [])

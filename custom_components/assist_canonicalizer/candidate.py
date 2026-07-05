@@ -276,16 +276,26 @@ def _literal_variants_from_loaded(loaded: object) -> tuple[frozenset[str], ...] 
     return tuple(variants)
 
 
-def _candidate_slot_map(candidate: Candidate) -> dict[str, Any]:
-    """Return decoded candidate slot metadata."""
-    slots_text = candidate.metadata.get("slots")
-    if not isinstance(slots_text, str) or not slots_text:
+def _decode_candidate_metadata_dict(candidate: Candidate, key: str) -> dict[str, Any]:
+    """Helper to read, validate, JSON decode, and check dict for candidate metadata key."""
+    val = candidate.metadata.get(key)
+    if not isinstance(val, str) or not val:
         return {}
     try:
-        decoded = orjson.loads(slots_text)
+        decoded = orjson.loads(val)
     except orjson.JSONDecodeError:
         return {}
     return decoded if isinstance(decoded, dict) else {}
+
+
+def candidate_slot_map(candidate: Candidate) -> dict[str, Any]:
+    """Return decoded candidate slot metadata."""
+    return _decode_candidate_metadata_dict(candidate, "slots")
+
+
+def candidate_raw_slot_map(candidate: Candidate) -> dict[str, Any]:
+    """Return decoded raw candidate slot metadata."""
+    return _decode_candidate_metadata_dict(candidate, "slots_raw")
 
 
 def slot_alias_values_by_key(
@@ -314,7 +324,7 @@ def slot_alias_values_by_key(
 
 def candidate_dedupe_preference_key(candidate: Candidate) -> tuple[int, int, int, int]:
     """Return a source-first HassIL-aligned candidate dedupe key."""
-    slots = _candidate_slot_map(candidate)
+    slots = candidate_slot_map(candidate)
     has_generic_entity = bool(slots.keys() & ENTITY_SLOT_NAME_SET)
     has_location = bool(slots.keys() & LOCATION_SLOT_NAME_SET)
     has_domain = "domain" in slots

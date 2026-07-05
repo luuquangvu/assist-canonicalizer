@@ -87,7 +87,7 @@
 3. Chọn **Tác nhân hội thoại dự phòng (Fallback Conversation Agent)**: Khi Assist Canonicalizer không thể tìm thấy câu lệnh phù hợp với độ tin cậy cao, câu lệnh gốc của bạn sẽ được chuyển tiếp tới tác nhân dự phòng này. Bạn không nên chọn tác nhân mặc định của Home Assistant làm dự phòng, vì bản thân câu chuẩn hóa đã được xác thực qua nó và thất bại; việc gửi lại câu lệnh thô thường cũng sẽ thất bại. Hãy chọn một tác nhân hội thoại sử dụng LLM để có khả năng diễn giải ngữ cảnh linh hoạt nhất.
 4. Cấu hình **Độ tin cậy tối thiểu (Minimum Match Confidence)**: Yêu cầu câu lệnh ứng cử viên phải đạt điểm số bằng hoặc cao hơn ngưỡng này trên cả 4 thuật toán xếp hạng mới được chấp nhận. Khuyên dùng giữ nguyên cấu hình mặc định ban đầu và sử dụng công cụ **Test Match** để theo dõi điểm số thực tế trước khi tùy biến.
 5. Cấu hình **Khoảng cách độ tin cậy tối thiểu (Minimum Confidence Margin)**: Khoảng cách điểm số tối thiểu giữa ứng cử viên xếp hạng cao nhất và ứng cử viên tiếp theo (thuộc intent khác). Ngưỡng này giúp loại bỏ sự mơ hồ khi câu lệnh đầu vào khớp với nhiều ý định khác nhau có điểm số xấp xỉ nhau.
-6. Vào **Cài đặt (Settings)** > **Trợ lý giọng nói (Voice assistants)** và mở Assist pipeline của bạn. Tại mục **Tác nhân hội thoại (Conversation agents)**, chọn **Assist Canonicalizer** làm tác nhân chính. Chúng tôi khuyên bạn nên bật tùy chọn **Ưu tiên xử lý lệnh cục bộ (Prefer handling commands locally)**: bộ nhận diện mặc định (Hassil) sẽ được ưu tiên xử lý trước; nếu không nhận diện được, Assist Canonicalizer mới tiếp quản để tìm kiếm so khớp trong cơ sở dữ liệu câu lệnh chuẩn hóa.
+6. Vào **Cài đặt (Settings)** > **Trợ lý giọng nói (Voice assistants)** và mở Assist pipeline của bạn. Tại mục **Tác nhân hội thoại (Conversation agents)**, chọn **Assist Canonicalizer** từ danh sách tác nhân.
 
 > [!IMPORTANT]
 > **Lưu ý quan trọng**: Assist Canonicalizer chỉ thực sự hoạt động sau khi được cấu hình và kích hoạt trong Assist pipeline của bạn.
@@ -129,7 +129,7 @@ flowchart TD
 
 4. **Kiểm tra ngưỡng độ tin cậy (Confidence Gate)**: Hệ thống đánh giá xem câu lệnh ứng cử viên đứng đầu có vượt qua cả hai ngưỡng độ tin cậy `min_confidence` và `min_margin` đã cấu hình hay không. Nếu không đạt yêu cầu, cơ chế dự phòng sẽ được kích hoạt.
 
-5. **Xác thực câu lệnh (Validation)**: Câu lệnh chuẩn hóa tối ưu nhất sẽ được gửi thử nghiệm tới bộ xử lý hội thoại mặc định (Hassil). Nếu bộ xử lý chấp nhận, lệnh sẽ được thực thi; ngược lại, hệ thống sẽ chuyển tiếp sang tác nhân dự phòng.
+5. **Xác thực câu lệnh (Validation)**: Câu lệnh chuẩn hóa tối ưu nhất sẽ được gửi thử nghiệm tới bộ xử lý hội thoại mặc định (HassIL). Nếu bộ xử lý chấp nhận, lệnh sẽ được thực thi; ngược lại, hệ thống sẽ chuyển tiếp sang tác nhân dự phòng.
 
 6. **Chuyển tiếp dự phòng (Fallback)**: Khi việc tìm kiếm so khớp hoặc xác thực thất bại, câu lệnh thô gốc ban đầu của bạn sẽ được chuyển tiếp thẳng tới tác nhân dự phòng để tiếp tục xử lý, đảm bảo trợ lý ảo vẫn phản hồi bình thường.
 
@@ -137,13 +137,13 @@ flowchart TD
 
 ## Hiệu năng đo kiểm (Benchmark Performance)
 
-Công cụ xếp hạng được đo kiểm (benchmark) so với bộ nhận diện intent mặc định (Hassil) của Home Assistant bằng cách sử dụng các bộ dữ liệu thử nghiệm thực tế trên 5 ngôn ngữ (DE, EN, FR, NL, VI).
+Công cụ xếp hạng được đo kiểm (benchmark) so với bộ nhận diện intent mặc định (HassIL) của Home Assistant bằng cách sử dụng các bộ dữ liệu thử nghiệm thực tế trên 5 ngôn ngữ (DE, EN, FR, NL, VI).
 
 ### Kết quả tổng quan
 
 <!-- BENCHMARK_OVERALL_START -->
 
-> Phiên bản phụ thuộc benchmark: `homeassistant` 2026.7.0, `home-assistant-intents` 2026.6.24.
+> Phiên bản phụ thuộc benchmark: `homeassistant` 2026.7.1, `home-assistant-intents` 2026.6.24.
 
 | Chế độ    | Đúng Intent/Slot | Nhận diện sai (Mismatch) | Dự phòng (Fallback) |
 | :-------- | ---------------: | -----------------------: | ------------------: |
@@ -287,7 +287,7 @@ Bạn có thể kiểm tra lý do dự phòng của câu lệnh gần nhất b�
 
 1. Hãy sử dụng hành động **Diagnostics** để kiểm tra `last_fallback_reason`. Nếu lý do là `empty_index`, có nghĩa là chỉ mục chưa được tạo. Chỉ mục sẽ được chủ động làm nóng (warmup) ngay khi khởi động/tải lại cho tất cả ngôn ngữ được cấu hình trong Assist pipeline. Nếu `empty_index` vẫn xuất hiện, quá trình warmup có thể đã bị bỏ qua (không có pipeline nào được cấu hình, không có ngôn ngữ mặc định), hoặc quá trình xây dựng trong nền chưa hoàn tất. Bạn có thể kích hoạt thủ công qua hành động **Rebuild Index**.
 2. Nếu lý do là `low_confidence`, ngưỡng `min_confidence` bạn đặt có thể quá cao. Hãy thử hạ thấp cấu hình này xuống. Bạn nên dùng công cụ **Test Match** để xem điểm số thực tế của các câu lệnh mẫu.
-3. Nếu lý do là `validation_failed`, câu lệnh đã được so khớp thành công nhưng bị tác nhân mặc định của Home Assistant (Hassil) từ chối khi thực thi. Hãy chạy hành động **Dump Candidates** để kiểm tra xem cấu trúc câu lệnh chuẩn hóa của bạn đã chính xác và khớp với các định nghĩa intent chưa.
+3. Nếu lý do là `validation_failed`, câu lệnh đã được so khớp thành công nhưng bị tác nhân mặc định của Home Assistant (HassIL) từ chối khi thực thi. Hãy chạy hành động **Dump Candidates** để kiểm tra xem cấu trúc câu lệnh chuẩn hóa của bạn đã chính xác và khớp với các định nghĩa intent chưa.
 
 **Mẫu câu tùy chỉnh của tôi không được nhận diện.**
 

@@ -87,7 +87,7 @@
 3. Select the **Fallback Conversation Agent**. When the canonicalizer cannot safely match a candidate, your original text is dispatched to this agent as a second chance. Choosing the built-in Home Assistant agent as the fallback is usually ineffective; the accepted canonicalized candidate was already validated against it and failed, so sending the raw text back to the same agent will likely fail again. For best results, select an LLM-based conversation agent that can interpret natural language differently and recover from the mismatch.
 4. Set the **Minimum Match Confidence**. A candidate must score at or above this threshold across all four ranking signals to be accepted. Stick with the default value initially and use the **Test Match** action to observe real scores before making adjustments.
 5. Set the **Minimum Confidence Margin**. The gap between the top-ranked candidate and the next candidate with a different intent name must be at least this value. This prevents situations where the input is ambiguous and two different intents score similarly. Use the default value at first; only tighten or relax it after analyzing actual score breakdowns with **Test Match**.
-6. Go to **Settings** > **Voice assistants** and open your Assist pipeline. Under **Conversation agents**, select **Assist Canonicalizer** from the agent list. We recommend enabling **Prefer handling commands locally** so that the built-in local intent recognizer (Hassil) is tried first. If it can handle the command directly, it does so without involving the canonicalizer; otherwise, Assist Canonicalizer takes over to match the input against its canonical index.
+6. Go to **Settings** > **Voice assistants** and open your Assist pipeline. Under **Conversation agents**, select **Assist Canonicalizer** from the agent list.
 
 > [!IMPORTANT]
 > **Without completing the above steps, Assist Canonicalizer will not process any commands.** The integration only activates when it is part of the active Assist pipeline.
@@ -129,7 +129,7 @@ flowchart TD
 
 4. **Confidence Gate**: The top-ranked candidate must clear both the configured `min_confidence` and `min_margin` thresholds. If either threshold is not met, the system falls back.
 
-5. **Validation**: The accepted candidate is validated by sending its canonical sentence to the built-in Home Assistant conversation agent (Hassil). If the HA agent successfully processes the canonicalized sentence, the result is returned. Otherwise, the system falls back.
+5. **Validation**: The accepted candidate is validated by sending its canonical sentence to the built-in Home Assistant conversation agent (HassIL). If the HA agent successfully processes the canonicalized sentence, the result is returned. Otherwise, the system falls back.
 
 6. **Fallback**: When ranking or validation is not safe, the original user text is forwarded to your configured fallback conversation agent, preserving the standard Assist experience.
 
@@ -137,13 +137,13 @@ flowchart TD
 
 ## Benchmark Performance
 
-The ranking engine was benchmarked against the default Home Assistant Hassil intent recognizer using real-world test datasets across five languages (DE, EN, FR, NL, VI).
+The ranking engine was benchmarked against the default Home Assistant intent recognizer (HassIL) using real-world test datasets across five languages (DE, EN, FR, NL, VI).
 
 ### Overall Results
 
 <!-- BENCHMARK_OVERALL_START -->
 
-> Benchmark dependency versions: `homeassistant` 2026.7.0, `home-assistant-intents` 2026.6.24.
+> Benchmark dependency versions: `homeassistant` 2026.7.1, `home-assistant-intents` 2026.6.24.
 
 | Mode      | Intent/Slot | Mismatch | Fallback |
 | :-------- | ----------: | -------: | -------: |

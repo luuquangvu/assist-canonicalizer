@@ -494,7 +494,7 @@ def test_build_candidates_prioritizes_entity_slot_alias_templates() -> None:
 
 
 def test_build_candidates_uses_domain_scoped_registry_names() -> None:
-    """Use Hassil domain context to choose entity slot values."""
+    """Use HassIL domain context to choose entity slot values."""
     candidates = build_candidates_from_intent_sources(
         "vi",
         {
@@ -543,7 +543,7 @@ def test_build_candidates_from_intent_sources_stops_at_total_cap() -> None:
 
 
 def test_build_candidates_uses_multi_domain_context_scoped_registry_names() -> None:
-    """Expand entity slots from all domains listed in Hassil context."""
+    """Expand entity slots from all domains listed in HassIL context."""
     candidates = build_candidates_from_intent_sources(
         "vi",
         {
@@ -1236,6 +1236,238 @@ def test_query_registry_candidates_prioritize_exact_base_list_values() -> None:
     }
 
 
+def _build_range_intent_source(
+    list_name: str,
+    range_config: dict[str, Any],
+    intent_name: str,
+    sentences: list[str],
+) -> dict[str, Any]:
+    """Helper to construct common range-based intent source configurations."""
+    return {
+        "builtin": {
+            "lists": {
+                list_name: {"range": range_config},
+            },
+            "intents": {
+                intent_name: {
+                    "data": [
+                        {"sentences": sentences},
+                    ]
+                }
+            },
+        }
+    }
+
+
+def test_query_registry_candidates_match_numeric_range_values() -> None:
+    """Test that numbers in range from user query are matched dynamically."""
+    candidates = build_query_registry_candidates(
+        "en",
+        _build_range_intent_source(
+            "temperature",
+            {"from": 0, "to": 50},
+            "HassClimateSetTemperature",
+            ["set [the] {name} temperature to {temperature}"],
+        ),
+        {"name": ("living room",)},
+        "set living room temperature to 27",
+        max_candidates=1,
+    )
+
+    assert [candidate.text for candidate in candidates] == ["set living room temperature to 27"]
+    assert orjson.loads(candidates[0].metadata["slots"]) == {
+        "name": "living room",
+        "temperature": 27,
+    }
+
+
+@pytest.mark.parametrize(("query_value", "slot_value"), [("20.5", 20.5), ("20,5", 20.5)])
+def test_query_registry_candidates_preserve_fractional_range_values(
+    query_value: str,
+    slot_value: float,
+) -> None:
+    """Preserve decimal range values from the original query text."""
+    query = f"set living room temperature to {query_value}"
+    candidates = build_query_registry_candidates(
+        "en",
+        _build_range_intent_source(
+            "temperature",
+            {
+                "type": "temperature",
+                "from": 0,
+                "to": 100,
+                "fractions": "halves",
+            },
+            "HassClimateSetTemperature",
+            ["set [the] {name} temperature to {temperature}"],
+        ),
+        {"name": ("living room",)},
+        query,
+        max_candidates=1,
+    )
+
+    assert [candidate.text for candidate in candidates] == [
+        f"set living room temperature to {query_value}"
+    ]
+    assert orjson.loads(candidates[0].metadata["slots"]) == {
+        "name": "living room",
+        "temperature": slot_value,
+    }
+
+
+def test_query_registry_candidates_respect_numeric_range_step() -> None:
+    """Do not inject query numbers that HassIL range step validation rejects."""
+    candidates = build_query_registry_candidates(
+        "en",
+        _build_range_intent_source(
+            "color_temperature",
+            {"from": 1000, "to": 10000, "step": 100},
+            "HassLightSet",
+            ["{name} {color_temperature:temperature}"],
+        ),
+        {"name": ("bedroom light",)},
+        "bedroom light 1050",
+        max_candidates=5,
+    )
+
+    assert candidates
+    assert all(candidate.text != "bedroom light 1050" for candidate in candidates)
+    assert all(
+        orjson.loads(candidate.metadata["slots"])["temperature"] != 1050 for candidate in candidates
+    )
+
+
+def test_query_registry_candidates_descending_range_step() -> None:
+    """Validate that step validation works on descending ranges."""
+    intent_sources = _build_range_intent_source(
+        "test_range",
+        {"from": 10, "to": 3, "step": 2},
+        "TestIntent",
+        ["set val to {test_range:val}"],
+    )
+    candidates = build_query_registry_candidates(
+        "en",
+        intent_sources,
+        {},
+        "set val to 10",
+        max_candidates=1,
+    )
+    assert len(candidates) == 1
+    assert orjson.loads(candidates[0].metadata["slots"]) == {"val": 10}
+
+    candidates_rejected = build_query_registry_candidates(
+        "en",
+        intent_sources,
+        {},
+        "set val to 9",
+        max_candidates=5,
+    )
+    assert candidates_rejected
+    assert all(cand.text != "set val to 9" for cand in candidates_rejected)
+    assert all(orjson.loads(cand.metadata["slots"]).get("val") != 9 for cand in candidates_rejected)
+
+
+def test_query_registry_candidates_apply_numeric_range_multiplier() -> None:
+    """Apply HassIL range multipliers to output slots, not spoken candidate text."""
+    candidates = build_query_registry_candidates(
+        "en",
+        _build_range_intent_source(
+            "volume_step_down",
+            {"type": "percentage", "from": 0, "to": 100, "multiplier": -1},
+            "HassSetVolumeRelative",
+            ["volume down by {volume_step_down:volume_step}"],
+        ),
+        {},
+        "volume down by 20",
+        max_candidates=1,
+    )
+
+    assert [candidate.text for candidate in candidates] == ["volume down by 20"]
+    assert orjson.loads(candidates[0].metadata["slots"]) == {"volume_step": -20}
+
+
+def test_query_registry_candidates_respect_numeric_range_fractions_halves() -> None:
+    """Validate that halves fractions are matched and non-halves are rejected."""
+    intent_sources = _build_range_intent_source(
+        "temperature",
+        {
+            "type": "temperature",
+            "from": 0,
+            "to": 100,
+            "fractions": "halves",
+        },
+        "HassClimateSetTemperature",
+        ["set temperature to {temperature}"],
+    )
+    # Matched candidate
+    candidates = build_query_registry_candidates(
+        "en",
+        intent_sources,
+        {},
+        "set temperature to 27.5",
+        max_candidates=1,
+    )
+    assert [candidate.text for candidate in candidates] == ["set temperature to 27.5"]
+    assert orjson.loads(candidates[0].metadata["slots"]) == {"temperature": 27.5}
+
+    # Rejected candidate (not a half)
+    candidates_rejected = build_query_registry_candidates(
+        "en",
+        intent_sources,
+        {},
+        "set temperature to 27.3",
+        max_candidates=5,
+    )
+    assert candidates_rejected
+    assert all(
+        orjson.loads(candidate.metadata["slots"]).get("temperature") != 27.3
+        for candidate in candidates_rejected
+    )
+    assert all(candidate.text != "set temperature to 27.3" for candidate in candidates_rejected)
+    assert all("27.3" not in candidate.text for candidate in candidates_rejected)
+
+
+def test_query_registry_candidates_respect_numeric_range_fractions_tenths() -> None:
+    """Validate that tenths fractions are matched and non-tenths are rejected."""
+    intent_sources = _build_range_intent_source(
+        "temperature",
+        {
+            "type": "temperature",
+            "from": 0,
+            "to": 100,
+            "fractions": "tenths",
+        },
+        "HassClimateSetTemperature",
+        ["set temperature to {temperature}"],
+    )
+    # Matched candidate
+    candidates = build_query_registry_candidates(
+        "en",
+        intent_sources,
+        {},
+        "set temperature to 27.3",
+        max_candidates=1,
+    )
+    assert [candidate.text for candidate in candidates] == ["set temperature to 27.3"]
+    assert orjson.loads(candidates[0].metadata["slots"]) == {"temperature": 27.3}
+
+    # Rejected candidate (not a tenth, e.g. hundredth)
+    candidates_rejected = build_query_registry_candidates(
+        "en",
+        intent_sources,
+        {},
+        "set temperature to 27.35",
+        max_candidates=5,
+    )
+    assert candidates_rejected
+    assert all(
+        orjson.loads(candidate.metadata["slots"]).get("temperature") != 27.35
+        for candidate in candidates_rejected
+    )
+    assert all(candidate.text != "set temperature to 27.35" for candidate in candidates_rejected)
+    assert all("27.35" not in candidate.text for candidate in candidates_rejected)
+
+
 def test_query_registry_candidates_keep_exact_entity_when_partial_slots_hit_cap() -> None:
     """Keep exact text when an earlier entity/location branch fills the dynamic cap."""
     query = "tắt điều hòa phòng ngủ to"
@@ -1842,3 +2074,187 @@ def test_query_registry_candidates_mixed_entity_floor_prunes_floor_values() -> N
     # Floor values are pruned from constrained, and because {floor} is a required slot the
     # template produces no candidates at all — no O(entities x floors) cross-product occurs.
     assert candidates == ()
+
+
+@pytest.mark.parametrize(
+    (
+        "list_name",
+        "range_dict",
+        "intent_name",
+        "sentence",
+        "query",
+        "expected_text",
+        "expected_slots",
+    ),
+    [
+        (
+            "temperature",
+            {"type": "temperature", "from": 0, "to": 100, "fractions": "halves"},
+            "HassClimateSetTemperature",
+            "set temperature to {temperature}",
+            "set temperature to 27.5°",
+            "set temperature to 27.5°",
+            {"temperature": 27.5},
+        ),
+        (
+            "temperature",
+            {"type": "temperature", "from": 0, "to": 100, "fractions": "halves"},
+            "HassClimateSetTemperature",
+            "set temperature to {temperature}",
+            "set temperature to 27.5 °",
+            "set temperature to 27.5",
+            {"temperature": 27.5},
+        ),
+        (
+            "brightness",
+            {"type": "percentage", "from": 0, "to": 100},
+            "HassLightSet",
+            "set brightness to {brightness}",
+            "set brightness to 50%",
+            "set brightness to 50%",
+            {"brightness": 50},
+        ),
+        (
+            "brightness",
+            {"type": "percentage", "from": 0, "to": 100},
+            "HassLightSet",
+            "set brightness to {brightness}",
+            "set brightness to 50 %",
+            "set brightness to 50",
+            {"brightness": 50},
+        ),
+    ],
+)
+def test_query_registry_candidates_with_suffixes(
+    list_name: str,
+    range_dict: dict[str, Any],
+    intent_name: str,
+    sentence: str,
+    query: str,
+    expected_text: str,
+    expected_slots: dict[str, Any],
+) -> None:
+    """Validate queries containing numbers with degree or percentage suffixes."""
+    candidates = build_query_registry_candidates(
+        "en",
+        {
+            "builtin": {
+                "lists": {list_name: {"range": range_dict}},
+                "intents": {intent_name: {"data": [{"sentences": [sentence]}]}},
+            }
+        },
+        {},
+        query,
+        max_candidates=1,
+    )
+    assert [candidate.text for candidate in candidates] == [expected_text]
+    assert orjson.loads(candidates[0].metadata["slots"]) == expected_slots
+
+
+def test_query_registry_candidates_with_overlapping_ranges_anchoring() -> None:
+    """Validate overlapping range slots anchoring when multiple qualifying numbers are present."""
+    candidates = build_query_registry_candidates(
+        "en",
+        {
+            "builtin": {
+                "lists": {
+                    "temperature": {"range": {"from": 0, "to": 100}},
+                    "area_num": {"range": {"from": 0, "to": 100}},
+                },
+                "intents": {
+                    "HassClimateSetTemperature": {
+                        "data": [
+                            {"sentences": ["set temperature in area {area_num} to {temperature}"]}
+                        ]
+                    }
+                },
+            }
+        },
+        {},
+        "set temperature in area 51 to 20",
+        max_candidates=1,
+    )
+    assert len(candidates) == 1
+    slots = orjson.loads(candidates[0].metadata["slots"])
+    assert slots.get("temperature") == 20
+    assert slots.get("area_num") == 51
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "set temperature to 22 in area 51",
+        "set temperature 22 in area 51",
+    ],
+)
+def test_query_registry_candidates_anchoring_with_optional_tokens(query: str) -> None:
+    """Validate range slot resolution works when preceded by optional tokens.
+
+    And query is ambiguous.
+    """
+    intent_sources = {
+        "builtin": {
+            "lists": {
+                "temperature": {"range": {"from": 0, "to": 100}},
+                "area_num": {"range": {"from": 0, "to": 100}},
+            },
+            "intents": {
+                "HassClimateSetTemperature": {
+                    "data": [
+                        {"sentences": ["set temperature [to] {temperature} in area {area_num}"]}
+                    ]
+                }
+            },
+        }
+    }
+
+    candidates = build_query_registry_candidates(
+        "en",
+        intent_sources,
+        {},
+        query,
+        max_candidates=1,
+    )
+    assert len(candidates) == 1
+    slots = orjson.loads(candidates[0].metadata["slots"])
+    assert slots.get("temperature") == 22
+    assert slots.get("area_num") == 51
+
+
+def test_query_registry_candidates_anchoring_with_mapped_slots() -> None:
+    """Validate range slot anchoring works for slot references.
+
+    With custom list prefixes (e.g. list:slot).
+    """
+    intent_sources = {
+        "builtin": {
+            "lists": {
+                "timer_minutes": {"range": {"from": 1, "to": 100}},
+                "timer_seconds": {"range": {"from": 1, "to": 100}},
+            },
+            "intents": {
+                "HassStartTimer": {
+                    "data": [
+                        {
+                            "sentences": [
+                                "timer for {timer_minutes:minutes} minutes "
+                                "[and] {timer_seconds:seconds} seconds"
+                            ]
+                        }
+                    ]
+                }
+            },
+        }
+    }
+
+    candidates = build_query_registry_candidates(
+        "en",
+        intent_sources,
+        {},
+        "timer for 5 minutes and 30 seconds",
+        max_candidates=1,
+    )
+    assert len(candidates) == 1
+    slots = orjson.loads(candidates[0].metadata["slots"])
+    assert slots.get("minutes") == 5
+    assert slots.get("seconds") == 30
