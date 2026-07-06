@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import contextvars
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Iterator, Sequence
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -55,6 +58,48 @@ async def async_setup_entry(
         msg = "Assist Canonicalizer runtime is not loaded"
         raise RuntimeError(msg)
     async_add_entities([AssistCanonicalizerConversationEntity(config_entry, runtime)])
+
+
+class TaskDeltaWrapper:
+    """Task-safe wrapper for chat log delta listener."""
+
+    def __init__(self, original_listener: Callable[[Any, dict], None] | None) -> None:
+        """Initialize the wrapper."""
+        self.original_listener = original_listener
+        self._listener_var: contextvars.ContextVar[Callable[[Any, dict], None] | None] = (
+            contextvars.ContextVar("task_listener", default=None)
+        )
+        self._active_tasks: dict[int, int] = {}
+
+    def __call__(self, log: Any, delta: dict) -> None:
+        """Forward callbacks to task-local listener if active, else to original listener."""
+        if (listener := self._listener_var.get()) is not None:
+            listener(log, delta)
+        elif self.original_listener is not None:
+            self.original_listener(log, delta)
+
+    def set_listener(self, listener: Callable[[Any, dict], None]) -> contextvars.Token:
+        """Register the task-local listener."""
+        with contextlib.suppress(RuntimeError):
+            if (task := asyncio.current_task()) is not None:
+                task_id = id(task)
+                self._active_tasks[task_id] = self._active_tasks.get(task_id, 0) + 1
+        return self._listener_var.set(listener)
+
+    def reset_listener(self, token: contextvars.Token) -> None:
+        """Deregister the task-local listener."""
+        with contextlib.suppress(RuntimeError):
+            if (task := asyncio.current_task()) is not None:
+                task_id = id(task)
+                if task_id in self._active_tasks:
+                    self._active_tasks[task_id] -= 1
+                    if self._active_tasks[task_id] <= 0:
+                        del self._active_tasks[task_id]
+        self._listener_var.reset(token)
+
+    def has_active_listeners(self) -> bool:
+        """Return whether there are active listeners."""
+        return len(self._active_tasks) > 0
 
 
 class AssistCanonicalizerConversationEntity(
@@ -129,6 +174,9 @@ class AssistCanonicalizerConversationEntity(
         self, user_input: ConversationInput
     ) -> ConversationResult | None:
         """Attempt to delegate text directly via the assist pipeline shortcut path if allowed."""
+        chat_log = self._get_active_chat_log()
+        old_len = len(chat_log.content) if chat_log is not None else None
+
         try:
             from homeassistant.components.assist_pipeline.const import DOMAIN as PIPELINE_DOMAIN
 
@@ -150,21 +198,60 @@ class AssistCanonicalizerConversationEntity(
             from homeassistant.components.assist_pipeline.pipeline import async_get_pipeline
 
             pipeline = current_pipeline or async_get_pipeline(self.hass)
-            if pipeline and not getattr(pipeline, "prefer_local_intents", False):
-                shortcut_result = await self._delegate_text(
-                    user_input.text,
-                    user_input,
-                    primary=True,
-                )
-                if not self._result_has_error(shortcut_result):
-                    self._runtime.update_diagnostics(clear_last_error=True)
-                    return shortcut_result
+            if not pipeline or getattr(pipeline, "prefer_local_intents", False):
+                return None
+
+            shortcut_result = await self._delegate_with_capture(
+                user_input.text,
+                user_input,
+                chat_log,
+                old_len,
+            )
+            if shortcut_result is None:
+                return None
         except Exception as err:
             _LOGGER.debug(
                 "Assist pipeline shortcut path not available: %s",
                 err,
             )
-        return None
+            return None
+
+        self._runtime.update_diagnostics(clear_last_error=True)
+        return shortcut_result
+
+    async def _delegate_with_capture(
+        self,
+        text: str,
+        user_input: ConversationInput,
+        chat_log: Any,
+        old_len: int | None,
+        *,
+        update_diagnostics_on_error: bool = False,
+    ) -> ConversationResult | None:
+        """Delegate text and capture/play back deltas silently, restoring on failure."""
+        deltas: list[dict] = []
+        try:
+            with self._capture_chat_log_deltas(chat_log) as captured:
+                result = await self._delegate_text(
+                    text,
+                    user_input,
+                    primary=True,
+                )
+                deltas = captured
+            if self._result_has_error(result):
+                self._restore_chat_log_content(chat_log, old_len)
+                return None
+        except Exception as err:
+            if update_diagnostics_on_error:
+                self._runtime.update_diagnostics(last_error=str(err))
+            self._restore_chat_log_content(chat_log, old_len)
+            raise
+
+        try:
+            self._play_back_deltas(chat_log, deltas)
+        except Exception as err:
+            _LOGGER.debug("Error during chat log delta playback: %s", err)
+        return result
 
     async def _async_process_with_runtime(
         self, user_input: ConversationInput
@@ -299,21 +386,27 @@ class AssistCanonicalizerConversationEntity(
         are rehydrated from the original query before delegation so that the
         downstream agent receives real free-text values.
         """
+        chat_log = self._get_active_chat_log()
+        old_len = len(chat_log.content) if chat_log is not None else None
+
         candidate = ranked_candidate.candidate
         candidate_text = candidate.text
         rehydrated = rehydrate_wildcard_text(candidate_text, user_input.text, user_input.language)
         if candidate.has_wildcard and rehydrated == candidate_text:
             return None
+
         try:
-            validation_result = await self._delegate_text(
+            validation_result = await self._delegate_with_capture(
                 rehydrated,
                 user_input,
-                primary=True,
+                chat_log,
+                old_len,
+                update_diagnostics_on_error=True,
             )
-        except Exception as err:
-            self._runtime.update_diagnostics(last_error=str(err))
+        except Exception:
             return None
-        return None if self._result_has_error(validation_result) else validation_result
+
+        return validation_result
 
     async def _delegate_raw_text(self, user_input: ConversationInput) -> ConversationResult:
         """Delegate the original user text to the configured fallback path."""
@@ -356,6 +449,66 @@ class AssistCanonicalizerConversationEntity(
             satellite_id=getattr(user_input, "satellite_id", None),
             extra_system_prompt=getattr(user_input, "extra_system_prompt", None),
         )
+
+    @contextlib.contextmanager
+    def _capture_chat_log_deltas(self, chat_log: Any) -> Iterator[list[dict]]:
+        """Temporarily intercept and capture chat log delta listener callbacks."""
+        captured_deltas: list[dict] = []
+        if chat_log is None:
+            yield captured_deltas
+            return
+
+        def task_listener(log: Any, delta: dict) -> None:
+            captured_deltas.append(delta)
+
+        current_listener = getattr(chat_log, "delta_listener", None)
+
+        if isinstance(current_listener, TaskDeltaWrapper):
+            wrapper = current_listener
+            restore_listener = wrapper.original_listener
+        else:
+            wrapper = TaskDeltaWrapper(current_listener)
+            chat_log.delta_listener = wrapper
+            restore_listener = current_listener
+
+        token = wrapper.set_listener(task_listener)
+        try:
+            yield captured_deltas
+        finally:
+            wrapper.reset_listener(token)
+            # Only restore if no other task is actively intercepting and the
+            # listener was not reassigned externally while we were running.
+            if (
+                not wrapper.has_active_listeners()
+                and getattr(chat_log, "delta_listener", None) is wrapper
+            ):
+                chat_log.delta_listener = restore_listener
+
+    def _play_back_deltas(self, chat_log: Any, deltas: list[dict]) -> None:
+        """Play back captured deltas to the original listener."""
+        if chat_log is not None and deltas:
+            listener = getattr(chat_log, "delta_listener", None)
+            while isinstance(listener, TaskDeltaWrapper):
+                listener = listener.original_listener
+            if listener is not None:
+                for delta in deltas:
+                    listener(chat_log, delta)
+
+    def _get_active_chat_log(self) -> Any:
+        """Return the active chat log for the current conversation context."""
+        try:
+            from homeassistant.components.conversation.chat_log import current_chat_log
+
+            return current_chat_log.get(None)
+        except (ImportError, RuntimeError, AttributeError, LookupError) as err:
+            _LOGGER.debug("No conversation chat log available: %s", err)
+        return None
+
+    @staticmethod
+    def _restore_chat_log_content(chat_log: Any, old_len: int | None) -> None:
+        """Restore the chat log content to the pre-delegation length."""
+        if chat_log is not None and old_len is not None:
+            del chat_log.content[old_len:]
 
     def _fallback_agent_id(self, default_agent_id: str) -> str:
         """Return a configured fallback agent without allowing self-forwarding."""

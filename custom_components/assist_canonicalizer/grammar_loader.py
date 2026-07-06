@@ -319,7 +319,7 @@ def _compile_template_from_sentence(
         expansion_rules=state.expansion_rules,
         base_data_slot_values=state.base_data_slot_values,
         static_slots=state.static_slots,
-        required_slots=frozenset(_required_slots(sentence, state.expansion_rules)),
+        required_slots=_required_slots(sentence, state.expansion_rules),
         metadata=base_metadata,
         literal_token_variants=variants,
         literal_token_variants_no_diac=no_diac_variants,
@@ -2598,10 +2598,24 @@ def _required_slots(
     text: str,
     expansion_rules: Mapping[str, str],
     seen_rules: frozenset[str] = frozenset(),
-) -> set[str]:
+) -> frozenset[str]:
     """Return all slot names that are required in the template."""
+    return _cached_required_slots(
+        text,
+        _expansion_rules_cache_key(expansion_rules),
+        seen_rules,
+    )
+
+
+@lru_cache(maxsize=4096)
+def _cached_required_slots(
+    text: str,
+    expansion_rules_key: tuple[tuple[str, str], ...],
+    seen_rules: frozenset[str],
+) -> frozenset[str]:
+    """Return cached required slot names."""
     top_node = _parse_hassil(text)
-    return top_node.required_slots(expansion_rules, seen_rules)
+    return frozenset(top_node.required_slots(dict(expansion_rules_key), seen_rules))
 
 
 def _template_slot_names(
@@ -2622,6 +2636,20 @@ def _template_slot_references(
     seen_rules: frozenset[str] = frozenset(),
 ) -> tuple[TemplateSlotReference, ...]:
     """Return slot references from a sentence template and its rules."""
+    return _cached_template_slot_references(
+        text,
+        _expansion_rules_cache_key(expansion_rules),
+        seen_rules,
+    )
+
+
+@lru_cache(maxsize=4096)
+def _cached_template_slot_references(
+    text: str,
+    expansion_rules_key: tuple[tuple[str, str], ...],
+    seen_rules: frozenset[str],
+) -> tuple[TemplateSlotReference, ...]:
+    """Return cached slot references from a sentence template and its rules."""
     references: list[TemplateSlotReference] = []
     seen_references: set[tuple[str, str]] = set()
 
@@ -2636,15 +2664,16 @@ def _template_slot_references(
 
     for match in _SLOT_PATTERN.finditer(text):
         add_reference(_slot_reference(match.group(1)))
+    expansion_rules = dict(expansion_rules_key)
     for rule_match in _RULE_PATTERN.finditer(text):
         rule_name = rule_match.group(1).strip()
         if rule_name in seen_rules:
             continue
         rule_text = expansion_rules.get(rule_name)
         if rule_text is not None:
-            for reference in _template_slot_references(
+            for reference in _cached_template_slot_references(
                 rule_text,
-                expansion_rules,
+                expansion_rules_key,
                 seen_rules | frozenset({rule_name}),
             ):
                 add_reference(reference)

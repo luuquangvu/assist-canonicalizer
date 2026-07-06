@@ -902,3 +902,311 @@ async def test_async_process_prefer_local_intents_true_no_shortcut(
         mock_rebuild_index.assert_awaited_once()
         mock_rank.assert_called_once()
         mock_delegate_raw.assert_awaited_once_with(user_input)
+
+
+@pytest.mark.parametrize(
+    "simulate_exception",
+    [False, True],
+)
+@pytest.mark.asyncio
+async def test_async_process_shortcut_restores_chat_log(
+    monkeypatch: pytest.MonkeyPatch,
+    simulate_exception: bool,
+) -> None:
+    """Test that the chat log is restored if the shortcut path fails or raises an exception."""
+
+    class DummyPipeline:
+        """Dummy pipeline class for testing."""
+
+        prefer_local_intents = False
+
+    mock_pipeline_module = MagicMock()
+    mock_pipeline_module.async_get_pipeline = MagicMock(return_value=DummyPipeline())
+
+    monkeypatch.setitem(
+        sys.modules,
+        "homeassistant.components.assist_pipeline.pipeline",
+        mock_pipeline_module,
+    )
+
+    entry = MagicMock()
+    runtime = CanonicalizerRuntime()
+    mock_index = MagicMock()
+    mock_index.language = "vi"
+    runtime.set_index(mock_index)
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    entity.hass = MagicMock()
+
+    mock_user_message = MagicMock()
+    mock_user_message.role = "user"
+    mock_user_message.content = "tắt đèn bếp"
+
+    mock_chat_log = MagicMock()
+    mock_chat_log.content = [mock_user_message]
+
+    entity.hass.data = {
+        "assist_pipeline": MagicMock(),
+    }
+    entity.hass.async_add_executor_job = AsyncMock(side_effect=lambda target, *args: target(*args))
+
+    user_input = MockConversationInput("tắt đèn bếp", "vi", conversation_id="conv-1")
+
+    # Shortcut result has an error
+    shortcut_res = MagicMock()
+    shortcut_res.response.error_code = "intent-failed"
+
+    # Fallback validation succeeds
+    validation_ok_res = MagicMock()
+    validation_ok_res.response.error_code = None
+
+    with (
+        patch.object(
+            entity,
+            "_get_active_chat_log",
+            return_value=mock_chat_log,
+        ),
+        patch.object(
+            entity,
+            "_delegate_text",
+            AsyncMock(),
+        ) as mock_delegate,
+        patch.object(
+            CanonicalizerRuntime,
+            "rank_with_dynamic_candidates",
+            return_value=[
+                RankedCandidate(
+                    candidate=Candidate(
+                        text="tắt đèn bếp",
+                        intent_name="HassTurnOff",
+                        slot_values=(),
+                        language="vi",
+                    ),
+                    scores=ScoreBreakdown(1.0, 1.0, 1.0, 1.0, 1.0),
+                )
+            ],
+        ),
+    ):
+        call_count = 0
+
+        def side_effect(*args, **kwargs):
+            """Side effect helper to simulate shortcut failure followed by success."""
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                mock_chat_log.content.append(MagicMock(role="assistant", content="error response"))
+                if simulate_exception:
+                    raise RuntimeError("Shortcut failed")
+                return shortcut_res
+            return validation_ok_res
+
+        mock_delegate.side_effect = side_effect
+
+        res = await entity.async_process(user_input)
+        assert res is validation_ok_res
+
+        # Verify that mock_chat_log.content was restored to the original snapshot
+        assert mock_chat_log.content == [mock_user_message]
+
+
+@pytest.mark.parametrize(
+    "simulate_exception",
+    [False, True],
+)
+@pytest.mark.asyncio
+async def test_async_validate_ranked_candidate_restores_chat_log(
+    simulate_exception: bool,
+) -> None:
+    """Test that the chat log is restored if candidate validation fails or raises an exception."""
+    entry = MagicMock()
+    runtime = CanonicalizerRuntime()
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    entity.hass = MagicMock()
+
+    # Create mock chat log
+    mock_user_message = MagicMock()
+    mock_user_message.role = "user"
+    mock_user_message.content = "original query"
+
+    mock_chat_log = MagicMock()
+    mock_chat_log.content = [mock_user_message]
+
+    user_input = MockConversationInput("original query", "vi", conversation_id="conv-1")
+
+    ranked_candidate = RankedCandidate(
+        candidate=Candidate(
+            text="tắt đèn bếp",
+            intent_name="HassTurnOff",
+            slot_values=(),
+            language="vi",
+        ),
+        scores=ScoreBreakdown(1.0, 1.0, 1.0, 1.0, 1.0),
+    )
+
+    # Validation result has an error
+    validation_res = MagicMock()
+    validation_res.response.error_code = "intent-failed"
+
+    with (
+        patch.object(
+            entity,
+            "_get_active_chat_log",
+            return_value=mock_chat_log,
+        ),
+        patch.object(
+            entity,
+            "_delegate_text",
+            AsyncMock(),
+        ) as mock_delegate,
+    ):
+
+        def side_effect(*args, **kwargs):
+            """Side effect helper to simulate validation outcome."""
+            # During _delegate_text execution, a user message and
+            # assistant message get appended to the chat log
+            mock_chat_log.content.extend(
+                [
+                    MagicMock(role="user", content="tắt đèn bếp"),
+                    MagicMock(role="assistant", content="error response"),
+                ]
+            )
+            if simulate_exception:
+                raise RuntimeError("Validation exception")
+            return validation_res
+
+        mock_delegate.side_effect = side_effect
+
+        res = await entity._async_validate_ranked_candidate(ranked_candidate, user_input)
+        assert res is None
+
+        # Verify that mock_chat_log.content was restored (keeping only the original user message)
+        assert mock_chat_log.content == [mock_user_message]
+
+
+class DummyChatLog:
+    """Dummy chat log class for testing."""
+
+    def __init__(self, delta_listener: Any = None) -> None:
+        """Initialize."""
+        self.delta_listener = delta_listener
+
+
+@pytest.fixture
+def conversation_entity() -> AssistCanonicalizerConversationEntity:
+    """Fixture to provide an AssistCanonicalizerConversationEntity instance."""
+    entry = MagicMock()
+    runtime = CanonicalizerRuntime()
+    return AssistCanonicalizerConversationEntity(entry, runtime)
+
+
+@pytest.mark.asyncio
+async def test_capture_chat_log_deltas_concurrent(
+    conversation_entity: AssistCanonicalizerConversationEntity,
+) -> None:
+    """Test that delta capturing is task-safe under concurrent tasks."""
+    chat_log = DummyChatLog()
+
+    task_1_entered = asyncio.Event()
+    task_2_entered = asyncio.Event()
+
+    async def task_1() -> list[dict]:
+        """First task that captures deltas."""
+        with conversation_entity._capture_chat_log_deltas(chat_log) as deltas:
+            task_1_entered.set()
+            await task_2_entered.wait()
+            if chat_log.delta_listener:
+                chat_log.delta_listener(chat_log, {"text": "task1"})
+            return deltas
+
+    async def task_2() -> list[dict]:
+        """Second task that captures deltas."""
+        await task_1_entered.wait()
+        with conversation_entity._capture_chat_log_deltas(chat_log) as deltas:
+            task_2_entered.set()
+            if chat_log.delta_listener:
+                chat_log.delta_listener(chat_log, {"text": "task2"})
+            return deltas
+
+    res_1, res_2 = await asyncio.gather(task_1(), task_2())
+
+    assert res_1 == [{"text": "task1"}]
+    assert res_2 == [{"text": "task2"}]
+    assert chat_log.delta_listener is None
+
+
+@pytest.mark.asyncio
+async def test_delta_capture_realtime_silence_and_playback(
+    conversation_entity: AssistCanonicalizerConversationEntity,
+) -> None:
+    """Test that live deltas are captured and not leaked.
+
+    Deltas should not leak to original listener in real-time, then correctly played back.
+    """
+    orig_called = []
+
+    def orig_listener(log: Any, delta: dict) -> None:
+        """Original listener callback."""
+        orig_called.append(delta)
+
+    chat_log = DummyChatLog(orig_listener)
+
+    with conversation_entity._capture_chat_log_deltas(chat_log) as deltas:
+        # Simulate delta generated during capture
+        assert chat_log.delta_listener is not orig_listener
+        chat_log.delta_listener(chat_log, {"text": "hello"})
+
+        # Verify that original listener has not received it yet
+        assert not orig_called
+        assert deltas == [{"text": "hello"}]
+
+    # Play back deltas
+    conversation_entity._play_back_deltas(chat_log, deltas)
+
+    # Verify that original listener receives the delta exactly once
+    assert orig_called == [{"text": "hello"}]
+
+
+@pytest.mark.asyncio
+async def test_delta_capture_nested_playback_safety(
+    conversation_entity: AssistCanonicalizerConversationEntity,
+) -> None:
+    """Test delta playback on nested/concurrent wrappers.
+
+    Ensures it resolves directly to the original listener.
+    """
+    orig_called = []
+
+    def orig_listener(log: Any, delta: dict) -> None:
+        """Original listener callback."""
+        orig_called.append(delta)
+
+    chat_log = DummyChatLog(orig_listener)
+
+    # Task 1 (outer) captures deltas
+    with conversation_entity._capture_chat_log_deltas(chat_log) as outer_deltas:
+        # Task 2 (inner/nested in same task context) captures deltas
+        with conversation_entity._capture_chat_log_deltas(chat_log) as inner_deltas:
+            # Trigger delta
+            chat_log.delta_listener(chat_log, {"text": "inner"})
+            # Verify inner captures it
+            assert inner_deltas == [{"text": "inner"}]
+            # Verify outer has not captured it directly (since ContextVar is active)
+            assert not outer_deltas
+            # Verify original listener is silent
+            assert not orig_called
+
+        # Now back in outer context, inner context is exited.
+        # Play back inner deltas. The delta_listener is still the wrapper.
+        conversation_entity._play_back_deltas(chat_log, inner_deltas)
+
+        # Verify that original listener has received the played back delta
+        assert orig_called == [{"text": "inner"}]
+
+        # Trigger delta in outer context
+        chat_log.delta_listener(chat_log, {"text": "outer"})
+        assert outer_deltas == [{"text": "outer"}]
+
+    # Play back outer deltas
+    conversation_entity._play_back_deltas(chat_log, outer_deltas)
+
+    # Verify original listener receives the outer delta too, exactly once
+    assert orig_called == [{"text": "inner"}, {"text": "outer"}]
