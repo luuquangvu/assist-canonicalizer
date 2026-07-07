@@ -140,6 +140,7 @@ class FallbackReason(StrEnum):
     VALIDATION_FAILED = "validation_failed"
     RANKING_FAILED = "ranking_failed"
     UNEXPECTED_EXCEPTION = "unexpected_exception"
+    NO_CANDIDATE = "no_candidate"
 
 
 # GENERIC_LATIN_REPLACEMENTS maps specific Latin-extended characters

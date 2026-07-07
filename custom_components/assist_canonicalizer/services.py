@@ -87,28 +87,28 @@ def async_setup_services(hass: Any) -> None:
     hass.services.async_register(
         DOMAIN,
         SERVICE_TEST_MATCH,
-        partial(_dispatch_test_match, hass),
+        partial(_handle_test_match, hass),
         schema=TEST_MATCH_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN,
         SERVICE_REBUILD_INDEX,
-        partial(_dispatch_rebuild_index, hass),
+        partial(_handle_rebuild_index, hass),
         schema=REBUILD_INDEX_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN,
         SERVICE_CLEAR_INDEX,
-        partial(_dispatch_clear_index, hass),
+        partial(_handle_clear_index, hass),
         schema=CLEAR_INDEX_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN,
         SERVICE_DIAGNOSTICS,
-        partial(_dispatch_diagnostics, hass),
+        partial(_handle_diagnostics, hass),
         schema=DIAGNOSTICS_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
@@ -116,35 +116,10 @@ def async_setup_services(hass: Any) -> None:
     hass.services.async_register(
         DOMAIN,
         SERVICE_DUMP_CANDIDATES,
-        partial(_dispatch_dump_candidates, hass),
+        partial(_handle_dump_candidates, hass),
         schema=DUMP_CANDIDATES_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
-
-
-async def _dispatch_test_match(hass: Any, call: ServiceCall) -> dict[str, Any]:
-    """Dispatch test_match service calls."""
-    return await _handle_test_match(hass, call)
-
-
-async def _dispatch_rebuild_index(hass: Any, call: ServiceCall) -> dict[str, Any]:
-    """Dispatch rebuild_index service calls."""
-    return await _handle_rebuild_index(hass, call)
-
-
-async def _dispatch_clear_index(hass: Any, call: ServiceCall) -> dict[str, Any]:
-    """Dispatch clear_index service calls."""
-    return await _handle_clear_index(hass, call)
-
-
-def _dispatch_diagnostics(hass: Any, call: ServiceCall) -> dict[str, Any]:
-    """Dispatch diagnostics service calls."""
-    return _handle_diagnostics(hass, call)
-
-
-async def _dispatch_dump_candidates(hass: Any, call: ServiceCall) -> dict[str, Any]:
-    """Dispatch dump_candidates service calls."""
-    return await _handle_dump_candidates(hass, call)
 
 
 def async_unload_services(hass: Any) -> None:
@@ -260,7 +235,8 @@ async def _handle_clear_index(hass: Any, call: ServiceCall) -> dict[str, Any]:
     return {ATTR_CANDIDATE_COUNT: runtime.total_candidate_count()}
 
 
-def _handle_diagnostics(hass: Any, call: ServiceCall) -> dict[str, Any]:
+@_wrap_service_errors("Diagnostics")
+async def _handle_diagnostics(hass: Any, call: ServiceCall) -> dict[str, Any]:
     """Return runtime diagnostics."""
     runtime = _runtime_from_hass(hass)
     diagnostics = runtime.diagnostics.as_dict()

@@ -235,7 +235,7 @@ async def test_async_process_with_runtime_flows() -> None:
     with patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw_delegated")):
         res = await entity._async_process_with_runtime(user_input)
         assert res == "raw_delegated"
-        assert runtime.diagnostics.last_fallback_reason == FallbackReason.LOW_CONFIDENCE
+        assert runtime.diagnostics.last_fallback_reason == FallbackReason.NO_CANDIDATE
 
     runtime.indexes["vi"] = MagicMock(candidate_count=5)
     with (
@@ -256,7 +256,7 @@ async def test_async_process_with_runtime_flows() -> None:
     ):
         res = await entity._async_process_with_runtime(user_input)
         assert res == "raw_delegated"
-        assert runtime.diagnostics.last_fallback_reason == FallbackReason.LOW_CONFIDENCE
+        assert runtime.diagnostics.last_fallback_reason == FallbackReason.NO_CANDIDATE
 
     rc_low_margin_top = RankedCandidate(
         candidate=Candidate(text="tắt đèn bếp", intent_name="HassTurnOff"),

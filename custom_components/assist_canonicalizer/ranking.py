@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from functools import partial
+from functools import lru_cache, partial
 from heapq import nsmallest
 from math import isclose
 from typing import Any
@@ -70,6 +70,21 @@ from .utils import (
     normalized_slot_value_tokens,
     parse_float,
 )
+
+
+@lru_cache(maxsize=4096)
+def _raw_cached_fuzz_ratio(s1: str, s2: str) -> float:
+    """Return RapidFuzz's ratio with LRU caching."""
+    return fuzz.ratio(s1, s2)
+
+
+def _cached_fuzz_ratio(s1: str, s2: str) -> float:
+    """Return RapidFuzz's ratio with LRU caching.
+
+    The argument order is normalized to maximize cache hit rate.
+    """
+    return _raw_cached_fuzz_ratio(s1, s2) if s1 <= s2 else _raw_cached_fuzz_ratio(s2, s1)
+
 
 _LiteralVariantAnalysis = list[tuple[int, int, list[frozenset[str]]]]
 _KNOWN_OPPOSING_INTENT_TIE_PAIRS: tuple[tuple[str, str], ...] = (
@@ -190,7 +205,7 @@ def rapidfuzz_similarity_normalized(
         return 0.0
     wratio: float = fuzz.WRatio(query, candidate)
     if query_sorted is not None and candidate_sorted is not None:
-        token_sort: float = fuzz.ratio(query_sorted, candidate_sorted)
+        token_sort: float = _cached_fuzz_ratio(query_sorted, candidate_sorted)
     else:
         token_sort: float = fuzz.token_sort_ratio(query, candidate)
     token_set: float = fuzz.token_set_ratio(query, candidate)
@@ -925,7 +940,7 @@ def _has_unanchored_entity_slot(
         if any(
             slot_token in query_tokens
             or any(
-                fuzz.ratio(slot_token, query_token) >= SLOT_TOKEN_MATCH_THRESHOLD
+                _cached_fuzz_ratio(slot_token, query_token) >= SLOT_TOKEN_MATCH_THRESHOLD
                 for query_token in query_tokens_tuple
             )
             for slot_token in slot_tokens
@@ -980,7 +995,7 @@ def _has_static_entity_uncovered_query_tokens(
         if query_token in candidate_tokens:
             continue
         if all(
-            fuzz.ratio(query_token, candidate_token) < SLOT_TOKEN_MATCH_THRESHOLD
+            _cached_fuzz_ratio(query_token, candidate_token) < SLOT_TOKEN_MATCH_THRESHOLD
             for candidate_token in candidate_tokens
         ):
             return True
@@ -1002,7 +1017,7 @@ def _has_static_slot_query_conflict(
         if query_token in candidate_tokens:
             continue
         if all(
-            fuzz.ratio(query_token, candidate_token) < SLOT_TOKEN_MATCH_THRESHOLD
+            _cached_fuzz_ratio(query_token, candidate_token) < SLOT_TOKEN_MATCH_THRESHOLD
             for candidate_token in candidate_tokens
         ):
             return True
@@ -1376,7 +1391,7 @@ def rank_candidates(
             )
             for q_tok in query_slot_tokens:
                 is_matched = q_tok in allowed_cand_tokens or any(
-                    fuzz.ratio(q_tok, c_tok) >= SLOT_TOKEN_MATCH_THRESHOLD
+                    _cached_fuzz_ratio(q_tok, c_tok) >= SLOT_TOKEN_MATCH_THRESHOLD
                     for c_tok in allowed_cand_tokens
                 )
                 if not is_matched:
@@ -1387,7 +1402,7 @@ def rank_candidates(
                 cand_matched = 0
                 for c_tok in cand_slot_tokens:
                     if c_tok in query_tokens_tuple or any(
-                        fuzz.ratio(c_tok, q_tok) >= SLOT_TOKEN_MATCH_THRESHOLD
+                        _cached_fuzz_ratio(c_tok, q_tok) >= SLOT_TOKEN_MATCH_THRESHOLD
                         for q_tok in query_tokens_tuple
                     ):
                         cand_matched += 1
@@ -1396,7 +1411,7 @@ def rank_candidates(
                 query_matched = 0
                 for q_tok in query_slot_tokens:
                     if q_tok in allowed_cand_tokens or any(
-                        fuzz.ratio(q_tok, c_tok) >= SLOT_TOKEN_MATCH_THRESHOLD
+                        _cached_fuzz_ratio(q_tok, c_tok) >= SLOT_TOKEN_MATCH_THRESHOLD
                         for c_tok in allowed_cand_tokens
                     ):
                         query_matched += 1
@@ -1408,7 +1423,7 @@ def rank_candidates(
             has_conflict = any(
                 q_tok not in allowed_cand_tokens
                 and all(
-                    fuzz.ratio(q_tok, c_tok) < SLOT_TOKEN_MATCH_THRESHOLD
+                    _cached_fuzz_ratio(q_tok, c_tok) < SLOT_TOKEN_MATCH_THRESHOLD
                     for c_tok in allowed_cand_tokens
                 )
                 for q_tok in query_slot_tokens
@@ -1786,17 +1801,20 @@ def _is_same_text_same_slot_competitor(
     )
 
 
-def accepted_candidate(
+def evaluate_confidence_gates(
     ranked: Sequence[RankedCandidate],
     min_confidence: float = DEFAULT_MIN_CONFIDENCE,
     min_margin: float = DEFAULT_MIN_MARGIN,
-) -> RankedCandidate | None:
-    """Return the accepted top candidate or None when confidence gates reject it."""
+) -> tuple[RankedCandidate | None, FallbackReason | None]:
+    """Evaluate confidence gates and return the accepted candidate.
+
+    Returns the accepted candidate and the fallback reason if rejected.
+    """
     if not ranked:
-        return None
+        return None, FallbackReason.NO_CANDIDATE
     top_candidate = ranked[0]
     if top_candidate.scores.final_score < min_confidence:
-        return None
+        return None, FallbackReason.LOW_CONFIDENCE
     competing_candidate = next(
         (
             item
@@ -1807,24 +1825,36 @@ def accepted_candidate(
         None,
     )
     if competing_candidate is None:
-        return top_candidate
+        return top_candidate, None
     if _is_exact_lexical_match(top_candidate):
-        return top_candidate
+        return top_candidate, None
     if _is_turn_on_off_same_slot_tie(top_candidate, competing_candidate):
-        return top_candidate
+        return top_candidate, None
     margin = top_candidate.scores.final_score - competing_candidate.scores.final_score
     if _has_weak_zero_intent_evidence(top_candidate, margin):
-        return None
+        return None, FallbackReason.LOW_CONFIDENCE
     if _has_safe_relaxed_intent_evidence(
         top_candidate,
         competing_candidate,
         margin,
         min_margin,
     ):
-        return top_candidate
+        return top_candidate, None
     if _passes_high_confidence_relaxed_margin(top_candidate, margin, min_margin):
-        return top_candidate
-    return None if margin < min_margin else top_candidate
+        return top_candidate, None
+    if margin < min_margin:
+        return None, FallbackReason.LOW_MARGIN
+    return top_candidate, None
+
+
+def accepted_candidate(
+    ranked: Sequence[RankedCandidate],
+    min_confidence: float = DEFAULT_MIN_CONFIDENCE,
+    min_margin: float = DEFAULT_MIN_MARGIN,
+) -> RankedCandidate | None:
+    """Return the accepted top candidate or None when confidence gates reject it."""
+    candidate, _ = evaluate_confidence_gates(ranked, min_confidence, min_margin)
+    return candidate
 
 
 def confidence_gate_rejection_reason(
@@ -1833,38 +1863,16 @@ def confidence_gate_rejection_reason(
     min_margin: float = DEFAULT_MIN_MARGIN,
 ) -> FallbackReason:
     """Return the fallback reason for candidates rejected by confidence gates."""
-    if not ranked or ranked[0].scores.final_score < min_confidence:
-        return FallbackReason.LOW_CONFIDENCE
-    top_candidate = ranked[0]
-    competing_candidate = next(
-        (
-            item
-            for item in ranked[1:]
-            if item.candidate.intent_name != top_candidate.candidate.intent_name
-            and not _is_same_text_same_slot_competitor(top_candidate, item)
-        ),
-        None,
-    )
-    if competing_candidate is None or _is_exact_lexical_match(top_candidate):
-        return FallbackReason.LOW_CONFIDENCE
-    margin = top_candidate.scores.final_score - competing_candidate.scores.final_score
-    if _has_weak_zero_intent_evidence(top_candidate, margin):
-        return FallbackReason.LOW_CONFIDENCE
-    if _has_safe_relaxed_intent_evidence(
-        top_candidate,
-        competing_candidate,
-        margin,
-        min_margin,
-    ):
-        return FallbackReason.LOW_CONFIDENCE
-    if margin < min_margin and not _passes_high_confidence_relaxed_margin(
-        top_candidate, margin, min_margin
-    ):
-        return FallbackReason.LOW_MARGIN
-    return FallbackReason.LOW_CONFIDENCE
+    _, reason = evaluate_confidence_gates(ranked, min_confidence, min_margin)
+    return reason or FallbackReason.LOW_CONFIDENCE
 
 
 def _is_exact_lexical_match(ranked_candidate: RankedCandidate) -> bool:
     """Return whether a ranked candidate exactly matches query text lexically."""
     scores = ranked_candidate.scores
     return scores.rapidfuzz_score == 1.0 and scores.char_ngram_score == 1.0
+
+
+def clear_ranking_caches() -> None:
+    """Clear all global LRU caches in ranking module."""
+    _raw_cached_fuzz_ratio.cache_clear()

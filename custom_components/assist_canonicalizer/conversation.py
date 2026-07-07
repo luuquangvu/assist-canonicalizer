@@ -35,7 +35,7 @@ from .const import (
     FallbackReason,
 )
 from .grammar_loader import rehydrate_wildcard_text
-from .ranking import RankedCandidate, accepted_candidate, confidence_gate_rejection_reason
+from .ranking import RankedCandidate, evaluate_confidence_gates
 from .runtime import CanonicalizerRuntime
 from .utils import (
     elapsed_ms,
@@ -297,7 +297,7 @@ class AssistCanonicalizerConversationEntity(
                 user_input.text,
                 DEFAULT_MAX_CANDIDATES,
             )
-            selected = accepted_candidate(
+            selected, fallback_reason = evaluate_confidence_gates(
                 ranked,
                 min_confidence=min_confidence,
                 min_margin=min_margin,
@@ -311,11 +311,7 @@ class AssistCanonicalizerConversationEntity(
 
         if selected is None:
             self._runtime.update_diagnostics(
-                last_fallback_reason=confidence_gate_rejection_reason(
-                    ranked,
-                    min_confidence=min_confidence,
-                    min_margin=min_margin,
-                )
+                last_fallback_reason=fallback_reason or FallbackReason.LOW_CONFIDENCE
             )
             return await self._delegate_raw_text(user_input)
 

@@ -34,7 +34,7 @@ from custom_components.assist_canonicalizer.runtime import (
     CanonicalizerRuntime,
     _build_index_from_snapshot,
     _canonical_fingerprint_value,
-    _create_build_snapshot,
+    _create_build_snapshot_and_register_wildcards,
 )
 from custom_components.assist_canonicalizer.utils import normalize_language
 
@@ -995,7 +995,9 @@ async def test_persistent_store_save_and_load(monkeypatch: Any) -> None:
 
     MockStore.reset()
     try:
-        snapshot = _create_build_snapshot("vi", *runtime._capture_build_inputs())
+        snapshot = _create_build_snapshot_and_register_wildcards(
+            "vi", *runtime._capture_build_inputs()
+        )
         await runtime.async_save_index_to_store(hass, index, snapshot.fingerprint)
 
         stored_index = MockStore.stored_data["assist_canonicalizer.index_vi"]
@@ -1036,7 +1038,7 @@ async def test_persistent_store_rejects_old_build_version(monkeypatch: Any) -> N
     MockStore.reset()
     hass = HashableFakeHass()
     runtime = CanonicalizerRuntime()
-    snapshot = _create_build_snapshot("en", *runtime._capture_build_inputs())
+    snapshot = _create_build_snapshot_and_register_wildcards("en", *runtime._capture_build_inputs())
     index = build_index(
         "en",
         [Candidate(text="turn on light", intent_name="HassTurnOn", language="en")],
@@ -1060,7 +1062,7 @@ async def test_persistent_store_rejects_stale_fingerprint(monkeypatch: Any) -> N
     hass = HashableFakeHass()
     runtime = CanonicalizerRuntime()
     runtime.update_registry_slot_values({"name": ("old lamp",)})
-    snapshot = _create_build_snapshot("en", *runtime._capture_build_inputs())
+    snapshot = _create_build_snapshot_and_register_wildcards("en", *runtime._capture_build_inputs())
     index = build_index("en", [Candidate(text="turn on old lamp", intent_name="HassTurnOn")])
     await runtime.async_save_index_to_store(hass, index, snapshot.fingerprint)
 
@@ -1079,7 +1081,7 @@ async def test_persistent_store_rejects_malformed_candidate(monkeypatch: Any) ->
     MockStore.reset()
     hass = HashableFakeHass()
     runtime = CanonicalizerRuntime()
-    snapshot = _create_build_snapshot("en", *runtime._capture_build_inputs())
+    snapshot = _create_build_snapshot_and_register_wildcards("en", *runtime._capture_build_inputs())
     index = build_index("en", [Candidate(text="turn on light", intent_name="HassTurnOn")])
     await runtime.async_save_index_to_store(hass, index, snapshot.fingerprint)
     MockStore.stored_data["assist_canonicalizer.index_en"]["candidates"][0].pop("normalized_text")
@@ -1097,7 +1099,9 @@ async def test_async_clear_index_removes_specific_and_all_stores(monkeypatch: An
     hass = HashableFakeHass()
     runtime = CanonicalizerRuntime()
     for language in ("en", "vi"):
-        snapshot = _create_build_snapshot(language, *runtime._capture_build_inputs())
+        snapshot = _create_build_snapshot_and_register_wildcards(
+            language, *runtime._capture_build_inputs()
+        )
         index = build_index(
             language,
             [Candidate(text=f"sample {language}", intent_name="Sample", language=language)],
@@ -1467,7 +1471,9 @@ def test_rebuild_index_synchronous() -> None:
         "custom_components.assist_canonicalizer.runtime.load_language_intent_sources",
         return_value={},
     ):
-        snapshot = _create_build_snapshot("vi", *runtime._capture_build_inputs())
+        snapshot = _create_build_snapshot_and_register_wildcards(
+            "vi", *runtime._capture_build_inputs()
+        )
 
         index = _build_index_from_snapshot(snapshot)
 
