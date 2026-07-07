@@ -38,7 +38,13 @@ from .grammar_loader import (
 )
 from .indexer import CanonicalIndex, build_index
 from .normalization import char_ngrams_normalized, clear_normalization_caches, normalize_text
-from .ranking import CharNGramIndex, RankedCandidate, accepted_candidate, rank_candidates
+from .ranking import (
+    CharNGramIndex,
+    RankedCandidate,
+    accepted_candidate,
+    clear_ranking_caches,
+    rank_candidates,
+)
 from .rehydration import clear_rehydration_caches
 from .utils import clear_utils_caches, normalize_language, register_custom_wildcards_from_sources
 
@@ -166,7 +172,7 @@ class CanonicalizerRuntime:
         source_generation = self.source_generation
         build_inputs = self._capture_build_inputs()
         snapshot = await hass.async_add_executor_job(
-            _create_build_snapshot,
+            _create_build_snapshot_and_register_wildcards,
             language,
             *build_inputs,
         )
@@ -314,8 +320,6 @@ class CanonicalizerRuntime:
         if _is_perfect_rank_result(ranked):
             return ranked
         intent_sources = self._intent_sources_for_query(language)
-
-        register_custom_wildcards_from_sources(language, intent_sources)
 
         registry_slot_values, registry_slot_index = self._registry_slot_snapshot_for_language(
             language
@@ -590,6 +594,7 @@ class CanonicalizerRuntime:
         clear_rehydration_caches()
         clear_utils_caches()
         clear_grammar_loader_caches()
+        clear_ranking_caches()
 
     def update_diagnostics(
         self,
@@ -646,7 +651,7 @@ async def _run_rebuild(
             source_generation = runtime.source_generation
             build_inputs = runtime._capture_build_inputs()
             snapshot = await hass.async_add_executor_job(
-                _create_build_snapshot,
+                _create_build_snapshot_and_register_wildcards,
                 language,
                 *build_inputs,
             )
@@ -679,15 +684,19 @@ async def _run_rebuild(
     return None
 
 
-def _create_build_snapshot(
+def _create_build_snapshot_and_register_wildcards(
     language: str,
     config_path: Callable[..., str] | None,
     subscribed_sources: dict[str, Mapping[str, Any]],
     registry_slot_values: dict[str, tuple[str, ...]],
 ) -> IndexBuildSnapshot:
-    """Load candidate sources and fingerprint the exact build inputs."""
+    """Load candidate sources, register custom wildcards, and fingerprint build inputs.
+
+    Side Effect: registers custom wildcard slots for the target language to global state.
+    """
     sources = load_language_intent_sources(language, config_path=config_path)
     sources.update(subscribed_sources)
+    register_custom_wildcards_from_sources(language, sources)
     fingerprint_payload = {
         "build_version": _INDEX_BUILD_VERSION,
         "language": language,

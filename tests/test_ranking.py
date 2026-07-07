@@ -31,7 +31,9 @@ from custom_components.assist_canonicalizer.ranking import (
     _query_slot_tokens_from_index,
     _query_token_coverage,
     accepted_candidate,
+    clear_ranking_caches,
     confidence_gate_rejection_reason,
+    evaluate_confidence_gates,
     rank_candidates,
     rapidfuzz_similarity_normalized,
     token_count_ratio,
@@ -2529,3 +2531,40 @@ def test_multi_wildcard_rehydration() -> None:
     )
     assert rehydrated_text == "play yesterday by the beatles"
     assert slots == {"song": "yesterday", "artist": "the beatles"}
+
+
+def test_evaluate_confidence_gates_empty_and_success_states() -> None:
+    """Test evaluate_confidence_gates with empty and success candidate states."""
+    # Empty sequence should return NO_CANDIDATE fallback reason
+    cand, reason = evaluate_confidence_gates(())
+    assert cand is None
+    assert reason == FallbackReason.NO_CANDIDATE
+
+    top = RankedCandidate(
+        candidate=Candidate(text="turn on kitchen light", intent_name="HassTurnOn", language="en"),
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.9,
+            char_ngram_score=0.9,
+            bm25_score=0.9,
+            intent_score=1.0,
+            final_score=0.9,
+        ),
+    )
+    # Success branch should return None for the reason
+    cand, reason = evaluate_confidence_gates((top,))
+    assert cand is top
+    assert reason is None
+
+
+def test_clear_ranking_caches() -> None:
+    """Test clear_ranking_caches does not raise exceptions."""
+    from custom_components.assist_canonicalizer.ranking import _raw_cached_fuzz_ratio
+
+    # Warm up cache
+    _raw_cached_fuzz_ratio("test", "test")
+    # Verify cache is populated
+    assert _raw_cached_fuzz_ratio.cache_info().currsize > 0
+    # Clear cache
+    clear_ranking_caches()
+    # Verify cache is empty
+    assert _raw_cached_fuzz_ratio.cache_info().currsize == 0

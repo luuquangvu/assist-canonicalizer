@@ -2558,9 +2558,6 @@ class _HassilSequenceNode(_HassilNode):
         return self._accumulate(child_fragments, limit, fair=fair)
 
 
-_PARSED_TEMPLATE_CACHE: dict[str, _HassilNode] = {}
-
-
 def _make_branch_node(branch: list[_HassilNode]) -> _HassilNode:
     """Wrap a branch list into a single AST node."""
     return _HassilSequenceNode(list(branch)) if len(branch) != 1 else branch[0]
@@ -2579,14 +2576,16 @@ def _parse_delimited_node(
     return node_factory(text[i + 1 : end].strip()), end + 1
 
 
+@lru_cache(maxsize=8192)
 def _parse_hassil(text: str) -> _HassilNode:
-    """Parse HassIL template string into an AST node, caching the results."""
-    cached = _PARSED_TEMPLATE_CACHE.get(text)
-    if cached is not None:
-        return cached
+    """Parse HassIL template string into an AST node, caching the results.
 
+    Note on caching semantics:
+    - Bounded to 8192 distinct templates to prevent unbounded memory growth.
+    - Evicted nodes are garbage-collected only if not referenced by compiled intents.
+    - Object identity is not used for AST comparisons, so eviction does not affect correctness.
+    """
     node, _ = _parse_hassil_expr(text, 0, depth=0)
-    _PARSED_TEMPLATE_CACHE[text] = node
     return node
 
 
@@ -3129,4 +3128,4 @@ def clear_grammar_loader_caches() -> None:
     _cached_template_literals.cache_clear()
     _cached_required_slots.cache_clear()
     _cached_template_slot_references.cache_clear()
-    _PARSED_TEMPLATE_CACHE.clear()
+    _parse_hassil.cache_clear()

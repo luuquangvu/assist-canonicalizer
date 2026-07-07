@@ -860,7 +860,7 @@ def test_select_accepted_with_gate_diagnostics() -> None:
     # 1. Empty ranked list
     res, diag = benchmark._select_accepted_with_gate(())
     assert res is None
-    assert diag["reason"] == FallbackReason.LOW_CONFIDENCE.value
+    assert diag["reason"] == FallbackReason.NO_CANDIDATE.value
 
     # 2. Accepted candidate (score above confidence threshold)
     cand_1 = Candidate(text="turn on light", intent_name="HassTurnOn")

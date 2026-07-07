@@ -209,13 +209,14 @@ async def test_clear_index_service() -> None:
         mock_clear.assert_awaited_with(hass, None)
 
 
-def test_diagnostics_service() -> None:
+@pytest.mark.asyncio
+async def test_diagnostics_service() -> None:
     """Test diagnostics service handler."""
     runtime = CanonicalizerRuntime()
     hass = MockHass(runtime)
     call = MockServiceCall({})
 
-    result = _handle_diagnostics(hass, cast(ServiceCall, call))
+    result = await _handle_diagnostics(hass, cast(ServiceCall, call))
     assert "cached_languages" in result
     assert "dynamic_candidate_generation" in result
 
@@ -285,9 +286,6 @@ async def test_async_services_dispatch() -> None:
     recorder = _ServiceRegistrationRecorder()
     hass.services.async_register = recorder
 
-    async_setup_services(hass)
-    assert len(recorder.registered_services) == 5
-
     # Mock corresponding handlers called inside callbacks
     with (
         patch(
@@ -308,9 +306,12 @@ async def test_async_services_dispatch() -> None:
         ) as mock_clear,
         patch(
             "custom_components.assist_canonicalizer.services._handle_diagnostics",
-            MagicMock(return_value={"status": "diagnosed"}),
+            AsyncMock(return_value={"status": "diagnosed"}),
         ) as mock_diagnostics,
     ):
+        async_setup_services(hass)
+        assert len(recorder.registered_services) == 5
+
         call = MockServiceCall({})
 
         # Test handle_test_match
@@ -333,7 +334,7 @@ async def test_async_services_dispatch() -> None:
         mock_dump.assert_called_once_with(hass, call)
 
         # Test handle_diagnostics
-        res_diagnostics = recorder.registered_services[SERVICE_DIAGNOSTICS](call)
+        res_diagnostics = await recorder.registered_services[SERVICE_DIAGNOSTICS](call)
         assert res_diagnostics == {"status": "diagnosed"}
         mock_diagnostics.assert_called_once_with(hass, call)
 
