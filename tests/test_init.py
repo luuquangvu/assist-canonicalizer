@@ -303,7 +303,7 @@ async def test_warmup_single_language_rebuilds_when_store_empty(
     await _warmup_single_language(hass, runtime, "en")
 
     mock_load.assert_awaited_once_with(hass, "en")
-    mock_rebuild.assert_awaited_once_with(hass, "en")
+    mock_rebuild.assert_awaited_once_with(hass, "en", log_error=False)
 
 
 @pytest.mark.asyncio
@@ -341,7 +341,7 @@ async def test_warmup_single_language_rebuild_exception_suppressed(
     # Must not raise
     await _warmup_single_language(hass, runtime, "en")
 
-    mock_rebuild.assert_awaited_once_with(hass, "en")
+    mock_rebuild.assert_awaited_once_with(hass, "en", log_error=False)
 
 
 @pytest.mark.asyncio

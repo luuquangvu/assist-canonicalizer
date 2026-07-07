@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import hashlib
 import inspect
+import logging
 from collections.abc import Callable, Mapping, Sequence, Set
 from dataclasses import dataclass, field
 from enum import Enum
@@ -15,6 +16,7 @@ from uuid import uuid4
 import orjson
 from homeassistant.helpers import storage
 
+from .bm25 import clear_bm25_caches
 from .builtin_intents import load_language_intent_sources
 from .candidate import Candidate, CandidateSource
 from .const import (
@@ -31,19 +33,24 @@ from .grammar_loader import (
     build_candidates_from_intent_sources,
     build_query_registry_candidates,
     build_registry_slot_index,
+    clear_grammar_loader_caches,
     compile_dynamic_registry_intents,
 )
 from .indexer import CanonicalIndex, build_index
-from .normalization import char_ngrams_normalized, normalize_text
+from .normalization import char_ngrams_normalized, clear_normalization_caches, normalize_text
 from .ranking import CharNGramIndex, RankedCandidate, accepted_candidate, rank_candidates
-from .utils import normalize_language, register_custom_wildcards_from_sources
+from .rehydration import clear_rehydration_caches
+from .utils import clear_utils_caches, normalize_language, register_custom_wildcards_from_sources
+
+_LOGGER = logging.getLogger(__name__)
+
 
 _STORE_HAS_SERIALIZE_IN_EVENT_LOOP = False
 with contextlib.suppress(Exception):
     sig = inspect.signature(storage.Store.__init__)
     _STORE_HAS_SERIALIZE_IN_EVENT_LOOP = "serialize_in_event_loop" in sig.parameters
 _INDEX_STORE_VERSION = 1
-_INDEX_BUILD_VERSION = 2
+_INDEX_BUILD_VERSION = 3
 _INDEX_STORE_PREFIX = f"{DOMAIN}.index_"
 _INDEX_MANIFEST_KEY = f"{DOMAIN}.index_manifest"
 _INDEX_MANIFEST_VERSION = 1
@@ -79,6 +86,7 @@ class CanonicalizerRuntime:
     rebuild_tasks: dict[str, tuple[int, asyncio.Task[CanonicalIndex | None]]] = field(
         default_factory=dict
     )
+    _logged_rebuilds: set[tuple[str, int]] = field(default_factory=set, repr=False)
     index_generation: int = 0
     source_generation: int = 0
     rebuild_timer_cancel: Callable[[], None] | None = None
@@ -96,22 +104,56 @@ class CanonicalizerRuntime:
             index_version=index.version,
         )
 
-    async def async_rebuild_index(self, hass: Any, language: str) -> CanonicalIndex | None:
+    async def async_rebuild_index(
+        self,
+        hass: Any,
+        language: str,
+        *,
+        log_error: bool = True,
+        raise_on_error: bool = False,
+    ) -> CanonicalIndex | None:
         """Rebuild one language index once while concurrent callers await it."""
         language = normalize_language(language)
+        generation = self.index_generation
         task_state = self.rebuild_tasks.get(language)
         if task_state is not None:
             generation, task = task_state
-            if generation == self.index_generation and not task.done():
-                return await task
-            self.rebuild_tasks.pop(language, None)
+            if generation != self.index_generation or task.done():
+                self.rebuild_tasks.pop(language, None)
+                task = None
+        else:
+            task = None
 
-        generation = self.index_generation
+        if task is None:
+            self._logged_rebuilds.discard((language, generation))
+            task = hass.async_create_task(
+                _run_rebuild(
+                    self,
+                    hass,
+                    language,
+                    generation,
+                )
+            )
+            self.rebuild_tasks[language] = (generation, task)
 
-        task = hass.async_create_task(_run_rebuild(self, hass, language, generation))
-        self.rebuild_tasks[language] = (generation, task)
         try:
             return await task
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:
+            key = (language, generation)
+            if key not in self._logged_rebuilds:
+                self._logged_rebuilds.add(key)
+                log_level = logging.ERROR if log_error else logging.INFO
+                _LOGGER.log(
+                    log_level,
+                    "Unexpected error rebuilding index for language %s",
+                    language,
+                    exc_info=err,
+                )
+            if raise_on_error:
+                raise
+            return None
         finally:
             task_state = self.rebuild_tasks.get(language)
             if task_state and task_state[1] is task:
@@ -525,7 +567,17 @@ class CanonicalizerRuntime:
         self.cleanup_callbacks.append(callback)
 
     def cleanup(self) -> None:
-        """Run registered cleanup callbacks."""
+        """Run registered cleanup callbacks and purge global module-level caches.
+
+        Caches across normalization, BM25 indices, rehydration matching, utility wildcards,
+        and grammar loaders are cleared here during unload or reload. This ensures that
+        stale sentence configurations, custom wildcard registries, and parsed templates
+        do not leak across lifecycle re-initializations (e.g., when the user reloads the
+        integration or updates configuration options flow).
+
+        Ordering: timers and callbacks are torn down first so that no in-flight work
+        can observe partially cleared cache state.
+        """
         if self.rebuild_timer_cancel is not None:
             self.rebuild_timer_cancel()
             self.rebuild_timer_cancel = None
@@ -533,6 +585,11 @@ class CanonicalizerRuntime:
         self.cleanup_callbacks.clear()
         for callback in callbacks:
             callback()
+        clear_normalization_caches()
+        clear_bm25_caches()
+        clear_rehydration_caches()
+        clear_utils_caches()
+        clear_grammar_loader_caches()
 
     def update_diagnostics(
         self,
@@ -584,35 +641,41 @@ async def _run_rebuild(
     generation: int,
 ) -> CanonicalIndex | None:
     """Build from a stable source generation and persist the matching fingerprint."""
-    for _ in range(_MAX_REBUILD_ATTEMPTS):
-        source_generation = runtime.source_generation
-        build_inputs = runtime._capture_build_inputs()
-        snapshot = await hass.async_add_executor_job(
-            _create_build_snapshot,
-            language,
-            *build_inputs,
-        )
-        index = await hass.async_add_executor_job(_build_index_from_snapshot, snapshot)
-        if runtime.index_generation != generation:
-            return None
-        if runtime.source_generation != source_generation:
-            continue
+    try:
+        for _ in range(_MAX_REBUILD_ATTEMPTS):
+            source_generation = runtime.source_generation
+            build_inputs = runtime._capture_build_inputs()
+            snapshot = await hass.async_add_executor_job(
+                _create_build_snapshot,
+                language,
+                *build_inputs,
+            )
+            index = await hass.async_add_executor_job(_build_index_from_snapshot, snapshot)
+            if runtime.index_generation != generation:
+                return None
+            if runtime.source_generation != source_generation:
+                continue
 
-        saved = await runtime.async_save_index_to_store(
-            hass,
-            index,
-            snapshot.fingerprint,
-            expected_index_generation=generation,
-            expected_source_generation=source_generation,
-        )
-        if runtime.index_generation != generation:
-            return None
-        if runtime.source_generation != source_generation or not saved:
-            continue
+            saved = await runtime.async_save_index_to_store(
+                hass,
+                index,
+                snapshot.fingerprint,
+                expected_index_generation=generation,
+                expected_source_generation=source_generation,
+            )
+            if runtime.index_generation != generation:
+                return None
+            if runtime.source_generation != source_generation or not saved:
+                continue
 
-        runtime.language_intent_sources[language] = snapshot.intent_sources
-        runtime.set_index(index)
-        return index
+            runtime.language_intent_sources[language] = snapshot.intent_sources
+            runtime.set_index(index)
+            return index
+    except asyncio.CancelledError:
+        raise
+    except Exception as err:
+        runtime.update_diagnostics(last_error=str(err))
+        raise
     return None
 
 

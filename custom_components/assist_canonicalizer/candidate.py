@@ -65,8 +65,7 @@ class Candidate:
     _total_unique_literal_tokens: int | None = field(
         default=None, init=False, repr=False, compare=False
     )
-    _has_wildcard: bool | None = field(default=None, init=False, repr=False, compare=False)
-    _wildcard_info: tuple[int, str] | None = field(
+    _wildcard_infos: tuple[tuple[int, str], ...] | None = field(
         default=None, init=False, repr=False, compare=False
     )
 
@@ -195,11 +194,12 @@ class Candidate:
         return _SOURCE_PRIORITY[self.source]
 
     @property
-    def wildcard_info(self) -> tuple[int, str] | None:
-        """Return the (index, wildcard_name) of the first wildcard token if any."""
-        if self._has_wildcard is None:
+    def wildcard_infos(self) -> tuple[tuple[int, str], ...]:
+        """Return all (index, wildcard_name) pairs of wildcard tokens."""
+        infos = self._wildcard_infos
+        if infos is None:
             wildcards = wildcard_slot_names_sorted(self.language)
-            info = None
+            infos_list: list[tuple[int, str]] = []
             if wildcards:
                 text = self.text
                 if any(wc in text for wc in wildcards):
@@ -218,19 +218,20 @@ class Candidate:
                     if active_wildcards:
                         for idx, token in enumerate(self.normalized_tokens):
                             for wc in active_wildcards:
-                                if wc in token:
-                                    info = (idx, wc)
+                                if token == wc or (
+                                    wc in token
+                                    and ("_" in wc or token.startswith(wc) or token.endswith(wc))
+                                ):
+                                    infos_list.append((idx, wc))
                                     break
-                            if info is not None:
-                                break
-            object.__setattr__(self, "_wildcard_info", info)
-            object.__setattr__(self, "_has_wildcard", info is not None)
-        return self._wildcard_info
+            infos = tuple(infos_list)
+            object.__setattr__(self, "_wildcard_infos", infos)
+        return infos
 
     @property
     def has_wildcard(self) -> bool:
         """Return whether the candidate text contains any wildcard placeholders."""
-        return self.wildcard_info is not None
+        return bool(self.wildcard_infos)
 
 
 def _non_static_slot_values(metadata: Mapping[str, str]) -> tuple[str, ...] | None:

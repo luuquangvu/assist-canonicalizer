@@ -225,7 +225,7 @@ def test_candidate_dedupe_preference_recovers_from_non_string_metadata_slots() -
 def test_rehydration_no_wildcard_info_stability() -> None:
     """Verify rehydration returns original text when candidate has no wildcards."""
     cand = Candidate(text="turn on the light", intent_name="HassTurnOn", language="en")
-    assert cand.wildcard_info is None
+    assert not cand.wildcard_infos
     res_text, res_slots = get_wildcard_rehydration(cand, "turn on the light")
     assert res_text == "turn on the light"
     assert res_slots == {}

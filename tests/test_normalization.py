@@ -4,6 +4,7 @@ import pytest
 
 from custom_components.assist_canonicalizer.normalization import (
     char_ngrams_normalized,
+    clear_normalization_caches,
     normalize_text,
     normalize_text_no_diacritics,
     tokenize_normalized,
@@ -120,3 +121,16 @@ def test_normalize_text_preserves_target_punctuation() -> None:
     assert normalize_text("brightness % generic") == "brightness generic"
     assert normalize_text("timer: generic") == "timer generic"
     assert normalize_text("kitchen-light") == "kitchen light"
+
+
+def test_clear_normalization_caches() -> None:
+    """Verify that clear_normalization_caches clears LRU cache entries."""
+    # Cache something
+    _ = tokenize_normalized("test cache entry")
+    cache_info_before = tokenize_normalized.cache_info()
+    assert cache_info_before.currsize > 0
+
+    # Clear caches
+    clear_normalization_caches()
+    cache_info_after = tokenize_normalized.cache_info()
+    assert cache_info_after.currsize == 0

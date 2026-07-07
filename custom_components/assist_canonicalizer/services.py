@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import functools
+import logging
 import time
+from collections.abc import Callable, Coroutine
 from functools import partial
 from typing import Any
 
@@ -39,6 +43,8 @@ from .normalization import normalize_text
 from .ranking import RankedCandidate, accepted_candidate
 from .runtime import CanonicalizerRuntime
 from .utils import elapsed_ms, normalize_language, resolve_entry_thresholds
+
+_LOGGER = logging.getLogger(__name__)
 
 ATTR_REBUILD = "rebuild"
 
@@ -150,6 +156,40 @@ def async_unload_services(hass: Any) -> None:
     hass.services.async_remove(DOMAIN, SERVICE_DUMP_CANDIDATES)
 
 
+def _wrap_service_errors(
+    action_name: str,
+) -> Callable[[Callable[..., Coroutine[Any, Any, Any]]], Callable[..., Coroutine[Any, Any, Any]]]:
+    """Wrap service exceptions into a sanitized user-facing HomeAssistantError."""
+
+    def decorator(
+        func: Callable[..., Coroutine[Any, Any, Any]],
+    ) -> Callable[..., Coroutine[Any, Any, Any]]:
+        """Decorate the service handler."""
+
+        @functools.wraps(func)
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            """Wrap execution and catch specific error types."""
+            try:
+                return await func(*args, **kwargs)
+            except HomeAssistantError:
+                raise
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:
+                _LOGGER.error(
+                    "%s failed: %s",
+                    action_name,
+                    err,
+                    exc_info=err,
+                )
+                raise HomeAssistantError(f"{action_name} failed; see logs for details") from err
+
+        return wrapper
+
+    return decorator
+
+
+@_wrap_service_errors("Matching test")
 async def _handle_test_match(hass: Any, call: ServiceCall) -> dict[str, Any]:
     """Return ranked candidates for a text input with lexical scoring and custom thresholds."""
     runtime, entry = _runtime_entry_from_hass(hass)
@@ -176,6 +216,7 @@ async def _handle_test_match(hass: Any, call: ServiceCall) -> dict[str, Any]:
         min_confidence=min_confidence,
         min_margin=min_margin,
     )
+
     return {
         ATTR_LANGUAGE: language,
         ATTR_NORMALIZED_TEXT: normalize_text(text),
@@ -190,6 +231,7 @@ async def _handle_test_match(hass: Any, call: ServiceCall) -> dict[str, Any]:
     }
 
 
+@_wrap_service_errors("Index rebuild")
 async def _handle_rebuild_index(hass: Any, call: ServiceCall) -> dict[str, Any]:
     """Rebuild one language index from automatic candidate sources."""
     runtime = _runtime_from_hass(hass)
@@ -206,6 +248,7 @@ async def _handle_rebuild_index(hass: Any, call: ServiceCall) -> dict[str, Any]:
     }
 
 
+@_wrap_service_errors("Clear index")
 async def _handle_clear_index(hass: Any, call: ServiceCall) -> dict[str, Any]:
     """Clear one language index or all indexes."""
     runtime = _runtime_from_hass(hass)
@@ -241,6 +284,7 @@ def _handle_diagnostics(hass: Any, call: ServiceCall) -> dict[str, Any]:
     return diagnostics
 
 
+@_wrap_service_errors("Dump candidates")
 async def _handle_dump_candidates(hass: Any, call: ServiceCall) -> dict[str, Any]:
     """Return candidate pool details for a language."""
     runtime = _runtime_from_hass(hass)
@@ -308,7 +352,7 @@ async def _rebuild_index(
     language: str,
 ) -> CanonicalIndex | None:
     """Rebuild an index once outside the Home Assistant event loop."""
-    return await runtime.async_rebuild_index(hass, language)
+    return await runtime.async_rebuild_index(hass, language, log_error=False, raise_on_error=True)
 
 
 def _runtime_from_hass(hass: Any) -> CanonicalizerRuntime:

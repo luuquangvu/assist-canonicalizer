@@ -286,3 +286,12 @@ def is_valid_range_value(
 def to_output_value(val_float: float) -> int | float:
     """Convert float value to int if it represents an integer, else return float."""
     return int(val_float) if val_float.is_integer() else val_float
+
+
+def clear_utils_caches() -> None:
+    """Clear all global LRU caches in utils module."""
+    normalize_language.cache_clear()
+    _wildcard_slot_names.cache_clear()
+    wildcard_slot_names_sorted.cache_clear()
+    parse_float.cache_clear()
+    _CUSTOM_WILDCARD_SLOTS.clear()

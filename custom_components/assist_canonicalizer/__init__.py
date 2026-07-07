@@ -209,11 +209,12 @@ async def _warmup_single_language(
             return
         index = await runtime.async_load_index_from_store(hass, language)
         if index is None:
-            await runtime.async_rebuild_index(hass, language)
-    except Exception:
+            await runtime.async_rebuild_index(hass, language, log_error=False)
+    except Exception as err:
         _LOGGER.debug(
-            "Failed to warm up canonicalizer index for language %s",
+            "Failed to warm up canonicalizer index for language %s: %s",
             language,
+            err,
             exc_info=True,
         )
 

@@ -889,15 +889,15 @@ class TestRehydrateWildcardText:
         assert "color" not in names
 
     def test_multiple_wildcards_falls_back_safely(self) -> None:
-        """Fall back to original when suffix contains an unresolvable wildcard."""
-        # The suffix tokens include "todo_list_item" which won't align against
+        """Fall back to original when suffix contains an unresolvable word."""
+        # The suffix tokens include "invalid_suffix_word" which won't align against
         # "groceries" safe fallback returns original unchanged.
         result = gl.rehydrate_wildcard_text(
-            "add shopping_list_item to my todo_list_item list",
+            "add shopping_list_item to my invalid_suffix_word list",
             "add milk to my groceries list",
         )
-        # Safe fallback suffix contains todo_list_item that can't align
-        assert result == "add shopping_list_item to my todo_list_item list"
+        # Safe fallback suffix contains invalid_suffix_word that can't align
+        assert result == "add shopping_list_item to my invalid_suffix_word list"
 
     @pytest.mark.current_intents
     def test_original_case_preservation(self) -> None:
@@ -973,6 +973,40 @@ class TestRehydrateWildcardText:
             "nl",
         )
         assert result == "wie is in de shopping_list_item"
+
+    def test_rehydrate_wildcard_literal_name_conflict(self) -> None:
+        """Verify that a literal matching a wildcard name is not treated as a wildcard."""
+        from custom_components.assist_canonicalizer.grammar_loader import (
+            build_candidates_from_intent_sources,
+        )
+        from custom_components.assist_canonicalizer.rehydration import get_wildcard_rehydration
+        from custom_components.assist_canonicalizer.utils import (
+            register_custom_wildcards_from_sources,
+            wildcard_slot_names,
+        )
+
+        intent_sources = {
+            "custom": {
+                "lists": {"song": {"wildcard": True}},
+                "intents": {
+                    "HassMediaSearchAndPlay": {"data": [{"sentences": ["play the song {song}"]}]}
+                },
+            }
+        }
+        wildcard_slot_names.cache_clear()
+        register_custom_wildcards_from_sources("en", intent_sources)
+
+        candidates = list(build_candidates_from_intent_sources("en", intent_sources))
+        assert candidates
+        candidate = candidates[0]
+
+        rehydrated_text1, replacements1 = get_wildcard_rehydration(candidate, "play the song jazzy")
+        assert rehydrated_text1 == "play the song jazzy"
+        assert replacements1 == {"song": "jazzy"}
+
+        rehydrated_text2, replacements2 = get_wildcard_rehydration(candidate, "play the tune jazzy")
+        assert rehydrated_text2 == "play the song song"
+        assert replacements2 == {}
 
 
 def test_build_candidates_preserves_static_slots_and_does_round_robin() -> None:
@@ -2258,3 +2292,11 @@ def test_query_registry_candidates_anchoring_with_mapped_slots() -> None:
     slots = orjson.loads(candidates[0].metadata["slots"])
     assert slots.get("minutes") == 5
     assert slots.get("seconds") == 30
+
+
+def test_expand_sentence_template_nesting_limit() -> None:
+    """Verify that templates exceeding the maximum nesting depth raise ValueError."""
+    # Nesting depth: 26 levels of brackets '['
+    deep_nested = "[" * 26 + "hello" + "]" * 26
+    with pytest.raises(ValueError, match=r"Max template nesting depth \(\d+\) exceeded"):
+        expand_sentence_template(deep_nested, {}, {})

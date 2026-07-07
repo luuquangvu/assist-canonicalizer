@@ -485,12 +485,13 @@ def _non_entity_coverage(
     *,
     non_entity: frozenset[str] | None = None,
 ) -> float:
-    """Return how well a candidate covers query tokens that no entity contains.
+    """Return how well a candidate covers query tokens that are not part of any template literal.
 
-    Tokens in the query that do not appear in any candidate's entity slots
-    (``positional_literal_tokens`` represents all known entity/literal tokens)
-    are typically politeness words, filler words, or action synonyms.  A
-    candidate whose tokens cover more of these should be preferred.
+    Tokens in the query that do not appear in any template's static literal list
+    (``positional_literal_tokens`` represents template-level static literal tokens, excluding
+    dynamic slot values like entities or areas) are typically a mixture of entity/area slot values
+    and politeness words, filler words, or action synonyms. A candidate whose tokens cover
+    more of these should be preferred.
     """
     if non_entity is None:
         non_entity = query_tokens - positional_literal_tokens
@@ -1158,6 +1159,10 @@ def rank_candidates(
             )
     else:
         if bm25_index is None:
+            # Fallback: rebuild the BM25 index on the fly. This occurs during dynamic candidate
+            # matching passes where a pre-warmed reference BM25 index is absent due to safety
+            # capping of combinatorial expansions. While this introduces a performance trade-off,
+            # it is necessary to ensure correct lexical scoring of all candidate templates.
             bm25_index = BM25Index.from_normalized_texts(
                 tuple(candidate.normalized_text for candidate in candidates)
             )
@@ -1347,16 +1352,18 @@ def rank_candidates(
             candidate_slot_tokens,
             slot_tokens_by_index,
         )
-        wildcard_info = candidate.wildcard_info
+        wildcard_infos = candidate.wildcard_infos
         wildcard_tokens = frozenset()
         leading_placeholder_only_wildcard = False
-        if cand_slot_tokens and idx in _rehydrated_cache and wildcard_info is not None:
+        if cand_slot_tokens and idx in _rehydrated_cache and wildcard_infos:
             _, replacements = _rehydrated_cache[idx]
-            wildcard_index, wildcard_name = wildcard_info
-            placeholder_tokens = frozenset(normalize_text(wildcard_name).split())
+            placeholder_tokens = frozenset(
+                tok for _, name in wildcard_infos for tok in normalize_text(name).split()
+            )
             cand_slot_tokens = cand_slot_tokens - placeholder_tokens
-            leading_placeholder_only_wildcard = wildcard_index == 0 and not cand_slot_tokens
-            if wildcard_index > 0 or cand_slot_tokens:
+            first_wc_idx = min(wc_idx for wc_idx, _ in wildcard_infos)
+            leading_placeholder_only_wildcard = first_wc_idx == 0 and not cand_slot_tokens
+            if first_wc_idx > 0 or cand_slot_tokens:
                 wildcard_tokens = frozenset(
                     token
                     for wildcard_value in replacements.values()

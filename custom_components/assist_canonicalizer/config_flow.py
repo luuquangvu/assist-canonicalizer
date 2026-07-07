@@ -176,11 +176,7 @@ def _available_fallback_agents(hass: Any, exclude_agent_id: str | None) -> dict[
             continue
         if hasattr(manager, "async_get_agent"):
             agent = manager.async_get_agent(agent_id)
-            if (
-                ConversationEntity is not None
-                and agent is not None
-                and isinstance(agent, ConversationEntity)
-            ):
+            if agent is not None and isinstance(agent, ConversationEntity):
                 continue
         agent_name = getattr(agent_info, "name", None)
         agents[agent_id] = str(agent_name) if agent_name else agent_id
