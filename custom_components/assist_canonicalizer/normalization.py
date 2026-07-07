@@ -215,3 +215,12 @@ def literal_token_variants(literal_text: str) -> tuple[frozenset[str], ...]:
 def literal_tokens_list(literal_text: str) -> tuple[str, ...]:
     """Return all normalized tokens inside a literal text template."""
     return tuple(normalize_text(literal_text).split())
+
+
+def clear_normalization_caches() -> None:
+    """Clear all global LRU caches in normalization module."""
+    normalize_text_no_diacritics_from_normalized.cache_clear()
+    tokenize_normalized.cache_clear()
+    char_ngrams_normalized.cache_clear()
+    literal_token_variants.cache_clear()
+    literal_tokens_list.cache_clear()

@@ -1821,7 +1821,7 @@ def test_rank_candidates_keeps_slot_penalty_for_leading_rehydrated_wildcard() ->
         },
         slot_values=("search_query",),
     )
-    assert generic_media.wildcard_info == (0, "search_query")
+    assert generic_media.wildcard_infos == ((0, "search_query"),)
     vacuum = Candidate(
         text="staubsauger Reinigung starten",
         intent_name="HassVacuumStart",
@@ -1858,7 +1858,7 @@ def test_rank_candidates_allows_leading_rehydrated_wildcard_with_slot_anchor() -
         },
         slot_values=("search_query", "fernseher"),
     )
-    assert wildcard_with_anchor.wildcard_info == (0, "search_query")
+    assert wildcard_with_anchor.wildcard_infos == ((0, "search_query"),)
     music_device = Candidate(
         text="musik auf radio starten",
         intent_name="HassMediaSearchAndPlay",
@@ -2399,3 +2399,133 @@ def test_numeric_slot_mismatch_with_slots_raw() -> None:
     )
     assert len(ranked_mismatch) == 1
     assert ranked_mismatch[0].scores.final_score < 0.1
+
+
+def test_numeric_slot_mismatch_penalty_unsupported_multiplier_without_slots_raw() -> None:
+    """Verify Finding 1: Mismatch penalty is strictly applied when slots_raw is missing.
+
+    The multiplier scale factor is a decimal fraction (e.g. 0.25 for 25%).
+    """
+    # A candidate where brightness is 0.25 (output value) representing 25% (multiplier 0.01).
+    # Slots contains the multiplied output value (0.25), but slots_raw is missing.
+    cand_without_raw = Candidate(
+        text="set brightness to 25",
+        intent_name="HassLightSetBrightness",
+        language="en",
+        metadata={
+            "slots": orjson.dumps({"brightness": 0.25}).decode("utf-8"),
+        },
+        slot_values=("0.25",),
+    )
+
+    # When query has 25, it fails to match 0.25 without slots_raw,
+    # applying the mismatch penalty.
+    ranked = rank_candidates(
+        query="set brightness to 25",
+        candidates=[cand_without_raw],
+        max_candidates=1,
+        language="en",
+    )
+    assert len(ranked) == 1
+    assert ranked[0].scores.final_score < 0.1  # Heavily penalized due to mismatch
+
+    # Verify that when slots_raw IS populated with "25" for brightness 0.25, it matches correctly.
+    cand_with_raw = Candidate(
+        text="set brightness to 25",
+        intent_name="HassLightSetBrightness",
+        language="en",
+        metadata={
+            "slots": orjson.dumps({"brightness": 0.25}).decode("utf-8"),
+            "slots_raw": orjson.dumps({"brightness": "25"}).decode("utf-8"),
+        },
+        slot_values=("0.25",),
+    )
+
+    ranked_with_raw = rank_candidates(
+        query="set brightness to 25",
+        candidates=[cand_with_raw],
+        max_candidates=1,
+        language="en",
+    )
+    assert len(ranked_with_raw) == 1
+    assert ranked_with_raw[0].scores.final_score > 0.8  # Not penalized
+
+
+def test_wildcard_infos_multiple_wildcards_extraction() -> None:
+    """Verify that wildcard_infos extracts all wildcard tokens in a template."""
+    from custom_components.assist_canonicalizer.utils import (
+        register_custom_wildcards_from_sources,
+        wildcard_slot_names_sorted,
+    )
+
+    # Register two custom wildcards: "wildcard_one" and "wildcard_two"
+    register_custom_wildcards_from_sources(
+        "en",
+        {
+            "custom": {
+                "lists": {
+                    "wildcard_one": {"wildcard": True},
+                    "wildcard_two": {"wildcard": True},
+                }
+            }
+        },
+    )
+
+    # Verify that both are indeed registered
+    sorted_wcs = wildcard_slot_names_sorted("en")
+    assert "wildcard_one" in sorted_wcs
+    assert "wildcard_two" in sorted_wcs
+
+    # Create a candidate with both wildcards
+    cand = Candidate(
+        text="wildcard_one wildcard_two",
+        intent_name="TestIntent",
+        language="en",
+    )
+
+    # Verify that wildcard_infos captures both wildcards.
+    assert cand.has_wildcard is True
+    assert cand.wildcard_infos == ((0, "wildcard_one"), (1, "wildcard_two"))
+
+
+def test_multi_wildcard_rehydration() -> None:
+    """Verify multiple wildcards are correctly aligned and rehydrated."""
+    from custom_components.assist_canonicalizer.rehydration import get_wildcard_rehydration
+    from custom_components.assist_canonicalizer.utils import (
+        register_custom_wildcards_from_sources,
+    )
+
+    register_custom_wildcards_from_sources(
+        "en",
+        {
+            "custom": {
+                "lists": {
+                    "song": {"wildcard": True},
+                    "artist": {"wildcard": True},
+                }
+            }
+        },
+    )
+    cand = Candidate(
+        text="play song by artist",
+        intent_name="HassPlayMedia",
+        language="en",
+        metadata={
+            "sentence_template": "play {song} by {artist}",
+            "wildcard_slots": "song,artist",
+            "slots": '{"song":"song","artist":"artist"}',
+        },
+        slot_values=("song", "artist"),
+    )
+
+    # Both wildcards should be detected in wildcard_infos
+    assert len(cand.wildcard_infos) == 2
+    assert cand.wildcard_infos[0] == (1, "song")
+    assert cand.wildcard_infos[1] == (3, "artist")
+
+    rehydrated_text, slots = get_wildcard_rehydration(
+        cand,
+        query="play yesterday by the beatles",
+    )
+    assert rehydrated_text == "play yesterday by the beatles"
+    assert slots == {"song": "yesterday", "artist": "the beatles"}

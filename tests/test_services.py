@@ -349,3 +349,62 @@ def test_validate_supported_language() -> None:
 
     with pytest.raises(Invalid, match="Language cannot be empty"):
         validate_supported_language("")
+
+
+@pytest.mark.asyncio
+async def test_services_exception_wrapping() -> None:
+    """Verify service handlers wrap general exceptions in HomeAssistantError."""
+    runtime = CanonicalizerRuntime()
+    hass = MockHass(runtime)
+    call = MockServiceCall({"language": "vi", "text": "test"})
+
+    # 1. _handle_test_match raising error during rebuild or matching
+    with (
+        patch(
+            "custom_components.assist_canonicalizer.services._index_for_language",
+            AsyncMock(side_effect=ValueError("Test parsing error")),
+        ),
+        pytest.raises(HomeAssistantError, match="Matching test failed; see logs for details"),
+    ):
+        await _handle_test_match(hass, cast(ServiceCall, call))
+
+    # 2. _handle_rebuild_index raising error
+    with (
+        patch(
+            "custom_components.assist_canonicalizer.services._rebuild_index",
+            AsyncMock(side_effect=KeyError("Test key error")),
+        ),
+        pytest.raises(HomeAssistantError, match="Index rebuild failed; see logs for details"),
+    ):
+        await _handle_rebuild_index(hass, cast(ServiceCall, call))
+
+    # 3. _handle_clear_index raising error
+    with (
+        patch.object(
+            CanonicalizerRuntime,
+            "async_clear_index",
+            AsyncMock(side_effect=ValueError("Test clear error")),
+        ),
+        pytest.raises(HomeAssistantError, match="Clear index failed; see logs for details"),
+    ):
+        await _handle_clear_index(hass, cast(ServiceCall, call))
+
+    # 4. _handle_dump_candidates raising error
+    with (
+        patch(
+            "custom_components.assist_canonicalizer.services._index_for_language",
+            AsyncMock(side_effect=TypeError("Test type error")),
+        ),
+        pytest.raises(HomeAssistantError, match="Dump candidates failed; see logs for details"),
+    ):
+        await _handle_dump_candidates(hass, cast(ServiceCall, call))
+
+    # 5. Verify RuntimeError is also caught and wrapped (it is a subclass of Exception)
+    with (
+        patch(
+            "custom_components.assist_canonicalizer.services._index_for_language",
+            AsyncMock(side_effect=RuntimeError("Unexpected system failure")),
+        ),
+        pytest.raises(HomeAssistantError, match="Matching test failed; see logs for details"),
+    ):
+        await _handle_test_match(hass, cast(ServiceCall, call))

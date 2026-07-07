@@ -50,6 +50,9 @@ _MAX_COMPOUND_QUERY_TOKENS = 4
 _TEMPLATE_RELEVANCE_EXPANSION_LIMIT = 200
 _TEXT_RUN_STOP_CHARS = frozenset("[]()|{<;")
 _CONTEXT_ANCHOR_WINDOW = 3
+_MAX_TEMPLATE_NESTING_DEPTH = 25
+_WILDCARD_TAG_PREFIX = "__wc_"
+_WILDCARD_TAG_SUFFIX = "__"
 
 
 @dataclass(frozen=True, slots=True)
@@ -600,6 +603,55 @@ def expand_sentence_template(
     return tuple(_deduplicate_texts(expansions, max_expansions))
 
 
+def _clean_wildcard_tokens(
+    expanded_sentence: str,
+) -> tuple[str, list[tuple[int, str]]]:
+    """Split tokens, clean wildcards, and return clean sentence and wildcard infos."""
+    wc_pattern = re.compile(
+        f"{re.escape(_WILDCARD_TAG_PREFIX)}(.+?){re.escape(_WILDCARD_TAG_SUFFIX)}"
+    )
+    wc_names = wc_pattern.findall(expanded_sentence)
+
+    clean_sentence = wc_pattern.sub(r"\1", expanded_sentence)
+    clean_sentence = " ".join(clean_sentence.split())
+
+    norm_with_tags = normalize_text(expanded_sentence)
+    norm_tokens = norm_with_tags.split()
+
+    wildcard_infos: list[tuple[int, str]] = []
+    wc_idx = 0
+    for idx, token in enumerate(norm_tokens):
+        if _WILDCARD_TAG_PREFIX in token and wc_idx < len(wc_names):
+            wildcard_infos.append((idx, wc_names[wc_idx]))
+            wc_idx += 1
+
+    return clean_sentence, wildcard_infos
+
+
+def _parse_and_clean_wildcards(
+    expanded_sentence: str,
+    raw_slots: dict[str, Any],
+) -> tuple[str, tuple[tuple[int, str], ...]]:
+    """Parse wildcard tags, clean them from sentence and raw slots, and return wildcard infos."""
+    wildcard_infos: list[tuple[int, str]] = []
+    clean_sentence = expanded_sentence
+
+    if _WILDCARD_TAG_PREFIX in expanded_sentence:
+        clean_sentence, wildcard_infos = _clean_wildcard_tokens(expanded_sentence)
+
+        prefix_len = len(_WILDCARD_TAG_PREFIX)
+        suffix_len = len(_WILDCARD_TAG_SUFFIX)
+        for k, v in list(raw_slots.items()):
+            if (
+                isinstance(v, str)
+                and v.startswith(_WILDCARD_TAG_PREFIX)
+                and v.endswith(_WILDCARD_TAG_SUFFIX)
+            ):
+                raw_slots[k] = v[prefix_len:-suffix_len]
+
+    return clean_sentence, tuple(wildcard_infos)
+
+
 def _build_candidate(
     expanded_sentence: str,
     intent_name: str,
@@ -619,6 +671,9 @@ def _build_candidate(
         slot_output_names,
         slot_output_values,
     )
+
+    clean_sentence, wildcard_infos = _parse_and_clean_wildcards(expanded_sentence, raw_slots)
+
     if static_slots_dict:
         slots = {**static_slots_dict, **slots}
         raw_slots = {**static_slots_dict, **raw_slots}
@@ -627,7 +682,7 @@ def _build_candidate(
         metadata["slots"] = orjson.dumps(slots).decode("utf-8")
         metadata["slots_raw"] = orjson.dumps(raw_slots).decode("utf-8")
     candidate = Candidate(
-        text=expanded_sentence,
+        text=clean_sentence,
         intent_name=intent_name,
         source=source,
         language=language,
@@ -636,6 +691,7 @@ def _build_candidate(
     )
     if literal_variants is not None:
         object.__setattr__(candidate, "_literal_variants", literal_variants)
+    object.__setattr__(candidate, "_wildcard_infos", tuple(wildcard_infos))
     return candidate
 
 
@@ -2529,13 +2585,27 @@ def _parse_hassil(text: str) -> _HassilNode:
     if cached is not None:
         return cached
 
-    node, _ = _parse_hassil_expr(text, 0)
+    node, _ = _parse_hassil_expr(text, 0, depth=0)
     _PARSED_TEMPLATE_CACHE[text] = node
     return node
 
 
-def _parse_hassil_expr(text: str, i: int, close_char: str | None = None) -> tuple[_HassilNode, int]:
-    """Parse a HassIL expression from a given index."""
+def _parse_hassil_expr(
+    text: str,
+    i: int,
+    close_char: str | None = None,
+    *,
+    depth: int,
+) -> tuple[_HassilNode, int]:
+    """Parse a HassIL expression from a given index.
+
+    Note on depth limit:
+    To prevent stack overflow and combination explosions, depth checks are performed
+    at grouping recursion entry points ([ and (). If future parser features introduce
+    recursive pathways, they MUST increment and pass the depth parameter.
+    """
+    if depth >= _MAX_TEMPLATE_NESTING_DEPTH:
+        raise ValueError(f"Max template nesting depth ({_MAX_TEMPLATE_NESTING_DEPTH}) exceeded.")
     current_branch: list[_HassilNode] = []
     branches: list[_HassilNode] = []
     branch_separator: str | None = None
@@ -2544,7 +2614,8 @@ def _parse_hassil_expr(text: str, i: int, close_char: str | None = None) -> tupl
         char = text[i]
         match char:
             case "[":
-                child, i = _parse_hassil_expr(text, i + 1, "]")
+                # Recurse for optional grouping: depth parameter MUST be incremented
+                child, i = _parse_hassil_expr(text, i + 1, "]", depth=depth + 1)
                 current_branch.append(_HassilOptionalNode(child))
             case "]" | ")":
                 if char == close_char:
@@ -2553,7 +2624,8 @@ def _parse_hassil_expr(text: str, i: int, close_char: str | None = None) -> tupl
                 current_branch.append(_HassilTextNode(char))
                 i += 1
             case "(":
-                child, i = _parse_hassil_expr(text, i + 1, ")")
+                # Recurse for nested expression grouping: depth parameter MUST be incremented
+                child, i = _parse_hassil_expr(text, i + 1, ")", depth=depth + 1)
                 current_branch.append(child)
             case "|":
                 if branch_separator == ";":
@@ -2936,7 +3008,7 @@ def _values_from_list_config(list_config: Any, list_name: str | None = None) -> 
             return
 
         if list_config.get("wildcard"):
-            yield list_name or "wildcard"
+            yield f"{_WILDCARD_TAG_PREFIX}{list_name or 'wildcard'}{_WILDCARD_TAG_SUFFIX}"
             return
 
     if isinstance(list_config, list):
@@ -2973,7 +3045,7 @@ def _value_outputs_from_list_config(
 
         if list_config.get("wildcard"):
             wildcard = list_name or "wildcard"
-            yield wildcard, wildcard
+            yield f"{_WILDCARD_TAG_PREFIX}{wildcard}{_WILDCARD_TAG_SUFFIX}", wildcard
             return
 
     if isinstance(list_config, list):
@@ -3045,3 +3117,16 @@ def _candidate_source_from_key(source_key: str) -> CandidateSource:
     if source_key.lower() in {"config", "trigger", "custom_sentence"}:
         return CandidateSource.CUSTOM_SENTENCE
     return CandidateSource.BUILT_IN
+
+
+def clear_grammar_loader_caches() -> None:
+    """Clear all global LRU caches in grammar loader module."""
+    _normalized_literal_phrase_variants.cache_clear()
+    _compound_query_tokens.cache_clear()
+    _compact_script_phrase_fallback_enabled.cache_clear()
+    _uses_compact_non_latin_script.cache_clear()
+    _cached_normalize_no_diac.cache_clear()
+    _cached_template_literals.cache_clear()
+    _cached_required_slots.cache_clear()
+    _cached_template_slot_references.cache_clear()
+    _PARSED_TEMPLATE_CACHE.clear()

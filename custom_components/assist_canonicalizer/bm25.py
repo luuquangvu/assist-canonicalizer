@@ -292,3 +292,9 @@ class BM25Index:
                 raw_score += (idf * k1_plus_1 * frequency) / (frequency + len_factor)
 
         return raw_score
+
+
+def clear_bm25_caches() -> None:
+    """Clear all global LRU caches in BM25 module."""
+    _analyze_tokens.cache_clear()
+    _analyze_document.cache_clear()
