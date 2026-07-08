@@ -46,7 +46,13 @@ from .ranking import (
     rank_candidates,
 )
 from .rehydration import clear_rehydration_caches
-from .utils import clear_utils_caches, normalize_language, register_custom_wildcards_from_sources
+from .utils import (
+    clear_utils_caches,
+    normalize_language,
+    register_custom_wildcards_from_sources,
+    wildcard_slot_names,
+    wildcard_slot_names_sorted,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -692,11 +698,18 @@ def _create_build_snapshot_and_register_wildcards(
 ) -> IndexBuildSnapshot:
     """Load candidate sources, register custom wildcards, and fingerprint build inputs.
 
-    Side Effect: registers custom wildcard slots for the target language to global state.
+    Side Effects:
+    - Registers custom wildcard slots for the target language to global state.
+    - Pre-warms the wildcard slot name caches (``wildcard_slot_names`` and
+      ``wildcard_slot_names_sorted``) so that subsequent event-loop calls to
+      ``rehydration`` and ``grammar_loader`` always hit a warm cache and never
+      trigger the blocking ``open()`` call inside ``home_assistant_intents.get_intents``.
     """
     sources = load_language_intent_sources(language, config_path=config_path)
     sources.update(subscribed_sources)
     register_custom_wildcards_from_sources(language, sources)
+    wildcard_slot_names(language)
+    wildcard_slot_names_sorted(language)
     fingerprint_payload = {
         "build_version": _INDEX_BUILD_VERSION,
         "language": language,
@@ -918,7 +931,13 @@ def _ranked_candidate_sort_key(ranked_candidate: RankedCandidate) -> tuple[float
 
 
 def _updated_optional_text(current: str | None, value: str | None, *, clear: bool) -> str | None:
-    """Return an updated optional diagnostics string."""
+    """Return an updated optional diagnostics string.
+
+    When ``clear`` is True the field is unconditionally replaced by ``value``
+    (which may be ``None`` to reset it).  When ``clear`` is False the field is
+    only updated if an explicit ``value`` is provided; passing ``value=None``
+    with ``clear=False`` preserves the current value.
+    """
     if clear:
         return value
     return current if value is None else value

@@ -10,7 +10,6 @@ from heapq import nsmallest
 from math import isclose
 from typing import Any
 
-import orjson
 from rapidfuzz import fuzz
 
 from .bm25 import BM25Index
@@ -754,18 +753,6 @@ def _query_slot_tokens_from_index(
 # so RapidFuzz work is skipped for unrelated or already-covered candidates.
 
 
-def _candidate_slots(candidate: Candidate) -> dict[str, Any]:
-    """Return decoded slot metadata for one candidate."""
-    slots_text = candidate.metadata.get("slots")
-    if not isinstance(slots_text, str) or not slots_text:
-        return {}
-    try:
-        decoded = orjson.loads(slots_text)
-    except orjson.JSONDecodeError:
-        return {}
-    return decoded if isinstance(decoded, dict) else {}
-
-
 def _static_slot_names(candidate: Candidate) -> frozenset[str]:
     """Return slot names declared static in candidate metadata."""
     static_slots_text = candidate.metadata.get("static_slots", "")
@@ -1079,6 +1066,444 @@ def _rehydrate_and_rescore_wildcard(
     return rehydrated_norm, replacements, char_score, bm25_score
 
 
+@dataclass(frozen=True, slots=True)
+class _ScoringContext:
+    """Shared scoring context and caches for candidate ranking."""
+
+    query: str
+    query_normalized: str
+    query_tokens: frozenset[str]
+    query_tokens_tuple: tuple[str, ...]
+    query_token_count: int
+    query_sorted: str
+    query_grams: frozenset[str]
+    query_slot_tokens: frozenset[str]
+    query_has_number: bool
+    query_numbers: set[float]
+    bm25_ref: BM25Index | None
+    max_raw_score: float
+    positional_lookup: dict[str, frozenset[str]]
+    positional_literal_tokens: frozenset[str] | None
+    non_entity_tokens: frozenset[str] | None
+    candidate_slot_tokens: tuple[frozenset[str], ...] | None
+    slot_tokens_by_index: dict[int, frozenset[str]]
+    min_confidence: float
+    normalized_context: NormalizedIntentContext
+    wildcard_passed_set: frozenset[int] | set[int]
+    rehydrated_cache: dict[int, tuple[str, dict[str, str]]]
+    intent_score_cache: dict[tuple[frozenset[str], ...], float]
+    literal_analysis_cache: dict[tuple[str, tuple[frozenset[str], ...]], _LiteralVariantAnalysis]
+
+
+def _best_positional_score(
+    analysis: _LiteralVariantAnalysis,
+    candidate_tokens: frozenset[str],
+) -> float:
+    """Calculate the best score from positional hits analysis."""
+    best = 0.0
+    for total_len, exact_count, positional_hits in analysis:
+        matched = float(exact_count)
+        for hits in positional_hits:
+            if not hits.issubset(candidate_tokens):
+                matched += POSITIONAL_SIMILARITY_PARTIAL_CREDIT
+        score = matched / total_len if total_len else 0.0
+        if score > best:
+            best = score
+    return best
+
+
+def _get_wildcard_slot_tokens(
+    idx: int,
+    candidate: Candidate,
+    context: _ScoringContext,
+    rehydrated: tuple[str, dict[str, str]] | None,
+) -> tuple[frozenset[str], frozenset[str], bool]:
+    """Retrieve candidate slot tokens, wildcard tokens, and check leading placeholder wildcard."""
+    cand_slot_tokens = _candidate_slot_tokens_at(
+        idx,
+        context.candidate_slot_tokens,
+        context.slot_tokens_by_index,
+    )
+    wildcard_infos = candidate.wildcard_infos
+    wildcard_tokens = frozenset()
+    leading_placeholder_only_wildcard = False
+    if cand_slot_tokens and rehydrated is not None and wildcard_infos:
+        _, replacements = rehydrated
+        placeholder_tokens = frozenset(
+            tok for _, name in wildcard_infos for tok in normalize_text(name).split()
+        )
+        cand_slot_tokens = cand_slot_tokens - placeholder_tokens
+        first_wc_idx = min(wc_idx for wc_idx, _ in wildcard_infos)
+        leading_placeholder_only_wildcard = first_wc_idx == 0 and not cand_slot_tokens
+        if first_wc_idx > 0 or cand_slot_tokens:
+            wildcard_tokens = frozenset(
+                token
+                for wildcard_value in replacements.values()
+                for token in normalize_text(wildcard_value).split()
+            )
+    return cand_slot_tokens, wildcard_tokens, leading_placeholder_only_wildcard
+
+
+def _check_and_calculate_conflict_penalty(
+    cand_slot_tokens: frozenset[str],
+    wildcard_tokens: frozenset[str],
+    candidate: Candidate,
+    context: _ScoringContext,
+) -> float:
+    """Calculate penalty when there is a conflict between query and candidate slot tokens."""
+    if not cand_slot_tokens or not context.query_slot_tokens:
+        return 1.0
+
+    allowed_cand_tokens = cand_slot_tokens | wildcard_tokens | candidate.normalized_tokens_set
+    has_conflict = False
+    for q_tok in context.query_slot_tokens:
+        is_matched = q_tok in allowed_cand_tokens or any(
+            _cached_fuzz_ratio(q_tok, c_tok) >= SLOT_TOKEN_MATCH_THRESHOLD
+            for c_tok in allowed_cand_tokens
+        )
+        if not is_matched:
+            has_conflict = True
+            break
+
+    if not has_conflict:
+        return 1.0
+
+    cand_matched = sum(
+        c_tok in context.query_tokens_tuple
+        or any(
+            _cached_fuzz_ratio(c_tok, q_tok) >= SLOT_TOKEN_MATCH_THRESHOLD
+            for q_tok in context.query_tokens_tuple
+        )
+        for c_tok in cand_slot_tokens
+    )
+    cand_coverage = cand_matched / len(cand_slot_tokens) if cand_slot_tokens else 1.0
+
+    query_matched = sum(
+        q_tok in allowed_cand_tokens
+        or any(
+            _cached_fuzz_ratio(q_tok, c_tok) >= SLOT_TOKEN_MATCH_THRESHOLD
+            for c_tok in allowed_cand_tokens
+        )
+        for q_tok in context.query_slot_tokens
+    )
+    query_coverage = (
+        query_matched / len(context.query_slot_tokens) if context.query_slot_tokens else 1.0
+    )
+
+    return cand_coverage * (0.8 + 0.2 * query_coverage)
+
+
+def _check_leading_placeholder_conflict(
+    wildcard_tokens: frozenset[str],
+    candidate: Candidate,
+    context: _ScoringContext,
+) -> bool:
+    """Check if there is a conflict for a leading placeholder only wildcard."""
+    allowed_cand_tokens = wildcard_tokens | candidate.normalized_tokens_set
+    return any(
+        q_tok not in allowed_cand_tokens
+        and all(
+            _cached_fuzz_ratio(q_tok, c_tok) < SLOT_TOKEN_MATCH_THRESHOLD
+            for c_tok in allowed_cand_tokens
+        )
+        for q_tok in context.query_slot_tokens
+    )
+
+
+def _calculate_slot_penalty(
+    idx: int,
+    candidate: Candidate,
+    context: _ScoringContext,
+    rehydrated: tuple[str, dict[str, str]] | None,
+) -> tuple[float, frozenset[str], frozenset[str]]:
+    """Calculate slot penalty, wildcard tokens, and candidate slot tokens."""
+    if not candidate.has_wildcard and not candidate.slot_tokens_set:
+        return 1.0, frozenset(), frozenset()
+
+    cand_slot_tokens, wildcard_tokens, leading_placeholder_only_wildcard = (
+        _get_wildcard_slot_tokens(idx, candidate, context, rehydrated)
+    )
+
+    slot_penalty = 1.0
+    if cand_slot_tokens and context.query_slot_tokens:
+        slot_penalty = _check_and_calculate_conflict_penalty(
+            cand_slot_tokens,
+            wildcard_tokens,
+            candidate,
+            context,
+        )
+    elif (
+        leading_placeholder_only_wildcard
+        and context.query_slot_tokens
+        and _check_leading_placeholder_conflict(wildcard_tokens, candidate, context)
+    ):
+        slot_penalty = 0.0
+
+    return slot_penalty, wildcard_tokens, cand_slot_tokens
+
+
+def _apply_candidate_slot_penalties(
+    candidate: Candidate,
+    candidate_tokens: frozenset[str],
+    context: _ScoringContext,
+    score: float,
+) -> float:
+    """Apply numeric, entity, and static slot mismatch penalties to the score."""
+    slots = candidate.parsed_slots
+    if not slots:
+        return score
+
+    static_slots = _static_slot_names(candidate)
+    if _has_unanchored_numeric_slot(
+        slots,
+        static_slots,
+        query_has_number=context.query_has_number,
+    ):
+        score *= NUMERIC_SLOT_WITHOUT_QUERY_PENALTY
+    if _has_numeric_slot_mismatch(candidate, slots, context.query_numbers, static_slots):
+        score *= NUMERIC_SLOT_MISMATCH_PENALTY
+    if _has_unanchored_entity_slot(slots, static_slots, context.query_tokens_tuple):
+        score *= UNANCHORED_ENTITY_SLOT_PENALTY
+    if _has_entity_only_uncovered_query_tokens(
+        context.query_tokens,
+        candidate_tokens,
+        candidate,
+        slots,
+        static_slots,
+    ):
+        score *= ENTITY_ONLY_UNCOVERED_QUERY_PENALTY
+    if _has_static_entity_uncovered_query_tokens(
+        context.query_tokens_tuple,
+        candidate_tokens,
+        slots,
+        static_slots,
+    ):
+        score *= STATIC_ENTITY_UNCOVERED_QUERY_PENALTY
+    if _has_static_slot_query_conflict(
+        context.query_slot_tokens,
+        candidate_tokens,
+        slots,
+        static_slots,
+    ):
+        score *= STATIC_SLOT_QUERY_CONFLICT_PENALTY
+
+    return score
+
+
+def _get_candidate_text_and_variants(
+    candidate: Candidate,
+    rehydrated: tuple[str, dict[str, str]] | None,
+) -> tuple[str, str, int, frozenset[str], tuple[frozenset[str], ...], int]:
+    """Get candidate text features and literal variants, handling rehydration if active."""
+    if rehydrated is not None:
+        cand_text, replacements = rehydrated
+        cand_tokens_list = cand_text.split()
+        cand_sorted = " ".join(sorted(cand_tokens_list))
+        cand_token_count = len(cand_tokens_list)
+        candidate_tokens = frozenset(cand_tokens_list)
+
+        norm_replacements = {wc: normalize_text(val).split() for wc, val in replacements.items()}
+        rehydrated_variants = []
+        for variant in candidate.literal_variants:
+            if variant.isdisjoint(norm_replacements):
+                rehydrated_variants.append(variant)
+                continue
+            new_variant = set()
+            for token in variant:
+                if token in norm_replacements:
+                    new_variant.update(norm_replacements[token])
+                else:
+                    new_variant.add(token)
+            rehydrated_variants.append(frozenset(new_variant))
+        literal_variants = tuple(rehydrated_variants)
+        total_unique_literal_tokens = (
+            len({tok for var in literal_variants for tok in var}) if literal_variants else 0
+        )
+    else:
+        cand_text = candidate.normalized_text
+        cand_sorted = candidate.normalized_text_sorted
+        cand_token_count = len(candidate.normalized_tokens)
+        candidate_tokens = candidate.normalized_tokens_set
+        literal_variants = candidate.literal_variants
+        total_unique_literal_tokens = candidate.total_unique_literal_tokens
+
+    return (
+        cand_text,
+        cand_sorted,
+        cand_token_count,
+        candidate_tokens,
+        literal_variants,
+        total_unique_literal_tokens,
+    )
+
+
+def _calculate_intent_score(
+    candidate: Candidate,
+    candidate_tokens: frozenset[str],
+    literal_variants: tuple[frozenset[str], ...],
+    total_unique_literal_tokens: int,
+    context: _ScoringContext,
+) -> float:
+    """Calculate the intent score based on literal variants coverage and positional hits."""
+    literal_text = candidate.metadata.get("literal_text")
+    coverage = _query_token_coverage(context.query_tokens, candidate_tokens)
+    intent_score = coverage
+    if not literal_text:
+        return intent_score
+
+    exact = context.intent_score_cache.get(literal_variants)
+    if exact is None:
+        exact = _exact_intent_score(literal_variants, context.query_tokens)
+        context.intent_score_cache[literal_variants] = exact
+    if exact >= 1.0:
+        matched_non_empty = any(
+            var and var.issubset(context.query_tokens) for var in literal_variants
+        )
+        if not matched_non_empty and not context.query_tokens.issubset(candidate_tokens):
+            exact = 0.0
+    if exact >= 1.0:
+        if total_unique_literal_tokens >= 2:
+            matched_q = len(context.query_tokens & candidate_tokens)
+            intent_score = matched_q / len(context.query_tokens) if context.query_tokens else 1.0
+        elif candidate.slot_tokens_set:
+            intent_score = exact
+    elif context.query_tokens.issubset(candidate_tokens) or not context.positional_lookup:
+        intent_score = exact
+    else:
+        analysis_key = (literal_text, literal_variants)
+        analysis = context.literal_analysis_cache.get(analysis_key)
+        if analysis is None:
+            analysis = _precompute_literal_analysis(
+                literal_variants, context.query_tokens, context.positional_lookup
+            )
+            context.literal_analysis_cache[analysis_key] = analysis
+        intent_score = _best_positional_score(analysis, candidate_tokens)
+    if context.positional_literal_tokens:
+        penalty = _non_entity_coverage(
+            context.query_tokens,
+            context.positional_literal_tokens,
+            candidate_tokens,
+            non_entity=context.non_entity_tokens,
+        )
+        intent_score *= 1.0 - NON_ENTITY_PENALTY_BLEND + NON_ENTITY_PENALTY_BLEND * penalty
+    return intent_score
+
+
+def _score_single_candidate(
+    idx: int,
+    candidate: Candidate,
+    bm25_score: float,
+    char_score: float,
+    context: _ScoringContext,
+) -> _RankedItem | None:
+    """Score a single candidate and return a _RankedItem or None if filtered out."""
+    rehydrated = None
+    if candidate.has_wildcard:
+        if idx not in context.wildcard_passed_set:
+            return None
+        rehydrated_norm, replacements, char_score, bm25_score = _rehydrate_and_rescore_wildcard(
+            candidate,
+            context.query,
+            context.query_tokens_tuple,
+            context.query_grams,
+            context.bm25_ref,
+            context.max_raw_score,
+            char_score,
+            bm25_score,
+        )
+        if not replacements or rehydrated_norm is None:
+            return None
+        context.rehydrated_cache[idx] = (rehydrated_norm, replacements)
+        rehydrated = (rehydrated_norm, replacements)
+
+    (
+        cand_text,
+        cand_sorted,
+        cand_token_count,
+        candidate_tokens,
+        literal_variants,
+        total_unique_literal_tokens,
+    ) = _get_candidate_text_and_variants(candidate, rehydrated)
+
+    rapidfuzz_score = rapidfuzz_similarity_normalized(
+        context.query_normalized,
+        cand_text,
+        query_token_count=context.query_token_count,
+        query_sorted=context.query_sorted,
+        candidate_sorted=cand_sorted,
+        candidate_token_count=cand_token_count,
+    )
+
+    intent_score = _calculate_intent_score(
+        candidate,
+        candidate_tokens,
+        literal_variants,
+        total_unique_literal_tokens,
+        context,
+    )
+
+    combined = lexical_score(rapidfuzz_score, char_score, bm25_score, intent_score)
+
+    # Slot matching penalty
+    slot_penalty, wildcard_tokens, cand_slot_tokens = _calculate_slot_penalty(
+        idx,
+        candidate,
+        context,
+        rehydrated,
+    )
+
+    # Apply penalty only if less than 100% of slot tokens match
+    if slot_penalty < 1.0:
+        base_multiplier = min(1.0, max(0.1, context.min_confidence - 0.05))
+        combined *= base_multiplier + (1.0 - base_multiplier) * slot_penalty
+    if _has_wildcard_known_slot_token_absorption(
+        context.query_slot_tokens,
+        wildcard_tokens,
+        cand_slot_tokens,
+    ):
+        combined *= WILDCARD_KNOWN_SLOT_TOKEN_PENALTY
+
+    # Apply numeric, entity, and static slot mismatch penalties
+    combined = _apply_candidate_slot_penalties(
+        candidate,
+        candidate_tokens,
+        context,
+        combined,
+    )
+
+    slots = candidate.parsed_slots
+    slot_specificity = len(slots)
+    context_adjustment = _context_slot_adjustment(
+        slots,
+        _context_slot_names(candidate),
+        context.normalized_context,
+    )
+    if context_adjustment > 0.0:
+        combined = min(1.0, combined + (CONTEXT_SLOT_MATCH_BOOST * context_adjustment))
+    elif context_adjustment < 0.0:
+        combined *= CONTEXT_SLOT_MISMATCH_PENALTY ** abs(context_adjustment)
+
+    penalty_val = 0.0
+    if rehydrated is not None:
+        _, replacements = rehydrated
+        wc_len = sum(len(val.split()) for val in replacements.values())
+        penalty_val = WILDCARD_LENGTH_PENALTY_FACTOR * wc_len
+        combined -= penalty_val
+        combined = max(combined, 0.0)
+
+    return _RankedItem(
+        final_score=combined,
+        candidate=candidate,
+        rapidfuzz_score=rapidfuzz_score,
+        char_ngram_score=char_score,
+        bm25_score=bm25_score,
+        intent_score=intent_score,
+        index=idx,
+        penalty=penalty_val,
+        slot_specificity=slot_specificity,
+    )
+
+
 def rank_candidates(
     query: str,
     candidates: Sequence[Candidate],
@@ -1248,273 +1673,44 @@ def rank_candidates(
         tuple[str, tuple[frozenset[str], ...]], _LiteralVariantAnalysis
     ] = {}
     ranked_tuples: list[_RankedItem] = []
+    context = _ScoringContext(
+        query=query,
+        query_normalized=query_normalized,
+        query_tokens=query_tokens,
+        query_tokens_tuple=query_tokens_tuple,
+        query_token_count=query_token_count,
+        query_sorted=query_sorted,
+        query_grams=query_grams,
+        query_slot_tokens=query_slot_tokens,
+        query_has_number=query_has_number,
+        query_numbers=query_numbers,
+        bm25_ref=_bm25_ref,
+        max_raw_score=max_raw_score,
+        positional_lookup=positional_lookup,
+        positional_literal_tokens=positional_literal_tokens,
+        non_entity_tokens=non_entity_tokens,
+        candidate_slot_tokens=candidate_slot_tokens,
+        slot_tokens_by_index=slot_tokens_by_index,
+        min_confidence=min_confidence,
+        normalized_context=normalized_context,
+        wildcard_passed_set=wildcard_passed_set,
+        rehydrated_cache=_rehydrated_cache,
+        intent_score_cache=intent_score_cache,
+        literal_analysis_cache=literal_analysis_cache,
+    )
     for idx in top_indices:
         candidate = candidates[idx]
         bm25_score = bm25_scores[idx]
         char_score = char_scores[idx]
-        if candidate.has_wildcard:
-            if idx not in wildcard_passed_set:
-                continue
-            rehydrated_norm, replacements, char_score, bm25_score = _rehydrate_and_rescore_wildcard(
-                candidate,
-                query,
-                query_tokens_tuple,
-                query_grams,
-                _bm25_ref,
-                max_raw_score,
-                char_score,
-                bm25_score,
-            )
-            if not replacements or rehydrated_norm is None:
-                continue
-            _rehydrated_cache[idx] = (rehydrated_norm, replacements)
-        if idx in _rehydrated_cache:
-            cand_text, replacements = _rehydrated_cache[idx]
-            cand_tokens_list = cand_text.split()
-            cand_sorted = " ".join(sorted(cand_tokens_list))
-            cand_token_count = len(cand_tokens_list)
-            candidate_tokens = frozenset(cand_tokens_list)
-
-            norm_replacements = {
-                wc: normalize_text(val).split() for wc, val in replacements.items()
-            }
-            rehydrated_variants = []
-            for variant in candidate.literal_variants:
-                if variant.isdisjoint(norm_replacements):
-                    rehydrated_variants.append(variant)
-                    continue
-                new_variant = set()
-                for token in variant:
-                    if token in norm_replacements:
-                        new_variant.update(norm_replacements[token])
-                    else:
-                        new_variant.add(token)
-                rehydrated_variants.append(frozenset(new_variant))
-            literal_variants = tuple(rehydrated_variants)
-            total_unique_literal_tokens = (
-                len({tok for var in literal_variants for tok in var}) if literal_variants else 0
-            )
-        else:
-            cand_text = candidate.normalized_text
-            cand_sorted = candidate.normalized_text_sorted
-            cand_token_count = len(candidate.normalized_tokens)
-            candidate_tokens = candidate.normalized_tokens_set
-            literal_variants = candidate.literal_variants
-            total_unique_literal_tokens = candidate.total_unique_literal_tokens
-
-        rapidfuzz_score = rapidfuzz_similarity_normalized(
-            query_normalized,
-            cand_text,
-            query_token_count=query_token_count,
-            query_sorted=query_sorted,
-            candidate_sorted=cand_sorted,
-            candidate_token_count=cand_token_count,
-        )
-        literal_text = candidate.metadata.get("literal_text")
-        coverage = _query_token_coverage(query_tokens, candidate_tokens)
-        intent_score = coverage
-        if literal_text:
-            exact = intent_score_cache.get(literal_variants)
-            if exact is None:
-                exact = _exact_intent_score(literal_variants, query_tokens)
-                intent_score_cache[literal_variants] = exact
-            if exact >= 1.0:
-                matched_non_empty = any(
-                    var and var.issubset(query_tokens) for var in literal_variants
-                )
-                if not matched_non_empty and not query_tokens.issubset(candidate_tokens):
-                    exact = 0.0
-            if exact >= 1.0:
-                if total_unique_literal_tokens >= 2:
-                    matched_q = len(query_tokens & candidate_tokens)
-                    intent_score = matched_q / len(query_tokens) if query_tokens else 1.0
-                elif candidate.slot_tokens_set:
-                    intent_score = exact
-            elif query_tokens.issubset(candidate_tokens) or not positional_lookup:
-                intent_score = exact
-            else:
-                analysis_key = (literal_text, literal_variants)
-                analysis = literal_analysis_cache.get(analysis_key)
-                if analysis is None:
-                    analysis = _precompute_literal_analysis(
-                        literal_variants, query_tokens, positional_lookup
-                    )
-                    literal_analysis_cache[analysis_key] = analysis
-                best = 0.0
-                for total_len, exact_count, positional_hits in analysis:
-                    matched = float(exact_count)
-                    for hits in positional_hits:
-                        if not hits.issubset(candidate_tokens):
-                            matched += POSITIONAL_SIMILARITY_PARTIAL_CREDIT
-                    score = matched / total_len if total_len else 0.0
-                    if score > best:
-                        best = score
-                    intent_score = best
-            if positional_literal_tokens:
-                penalty = _non_entity_coverage(
-                    query_tokens,
-                    positional_literal_tokens,
-                    candidate_tokens,
-                    non_entity=non_entity_tokens,
-                )
-                intent_score *= 1.0 - NON_ENTITY_PENALTY_BLEND + NON_ENTITY_PENALTY_BLEND * penalty
-        combined = lexical_score(rapidfuzz_score, char_score, bm25_score, intent_score)
-
-        # Slot matching penalty
-        slot_penalty = 1.0
-        cand_slot_tokens = _candidate_slot_tokens_at(
+        item = _score_single_candidate(
             idx,
-            candidate_slot_tokens,
-            slot_tokens_by_index,
+            candidate,
+            bm25_score,
+            char_score,
+            context,
         )
-        wildcard_infos = candidate.wildcard_infos
-        wildcard_tokens = frozenset()
-        leading_placeholder_only_wildcard = False
-        if cand_slot_tokens and idx in _rehydrated_cache and wildcard_infos:
-            _, replacements = _rehydrated_cache[idx]
-            placeholder_tokens = frozenset(
-                tok for _, name in wildcard_infos for tok in normalize_text(name).split()
-            )
-            cand_slot_tokens = cand_slot_tokens - placeholder_tokens
-            first_wc_idx = min(wc_idx for wc_idx, _ in wildcard_infos)
-            leading_placeholder_only_wildcard = first_wc_idx == 0 and not cand_slot_tokens
-            if first_wc_idx > 0 or cand_slot_tokens:
-                wildcard_tokens = frozenset(
-                    token
-                    for wildcard_value in replacements.values()
-                    for token in normalize_text(wildcard_value).split()
-                )
-        if cand_slot_tokens and query_slot_tokens:
-            has_conflict = False
-            allowed_cand_tokens = (
-                cand_slot_tokens | wildcard_tokens | candidate.normalized_tokens_set
-            )
-            for q_tok in query_slot_tokens:
-                is_matched = q_tok in allowed_cand_tokens or any(
-                    _cached_fuzz_ratio(q_tok, c_tok) >= SLOT_TOKEN_MATCH_THRESHOLD
-                    for c_tok in allowed_cand_tokens
-                )
-                if not is_matched:
-                    has_conflict = True
-                    break
-
-            if has_conflict:
-                cand_matched = 0
-                for c_tok in cand_slot_tokens:
-                    if c_tok in query_tokens_tuple or any(
-                        _cached_fuzz_ratio(c_tok, q_tok) >= SLOT_TOKEN_MATCH_THRESHOLD
-                        for q_tok in query_tokens_tuple
-                    ):
-                        cand_matched += 1
-                cand_coverage = cand_matched / len(cand_slot_tokens)
-
-                query_matched = 0
-                for q_tok in query_slot_tokens:
-                    if q_tok in allowed_cand_tokens or any(
-                        _cached_fuzz_ratio(q_tok, c_tok) >= SLOT_TOKEN_MATCH_THRESHOLD
-                        for c_tok in allowed_cand_tokens
-                    ):
-                        query_matched += 1
-                query_coverage = query_matched / len(query_slot_tokens)
-
-                slot_penalty = cand_coverage * (0.8 + 0.2 * query_coverage)
-        elif leading_placeholder_only_wildcard and query_slot_tokens:
-            allowed_cand_tokens = wildcard_tokens | candidate.normalized_tokens_set
-            has_conflict = any(
-                q_tok not in allowed_cand_tokens
-                and all(
-                    _cached_fuzz_ratio(q_tok, c_tok) < SLOT_TOKEN_MATCH_THRESHOLD
-                    for c_tok in allowed_cand_tokens
-                )
-                for q_tok in query_slot_tokens
-            )
-            if has_conflict:
-                slot_penalty = 0.0
-
-        # Apply penalty only if less than 100% of slot tokens match
-        if slot_penalty < 1.0:
-            base_multiplier = min(1.0, max(0.1, min_confidence - 0.05))
-            combined *= base_multiplier + (1.0 - base_multiplier) * slot_penalty
-        if _has_wildcard_known_slot_token_absorption(
-            query_slot_tokens,
-            wildcard_tokens,
-            cand_slot_tokens,
-        ):
-            combined *= WILDCARD_KNOWN_SLOT_TOKEN_PENALTY
-
-        slots = _candidate_slots(candidate)
-        slot_specificity = len(slots)
-        if slots:
-            static_slots = _static_slot_names(candidate)
-            if _has_unanchored_numeric_slot(
-                slots,
-                static_slots,
-                query_has_number=query_has_number,
-            ):
-                combined *= NUMERIC_SLOT_WITHOUT_QUERY_PENALTY
-            if _has_numeric_slot_mismatch(candidate, slots, query_numbers, static_slots):
-                combined *= NUMERIC_SLOT_MISMATCH_PENALTY
-            if _has_unanchored_entity_slot(slots, static_slots, query_tokens_tuple):
-                combined *= UNANCHORED_ENTITY_SLOT_PENALTY
-            if _has_entity_only_uncovered_query_tokens(
-                query_tokens,
-                candidate_tokens,
-                candidate,
-                slots,
-                static_slots,
-            ):
-                combined *= ENTITY_ONLY_UNCOVERED_QUERY_PENALTY
-            if _has_static_entity_uncovered_query_tokens(
-                query_tokens_tuple,
-                candidate_tokens,
-                slots,
-                static_slots,
-            ):
-                combined *= STATIC_ENTITY_UNCOVERED_QUERY_PENALTY
-            if _has_static_slot_query_conflict(
-                query_slot_tokens,
-                candidate_tokens,
-                slots,
-                static_slots,
-            ):
-                combined *= STATIC_SLOT_QUERY_CONFLICT_PENALTY
-
-            context_adjustment = _context_slot_adjustment(
-                slots,
-                _context_slot_names(candidate),
-                normalized_context,
-            )
-        else:
-            context_adjustment = _context_slot_adjustment(
-                {},
-                _context_slot_names(candidate),
-                normalized_context,
-            )
-        if context_adjustment > 0.0:
-            combined = min(1.0, combined + (CONTEXT_SLOT_MATCH_BOOST * context_adjustment))
-        elif context_adjustment < 0.0:
-            combined *= CONTEXT_SLOT_MISMATCH_PENALTY ** abs(context_adjustment)
-
-        penalty_val = 0.0
-        if idx in _rehydrated_cache:
-            _, replacements = _rehydrated_cache[idx]
-            wc_len = sum(len(val.split()) for val in replacements.values())
-            penalty_val = WILDCARD_LENGTH_PENALTY_FACTOR * wc_len
-            combined -= penalty_val
-            combined = max(combined, 0.0)
-        ranked_tuples.append(
-            _RankedItem(
-                final_score=combined,
-                candidate=candidate,
-                rapidfuzz_score=rapidfuzz_score,
-                char_ngram_score=char_score,
-                bm25_score=bm25_score,
-                intent_score=intent_score,
-                index=idx,
-                penalty=penalty_val,
-                slot_specificity=slot_specificity,
-            )
-        )
+        if item is not None:
+            ranked_tuples.append(item)
 
     intent_tie_preferences = _intent_tie_preferences_by_index(
         ranked_tuples,
@@ -1750,8 +1946,8 @@ def _has_safe_relaxed_intent_evidence(
     """Return whether a close fuzzy winner has enough low-risk evidence."""
     if min_margin > DEFAULT_MIN_MARGIN:
         return False
-    top_slots = _candidate_slots(top_candidate.candidate)
-    competing_slots = _candidate_slots(competing_candidate.candidate)
+    top_slots = top_candidate.candidate.parsed_slots
+    competing_slots = competing_candidate.candidate.parsed_slots
     if (
         not top_slots
         and not competing_slots
@@ -1785,9 +1981,7 @@ def _is_turn_on_off_same_slot_tie(
         abs_tol=_STRUCTURAL_TIE_ABS_TOLERANCE,
     ):
         return False
-    return _candidate_slots(top_candidate.candidate) == _candidate_slots(
-        competing_candidate.candidate
-    )
+    return top_candidate.candidate.parsed_slots == competing_candidate.candidate.parsed_slots
 
 
 def _is_same_text_same_slot_competitor(
@@ -1797,7 +1991,7 @@ def _is_same_text_same_slot_competitor(
     """Return whether a same-text competitor preserves the same slot payload."""
     return (
         other.candidate.normalized_text == candidate.candidate.normalized_text
-        and _candidate_slots(other.candidate) == _candidate_slots(candidate.candidate)
+        and other.candidate.parsed_slots == candidate.candidate.parsed_slots
     )
 
 

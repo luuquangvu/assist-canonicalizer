@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import sys
 from collections.abc import Mapping
+from enum import Enum
 from types import ModuleType
 from typing import Any, ClassVar
 from unittest.mock import patch
@@ -29,12 +30,18 @@ from custom_components.assist_canonicalizer.grammar_loader import (
     build_registry_slot_index,
 )
 from custom_components.assist_canonicalizer.indexer import CanonicalIndex, build_index
+from custom_components.assist_canonicalizer.ranking import RankedCandidate, ScoreBreakdown
 from custom_components.assist_canonicalizer.runtime import (
     _INDEX_BUILD_VERSION,
     CanonicalizerRuntime,
     _build_index_from_snapshot,
     _canonical_fingerprint_value,
     _create_build_snapshot_and_register_wildcards,
+    _deserialize_candidates,
+    _is_perfect_rank_result,
+    _merge_ranked_candidates,
+    _updated_optional_text,
+    _valid_store_metadata,
 )
 from custom_components.assist_canonicalizer.utils import normalize_language
 
@@ -1526,3 +1533,178 @@ async def test_async_rebuild_index_real_flow(monkeypatch: Any) -> None:
     assert index.candidate_count > 0
     assert index.candidates[0].text == "bật đèn"
     assert runtime.get_index("vi") is index
+
+
+class DummyEnum(Enum):
+    """Dummy enum for fingerprint testing."""
+
+    VAL1 = "val1"
+
+
+def test_canonical_fingerprint_value_edge_cases() -> None:
+    """Test Enum, Set, and unknown type fingerprinting in _canonical_fingerprint_value."""
+    # Enum
+    assert _canonical_fingerprint_value(DummyEnum.VAL1) == "val1"
+    # Set
+    s = {"b", "a"}
+    fp_set = _canonical_fingerprint_value(s)
+    assert isinstance(fp_set, dict)
+    assert fp_set["set"] == ["a", "b"]
+    # Unknown type
+    obj = object()
+    fp_obj = _canonical_fingerprint_value(obj)
+    assert isinstance(fp_obj, dict)
+    assert "object_type" in fp_obj
+    assert fp_obj["representation"] == repr(obj)
+
+
+def test_updated_optional_text_clear_with_none() -> None:
+    """Test updated_optional_text behavior when clear is True and value is None."""
+    assert _updated_optional_text("old", None, clear=True) is None
+    assert _updated_optional_text("old", "new", clear=True) == "new"
+    assert _updated_optional_text("old", None, clear=False) == "old"
+    assert _updated_optional_text("old", "new", clear=False) == "new"
+
+
+async def test_async_clear_index_specific_language() -> None:
+    """Test clear_index for a specific language."""
+    runtime = CanonicalizerRuntime()
+    # Add dummy index
+    runtime.indexes["en"] = build_index("en", [])
+    runtime.indexes["vi"] = build_index("vi", [])
+
+    class DummyStore:
+        """Dummy store for testing."""
+
+        async def async_remove(self) -> None:
+            """Remove store."""
+
+        async def async_load(self) -> Any:
+            """Load store."""
+            return {"cache_epoch": "epoch1", "languages": ["en", "vi"]}
+
+        async def async_save(self, data: Any) -> None:
+            """Save store."""
+
+    class DummyHass:
+        """Dummy Home Assistant for testing."""
+
+        def __init__(self) -> None:
+            """Initialize dummy hass."""
+            self.data = {runtime_module.DOMAIN: DummyStore()}
+
+    hass = DummyHass()
+
+    store_patch = patch(
+        "custom_components.assist_canonicalizer.runtime._index_store",
+        return_value=DummyStore(),
+    )
+    manifest_patch = patch(
+        "custom_components.assist_canonicalizer.runtime._manifest_store",
+        return_value=DummyStore(),
+    )
+    with store_patch, manifest_patch:
+        await runtime.async_clear_index(hass, "en")
+    assert "en" not in runtime.indexes
+    assert "vi" in runtime.indexes
+
+
+def test_is_perfect_rank_result_false() -> None:
+    """Test _is_perfect_rank_result with imperfect scores."""
+    cand = Candidate(text="test", intent_name="test")
+    rc = RankedCandidate(
+        candidate=cand,
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.9,
+            char_ngram_score=1.0,
+            bm25_score=1.0,
+            intent_score=1.0,
+            final_score=0.9,
+        ),
+    )
+    assert not _is_perfect_rank_result((rc,))
+
+
+def test_valid_store_metadata_rejections() -> None:
+    """Test metadata validations in _valid_store_metadata."""
+    # Non-dict
+    assert not _valid_store_metadata(None, language="en", fingerprint="fp", cache_epoch="ep")
+    # Bad counts or list
+    data = {
+        "build_version": _INDEX_BUILD_VERSION,
+        "language": "en",
+        "fingerprint": "fp",
+        "cache_epoch": "ep",
+        "candidate_count": 5,
+        "candidates": [],
+    }
+    assert not _valid_store_metadata(data, language="en", fingerprint="fp", cache_epoch="ep")
+
+
+def test_deserialize_candidates_invalid() -> None:
+    """Test deserialize_candidates handles invalid format or values."""
+    # Candidate entry is not dict
+    assert _deserialize_candidates({"candidates": [None]}) is None
+    # Candidate entry missing keys or wrong types
+    assert _deserialize_candidates({"candidates": [{"text": 123}]}) is None
+    # Bad candidate source
+    assert (
+        _deserialize_candidates(
+            {
+                "candidates": [
+                    {
+                        "text": "test",
+                        "intent_name": "test",
+                        "source": "invalid_source",
+                        "metadata": {},
+                        "slot_values": [],
+                        "normalized_text": "test",
+                    }
+                ]
+            }
+        )
+        is None
+    )
+
+
+def test_merge_ranked_candidates_sorting() -> None:
+    """Test merge_ranked_candidates preference sorting based on source priority."""
+    c1 = Candidate(text="test", intent_name="intent1", source=CandidateSource.BUILT_IN)
+    c2 = Candidate(text="test", intent_name="intent1", source=CandidateSource.CUSTOM_SENTENCE)
+    rc1 = RankedCandidate(c1, ScoreBreakdown(1.0, 1.0, 1.0, 1.0, 0.8))
+    rc2 = RankedCandidate(c2, ScoreBreakdown(1.0, 1.0, 1.0, 1.0, 0.8))
+
+    merged = _merge_ranked_candidates((rc1,), (rc2,), max_candidates=2)
+    # Custom sentence has higher priority (source_priority is lower, i.e., 0 vs 1)
+    assert merged[0].candidate.source == CandidateSource.CUSTOM_SENTENCE
+
+
+def test_subscribed_source_counts_invalid() -> None:
+    """Test subscribed_source_counts when intents is not a mapping."""
+    runtime = CanonicalizerRuntime()
+    runtime.intent_sources = {"test_src": {"intents": None}}
+    assert runtime.subscribed_source_counts() == {"test_src": 0}
+
+
+def test_registry_slot_index_caching_and_cleanup() -> None:
+    """Test registry slot snapshot caching and cleanup logic."""
+    runtime = CanonicalizerRuntime()
+    runtime.registry_slot_values = {"name": ("light",)}
+
+    # Call internal helper
+    res1 = runtime._registry_slot_index_for_language("en")
+    assert res1 is not None
+
+    # Cleanup call
+    assert runtime.rebuild_timer_cancel is None
+    called = False
+
+    def mock_cancel() -> None:
+        nonlocal called
+        called = True
+
+    runtime.rebuild_timer_cancel = mock_cancel
+
+    runtime.cleanup()
+    assert called
+    assert runtime.rebuild_timer_cancel is None

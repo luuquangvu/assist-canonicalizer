@@ -68,6 +68,9 @@ class Candidate:
     _wildcard_infos: tuple[tuple[int, str], ...] | None = field(
         default=None, init=False, repr=False, compare=False
     )
+    _parsed_slots: dict[str, Any] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         """Validate and normalize candidate data."""
@@ -232,6 +235,15 @@ class Candidate:
     def has_wildcard(self) -> bool:
         """Return whether the candidate text contains any wildcard placeholders."""
         return bool(self.wildcard_infos)
+
+    @property
+    def parsed_slots(self) -> dict[str, Any]:
+        """Return decoded slot metadata, cached after the first access."""
+        val = self._parsed_slots
+        if val is None:
+            val = candidate_slot_map(self)
+            object.__setattr__(self, "_parsed_slots", val)
+        return val
 
 
 def _non_static_slot_values(metadata: Mapping[str, str]) -> tuple[str, ...] | None:

@@ -44,6 +44,10 @@ _REQUIRED_TEST_DEPS = [
 
 _COMPATIBILITY_PYTEST_ARGS = ["--no-cov", "-m", "not current_intents"]
 _COMPATIBILITY_METADATA_PROBE_TIMEOUT_SECONDS = 60
+_VENV_CREATE_TIMEOUT_SECONDS = 120
+_INSTALL_TIMEOUT_SECONDS = 300
+_CLEANUP_TIMEOUT_SECONDS = 30
+_COMPATIBILITY_PYTEST_TIMEOUT_SECONDS = 300
 
 _ALNUM_CHARS = ascii_letters + digits
 _SEP_CHAR = "."
@@ -57,8 +61,12 @@ _MATRIX_FILE = os.path.join(_REPO_ROOT, "tools", "compatibility_matrix.json")
 
 _PYPI_HA_JSON_URL = "https://pypi.org/pypi/homeassistant/json"
 
-_HA_REQUIREMENTS_ALL_URL_TEMPLATE = (
+_HA_REQUIREMENTS_ALL_GITHUB_URL_TEMPLATE = (
     "https://raw.githubusercontent.com/home-assistant/core/{ha_version}/requirements_all.txt"
+)
+
+_HA_REQUIREMENTS_ALL_CDN_URL_TEMPLATE = (
+    "https://cdn.jsdelivr.net/gh/home-assistant/core@{ha_version}/requirements_all.txt"
 )
 
 
@@ -180,19 +188,35 @@ def _parse_requirements_dependency_version(
     raise ValueError(f"Could not find {package!r} in Home Assistant requirements_all.txt")
 
 
-def _get_home_assistant_intents_version(ha_ver: str) -> str:
-    """Fetch the exact home-assistant-intents version required by a Home Assistant tag."""
-    version = _validate_version_label("ha_ver", ha_ver)
-    url = _HA_REQUIREMENTS_ALL_URL_TEMPLATE.format(ha_version=version)
-    try:
-        with urllib.request.urlopen(url, timeout=20) as response:
-            requirements_text = response.read().decode("utf-8")
-    except (urllib.error.URLError, OSError, UnicodeDecodeError) as err:
-        raise ValueError(
-            f"Failed to fetch Home Assistant requirements_all.txt for {version}: {err}"
-        ) from err
+def _fetch_requirements_all_text(url: str) -> str:
+    """Fetch and decode requirements_all.txt from a URL.
 
-    return _parse_requirements_dependency_version(requirements_text, _INTENTS_PACKAGE)
+    Raises urllib.error.URLError, OSError, or UnicodeDecodeError on failure.
+    """
+    with urllib.request.urlopen(url, timeout=20) as response:
+        return response.read().decode("utf-8")
+
+
+def _get_home_assistant_intents_version(ha_ver: str) -> str:
+    """Fetch the exact home-assistant-intents version required by a Home Assistant tag.
+
+    Tries the jsDelivr CDN mirror first to avoid GitHub raw-content 429 rate
+    limits, then falls back to the canonical GitHub URL.
+    """
+    version = _validate_version_label("ha_ver", ha_ver)
+    cdn_url = _HA_REQUIREMENTS_ALL_CDN_URL_TEMPLATE.format(ha_version=version)
+    github_url = _HA_REQUIREMENTS_ALL_GITHUB_URL_TEMPLATE.format(ha_version=version)
+    last_err: Exception | None = None
+    for url in (cdn_url, github_url):
+        try:
+            requirements_text = _fetch_requirements_all_text(url)
+            return _parse_requirements_dependency_version(requirements_text, _INTENTS_PACKAGE)
+        except (urllib.error.URLError, OSError, ValueError) as err:
+            last_err = err
+    raise ValueError(
+        f"Failed to fetch Home Assistant requirements_all.txt for {version} "
+        f"(tried CDN and GitHub): {last_err}"
+    ) from last_err
 
 
 def _resolve_pinned_test_dependency_versions(
@@ -316,7 +340,12 @@ def _stale_pinned_test_deps(
         return ()
     try:
         installed = _venv_required_test_dep_versions(python_bin, pinned_test_dependency_versions)
-    except (subprocess.CalledProcessError, orjson.JSONDecodeError, OSError):
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        orjson.JSONDecodeError,
+        OSError,
+    ):
         return tuple(f"{package}=={version}" for package, version in expected.items())
 
     stale = {
@@ -516,6 +545,13 @@ def _ensure_within_root(root_path: str, candidate_path: str) -> str:
     return fullpath
 
 
+def _format_cmd_str(cmd: Any) -> str:
+    """Return a human-readable string for a subprocess command."""
+    if isinstance(cmd, (list, tuple)):
+        return " ".join(str(arg) for arg in cmd)
+    return str(cmd)
+
+
 def _get_latest_ha_version() -> str:
     """Fetch the latest Home Assistant version from PyPI.
 
@@ -621,6 +657,7 @@ def _ensure_venv(venv_path: Path, py_ver: str) -> bool:
         capture_output=True,
         text=True,
         cwd=_REPO_ROOT,
+        timeout=_VENV_CREATE_TIMEOUT_SECONDS,
     )
     print(f"STEP_OK: uv venv {venv_path} (Python {py_ver})", flush=True)
     return True
@@ -671,6 +708,7 @@ def _install_dependencies(
                 capture_output=True,
                 text=True,
                 cwd=_REPO_ROOT,
+                timeout=_INSTALL_TIMEOUT_SECONDS,
             )
         print(f"STEP_OK: uv pip install {ha_spec}", flush=True)
 
@@ -695,6 +733,7 @@ def _install_dependencies(
                 capture_output=True,
                 text=True,
                 cwd=_REPO_ROOT,
+                timeout=_INSTALL_TIMEOUT_SECONDS,
             )
         print(f"STEP_OK: uv pip install {refresh_label}", flush=True)
 
@@ -718,6 +757,7 @@ def _install_dependencies(
             capture_output=True,
             text=True,
             cwd=_REPO_ROOT,
+            timeout=_CLEANUP_TIMEOUT_SECONDS,
         )
         print("STEP_OK: cleanup __pycache__", flush=True)
         _write_venv_dependency_marker(venv_path, pinned_test_dependency_versions)
@@ -726,13 +766,14 @@ def _install_dependencies(
 def _get_installed_ha_version(python_bin: Path) -> str:
     """Get the actually installed Home Assistant version inside the venv."""
     actual_ver = "unknown"
-    with contextlib.suppress(subprocess.CalledProcessError):
+    with contextlib.suppress(subprocess.CalledProcessError, subprocess.TimeoutExpired):
         result = subprocess.run(
             ["uv", "--no-config", "pip", "show", "--python", python_bin, "homeassistant"],
             capture_output=True,
             text=True,
             check=True,
             cwd=_REPO_ROOT,
+            timeout=_COMPATIBILITY_METADATA_PROBE_TIMEOUT_SECONDS,
         )
         for line in result.stdout.splitlines():
             if line.startswith("Version:"):
@@ -761,11 +802,105 @@ def _run_pytest(python_bin: Path, ha_ver_display: str, pytest_args: list[str]) -
         ],
         env=env,
         check=True,
-        capture_output=True,
-        text=True,
         cwd=_REPO_ROOT,
+        timeout=_COMPATIBILITY_PYTEST_TIMEOUT_SECONDS,
     )
     print(f"STEP_OK: uv run pytest (Home Assistant {ha_ver_display})", flush=True)
+
+
+def _prepare_version_and_deps(
+    ha_ver: str,
+    pinned_test_dependencies: object,
+) -> tuple[str, dict[str, str]]:
+    """Resolve target HA version and retrieve pinned test dependencies."""
+    ha_ver_to_install = ha_ver
+    if ha_ver_to_install == "latest":
+        ha_ver_to_install = _get_latest_ha_version()
+    pinned_test_dependency_versions = _resolve_pinned_test_dependency_versions(
+        ha_ver_to_install,
+        pinned_test_dependencies,
+    )
+    return ha_ver_to_install, pinned_test_dependency_versions
+
+
+def _prepare_venv_and_install(
+    venv_path: Path,
+    python_bin: Path,
+    ha_ver: str,
+    ha_ver_to_install: str,
+    py_ver: str,
+    reinstall: bool,
+    pinned_test_dependency_versions: dict[str, str],
+) -> bool:
+    """Ensure the virtual environment is prepared and dependencies are installed.
+
+    Returns:
+        bool: True if setup succeeded, False if python binary is missing.
+    """
+    created_venv = _ensure_venv(venv_path, py_ver)
+
+    if not python_bin.exists():
+        print(f"VALIDATION_ERROR: python not found at {python_bin}", flush=True)
+        return False
+
+    installed_ha = _get_installed_ha_version(python_bin)
+    marker_requires_reinstall = _dependency_marker_requires_reinstall(
+        created_venv,
+        venv_path,
+        pinned_test_dependency_versions,
+    )
+    needs_reinstall = (
+        reinstall
+        or (installed_ha != ha_ver_to_install)
+        or ha_ver == "latest"
+        or marker_requires_reinstall
+    )
+
+    needs_install, pinned_refresh_deps = _determine_dependency_actions(
+        needs_reinstall,
+        created_venv,
+        python_bin,
+        pinned_test_dependency_versions,
+    )
+
+    _install_dependencies(
+        venv_path,
+        python_bin,
+        ha_ver_to_install,
+        needs_install,
+        pinned_refresh_deps,
+        pinned_test_dependency_versions,
+        py_ver=py_ver,
+        reset_before_install=needs_reinstall and not created_venv,
+    )
+    return True
+
+
+def _verify_and_run_tests(
+    python_bin: Path,
+    pytest_bin: Path,
+    ha_ver_to_install: str,
+) -> tuple[bool, str]:
+    """Verify virtual environment completeness and run the test suite.
+
+    Returns:
+        tuple[bool, str]: (Success status, Installed HA version)
+    """
+    if not pytest_bin.exists():
+        print(f"VALIDATION_ERROR: pytest not found at {pytest_bin}", flush=True)
+        return False, ha_ver_to_install
+
+    ha_ver_display = _get_installed_ha_version(python_bin)
+    if ha_ver_display != ha_ver_to_install:
+        print(
+            f"VALIDATION_ERROR: expected Home Assistant {ha_ver_to_install}, "
+            f"found {ha_ver_display}",
+            flush=True,
+        )
+        return False, ha_ver_display
+
+    _run_pytest(python_bin, ha_ver_display, _COMPATIBILITY_PYTEST_ARGS)
+    return True, ha_ver_display
 
 
 def _run_tests_for_version(
@@ -778,12 +913,8 @@ def _run_tests_for_version(
     ha_ver_display = ha_ver
 
     try:
-        ha_ver_to_install = ha_ver
-        if ha_ver_to_install == "latest":
-            latest_ver = _get_latest_ha_version()
-            ha_ver_to_install = latest_ver
-        pinned_test_dependency_versions = _resolve_pinned_test_dependency_versions(
-            ha_ver_to_install,
+        ha_ver_to_install, pinned_test_dependency_versions = _prepare_version_and_deps(
+            ha_ver,
             pinned_test_dependencies,
         )
 
@@ -794,71 +925,33 @@ def _run_tests_for_version(
         python_bin = venv_path / "bin" / "python"
         pytest_bin = venv_path / "bin" / "pytest"
 
-        created_venv = _ensure_venv(venv_path, py_ver)
-
-        if not python_bin.exists():
-            print(f"VALIDATION_ERROR: python not found at {python_bin}", flush=True)
-            return False, ha_ver_display
-
-        installed_ha = _get_installed_ha_version(python_bin)
-        marker_requires_reinstall = _dependency_marker_requires_reinstall(
-            created_venv,
-            venv_path,
-            pinned_test_dependency_versions,
-        )
-        needs_reinstall = (
-            reinstall
-            or (installed_ha != ha_ver_to_install)
-            or ha_ver == "latest"
-            or marker_requires_reinstall
-        )
-
-        needs_install, pinned_refresh_deps = _determine_dependency_actions(
-            needs_reinstall,
-            created_venv,
-            python_bin,
-            pinned_test_dependency_versions,
-        )
-
-        _install_dependencies(
-            venv_path,
-            python_bin,
-            ha_ver_to_install,
-            needs_install,
-            pinned_refresh_deps,
-            pinned_test_dependency_versions,
+        if not _prepare_venv_and_install(
+            venv_path=venv_path,
+            python_bin=python_bin,
+            ha_ver=ha_ver,
+            ha_ver_to_install=ha_ver_to_install,
             py_ver=py_ver,
-            reset_before_install=needs_reinstall and not created_venv,
+            reinstall=reinstall,
+            pinned_test_dependency_versions=pinned_test_dependency_versions,
+        ):
+            return False, ha_ver_display
+
+        return _verify_and_run_tests(
+            python_bin=python_bin,
+            pytest_bin=pytest_bin,
+            ha_ver_to_install=ha_ver_to_install,
         )
-
-        if not pytest_bin.exists():
-            print(f"VALIDATION_ERROR: pytest not found at {pytest_bin}", flush=True)
-            return False, ha_ver_display
-
-        ha_ver_display = _get_installed_ha_version(python_bin)
-        if ha_ver_display != ha_ver_to_install:
-            print(
-                f"VALIDATION_ERROR: expected Home Assistant {ha_ver_to_install}, "
-                f"found {ha_ver_display}",
-                flush=True,
-            )
-            return False, ha_ver_display
-
-        _run_pytest(python_bin, ha_ver_display, _COMPATIBILITY_PYTEST_ARGS)
-        return True, ha_ver_display
 
     except ValueError as err:
         print(f"VALIDATION_ERROR: {err}", flush=True)
         return False, ha_ver_display
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
         ret_code = getattr(e, "returncode", 1)
-        if isinstance(e, subprocess.CalledProcessError):
-            cmd_val = e.cmd
-            cmd_str = (
-                " ".join(str(arg) for arg in cmd_val)
-                if isinstance(cmd_val, (list, tuple))
-                else str(cmd_val)
-            )
+        if isinstance(e, subprocess.TimeoutExpired):
+            cmd_str = _format_cmd_str(e.cmd)
+            print(f"STEP_FAILED: {cmd_str} TIMEOUT={e.timeout}", flush=True)
+        elif isinstance(e, subprocess.CalledProcessError):
+            cmd_str = _format_cmd_str(e.cmd)
             print(f"STEP_FAILED: {cmd_str} EXIT_CODE={ret_code}", flush=True)
             if e.stdout:
                 print("\nSTDOUT:", flush=True)

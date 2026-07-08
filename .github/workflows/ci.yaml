@@ -169,18 +169,23 @@ jobs:
               break
             fi
           done
-          HA_REQUIREMENTS_URL="https://raw.githubusercontent.com/home-assistant/core/$MATRIX_HA_REAL_VERSION/requirements_all.txt"
+          HA_REQUIREMENTS_CDN_URL="https://cdn.jsdelivr.net/gh/home-assistant/core@$MATRIX_HA_REAL_VERSION/requirements_all.txt"
+          HA_REQUIREMENTS_GITHUB_URL="https://raw.githubusercontent.com/home-assistant/core/$MATRIX_HA_REAL_VERSION/requirements_all.txt"
+          fetch_requirements() {
+            curl -sS -f --max-time 20 --retry 3 "$HA_REQUIREMENTS_CDN_URL" 2>/dev/null \
+              || curl -sS -f --max-time 20 --retry 3 "$HA_REQUIREMENTS_GITHUB_URL"
+          }
           REQUIRED_TEST_DEPS=(hassil pytest pytest-homeassistant-custom-component rapidfuzz)
           if [[ "$PINNED_HA_INTENTS" == false ]]; then
-            HA_REQUIREMENTS=$(curl -sS -f --max-time 20 --retry 3 "$HA_REQUIREMENTS_URL")
+            HA_REQUIREMENTS=$(fetch_requirements)
             HA_INTENTS_SPEC=$(awk '/^home-assistant-intents==/ {print $1; exit}' <<< "$HA_REQUIREMENTS")
             if [[ ! "$HA_INTENTS_SPEC" =~ ^home-assistant-intents==[a-zA-Z0-9]+(\.[a-zA-Z0-9]+)*$ ]]; then
-              echo "::error::Failed to resolve home-assistant-intents from $HA_REQUIREMENTS_URL"
+              echo "::error::Failed to resolve home-assistant-intents from requirements_all.txt (tried CDN and GitHub)"
               exit 1
             fi
             REQUIRED_TEST_DEPS+=("$HA_INTENTS_SPEC")
           fi
-          echo "homeassistant == $MATRIX_HA_REAL_VERSION" > overrides.txt
+          echo "homeassistant==$MATRIX_HA_REAL_VERSION" > overrides.txt
           INSTALL_TEST_DEPS=("${PINNED_TEST_DEPENDENCIES[@]}")
           for dep in "${REQUIRED_TEST_DEPS[@]}"; do
             dep_package="${dep%%==*}"
