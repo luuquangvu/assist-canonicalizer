@@ -179,6 +179,7 @@ class AssistCanonicalizerConversationEntity(
 
         try:
             from homeassistant.components.assist_pipeline.const import DOMAIN as PIPELINE_DOMAIN
+            from homeassistant.components.assist_pipeline.pipeline import async_get_pipeline
 
             pipeline_data = self.hass.data.get(PIPELINE_DOMAIN)
             current_pipeline = None
@@ -194,8 +195,6 @@ class AssistCanonicalizerConversationEntity(
                             break
                     if current_pipeline:
                         break
-
-            from homeassistant.components.assist_pipeline.pipeline import async_get_pipeline
 
             pipeline = current_pipeline or async_get_pipeline(self.hass)
             if not pipeline or getattr(pipeline, "prefer_local_intents", False):

@@ -22,6 +22,11 @@ from custom_components.assist_canonicalizer.grammar_loader import (
     is_fixed_sentence,
 )
 from custom_components.assist_canonicalizer.normalization import normalize_text
+from custom_components.assist_canonicalizer.rehydration import get_wildcard_rehydration
+from custom_components.assist_canonicalizer.utils import (
+    register_custom_wildcards_from_sources,
+    wildcard_slot_names,
+)
 
 _HASSIL_MISSING_LIST_RE = re.compile(r"\{([^}]+)\}")
 
@@ -976,15 +981,6 @@ class TestRehydrateWildcardText:
 
     def test_rehydrate_wildcard_literal_name_conflict(self) -> None:
         """Verify that a literal matching a wildcard name is not treated as a wildcard."""
-        from custom_components.assist_canonicalizer.grammar_loader import (
-            build_candidates_from_intent_sources,
-        )
-        from custom_components.assist_canonicalizer.rehydration import get_wildcard_rehydration
-        from custom_components.assist_canonicalizer.utils import (
-            register_custom_wildcards_from_sources,
-            wildcard_slot_names,
-        )
-
         intent_sources = {
             "custom": {
                 "lists": {"song": {"wildcard": True}},

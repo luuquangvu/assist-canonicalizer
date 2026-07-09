@@ -1,6 +1,7 @@
 """Tests for the Assist Canonicalizer conversation entity platform."""
 
 import asyncio
+import contextlib
 import inspect
 import sys
 from types import SimpleNamespace
@@ -11,6 +12,8 @@ import pytest
 from homeassistant.components.conversation.models import ConversationInput
 from homeassistant.core import Context
 
+import custom_components.assist_canonicalizer as assist_canonicalizer
+from custom_components.assist_canonicalizer import _discover_pipeline_languages
 from custom_components.assist_canonicalizer.candidate import Candidate
 from custom_components.assist_canonicalizer.const import (
     CONF_FALLBACK_AGENT_ID,
@@ -1210,3 +1213,108 @@ async def test_delta_capture_nested_playback_safety(
 
     # Verify original listener receives the outer delta too, exactly once
     assert orig_called == [{"text": "inner"}, {"text": "outer"}]
+
+
+@pytest.mark.asyncio
+async def test_discover_pipeline_languages_fallback() -> None:
+    """Test fallback logic in pipeline language discovery."""
+    mock_hass = MagicMock()
+    original = assist_canonicalizer.async_get_pipelines
+    assist_canonicalizer.async_get_pipelines = assist_canonicalizer._UNINITIALIZED
+    try:
+        # In the test environment assist_pipeline is not installed, so the import
+        # inside _discover_pipeline_languages raises ImportError and the function
+        # sets async_get_pipelines = None and returns an empty set.
+        langs = _discover_pipeline_languages(mock_hass)
+        assert langs == set()
+    finally:
+        assist_canonicalizer.async_get_pipelines = original
+
+
+@pytest.mark.asyncio
+async def test_capture_chat_log_deltas_exceptional_exit(
+    conversation_entity: AssistCanonicalizerConversationEntity,
+) -> None:
+    """Test capture_chat_log_deltas restores listener when exception occurs."""
+    chat_log = DummyChatLog()
+
+    with contextlib.suppress(RuntimeError), conversation_entity._capture_chat_log_deltas(chat_log):
+        raise RuntimeError("exceptional exit")
+    assert chat_log.delta_listener is None
+
+
+@pytest.mark.asyncio
+async def test_capture_chat_log_deltas_normal_exit_restores_listener(
+    conversation_entity: AssistCanonicalizerConversationEntity,
+) -> None:
+    """Test capture_chat_log_deltas restores the original listener on normal exit."""
+    chat_log = DummyChatLog()
+    original_listener = object()
+    chat_log.delta_listener = original_listener
+
+    with conversation_entity._capture_chat_log_deltas(chat_log):
+        # Simulate normal usage within the context
+        pass
+
+    # After normal exit, the original listener should be restored
+    assert chat_log.delta_listener is original_listener
+
+
+@pytest.mark.asyncio
+async def test_play_back_deltas_without_listener(
+    conversation_entity: AssistCanonicalizerConversationEntity,
+) -> None:
+    """Test play_back_deltas does not raise when original listener is None."""
+    chat_log = DummyChatLog(None)
+    # This should not raise any exceptions
+    conversation_entity._play_back_deltas(chat_log, [{"text": "test"}])
+
+
+@pytest.mark.asyncio
+async def test_async_validate_ranked_candidate_exceptions(
+    conversation_entity: AssistCanonicalizerConversationEntity,
+) -> None:
+    """Test that _async_validate_ranked_candidate returns None on delegate exceptions."""
+    rc = RankedCandidate(
+        candidate=Candidate(text="test", intent_name="test"),
+        scores=ScoreBreakdown(1.0, 1.0, 1.0, 1.0, 1.0),
+    )
+    user_input = MockConversationInput("test", "en")
+
+    with patch.object(
+        conversation_entity,
+        "_delegate_text",
+        side_effect=Exception("delegate exception"),
+    ):
+        res = await conversation_entity._async_validate_ranked_candidate(rc, user_input)
+        assert res is None
+
+
+@pytest.mark.asyncio
+async def test_async_process_fallback_missing(
+    conversation_entity: AssistCanonicalizerConversationEntity,
+) -> None:
+    """Test async_process behavior when fallback agent is not found."""
+    # Setup runtime with fallback ID that is missing
+    conversation_entity._entry.options = {"fallback_agent_id": "missing_agent"}
+
+    async def mock_converse(hass, text, conversation_id, context, language, agent_id, **kwargs):
+        """Mock conversation agent fallback target failure."""
+        if agent_id == "missing_agent":
+            raise ValueError("Agent not found")
+        return MagicMock()
+
+    converse_patch = patch(
+        "homeassistant.components.conversation.async_converse",
+        side_effect=mock_converse,
+    )
+    rank_patch = patch(
+        "custom_components.assist_canonicalizer.conversation.evaluate_confidence_gates",
+        return_value=(None, FallbackReason.LOW_CONFIDENCE),
+    )
+    with converse_patch, rank_patch:
+        user_input = MockConversationInput("hello", "en")
+        res = await conversation_entity.async_process(user_input)
+        # Should return a default error response when fallback completely fails
+        assert res is not None
+        assert res.response.error_code == "unknown"

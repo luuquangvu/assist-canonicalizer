@@ -1,5 +1,6 @@
 """Tests for lexical ranking and candidate indexing."""
 
+from dataclasses import replace
 from typing import Any, cast
 
 import orjson
@@ -25,11 +26,20 @@ from custom_components.assist_canonicalizer.ranking import (
     CharNGramIndex,
     RankedCandidate,
     ScoreBreakdown,
+    _best_positional_score,
+    _calculate_slot_penalty,
+    _check_and_calculate_conflict_penalty,
+    _get_wildcard_slot_tokens,
     _has_static_entity_uncovered_query_tokens,
     _has_static_slot_query_conflict,
     _has_wildcard_known_slot_token_absorption,
+    _is_numeric_slot_value,
+    _per_pair_positional_threshold,
+    _positional_similarity,
     _query_slot_tokens_from_index,
     _query_token_coverage,
+    _raw_cached_fuzz_ratio,
+    _ScoringContext,
     accepted_candidate,
     clear_ranking_caches,
     confidence_gate_rejection_reason,
@@ -38,7 +48,20 @@ from custom_components.assist_canonicalizer.ranking import (
     rapidfuzz_similarity_normalized,
     token_count_ratio,
 )
-from custom_components.assist_canonicalizer.rehydration import wildcard_variants_analysis
+from custom_components.assist_canonicalizer.rehydration import (
+    _extract_original_span,
+    _extract_wc_value,
+    _find_rehydration_boundaries,
+    _is_wildcard_literal_token,
+    _trim_wildcard_overlaps,
+    get_wildcard_rehydration,
+    rehydrate_wildcard_slots,
+    wildcard_variants_analysis,
+)
+from custom_components.assist_canonicalizer.utils import (
+    register_custom_wildcards_from_sources,
+    wildcard_slot_names_sorted,
+)
 
 
 def _fail_bm25_from_texts(*args: object, **kwargs: object) -> None:
@@ -2455,11 +2478,6 @@ def test_numeric_slot_mismatch_penalty_unsupported_multiplier_without_slots_raw(
 
 def test_wildcard_infos_multiple_wildcards_extraction() -> None:
     """Verify that wildcard_infos extracts all wildcard tokens in a template."""
-    from custom_components.assist_canonicalizer.utils import (
-        register_custom_wildcards_from_sources,
-        wildcard_slot_names_sorted,
-    )
-
     # Register two custom wildcards: "wildcard_one" and "wildcard_two"
     register_custom_wildcards_from_sources(
         "en",
@@ -2492,11 +2510,6 @@ def test_wildcard_infos_multiple_wildcards_extraction() -> None:
 
 def test_multi_wildcard_rehydration() -> None:
     """Verify multiple wildcards are correctly aligned and rehydrated."""
-    from custom_components.assist_canonicalizer.rehydration import get_wildcard_rehydration
-    from custom_components.assist_canonicalizer.utils import (
-        register_custom_wildcards_from_sources,
-    )
-
     register_custom_wildcards_from_sources(
         "en",
         {
@@ -2558,8 +2571,6 @@ def test_evaluate_confidence_gates_empty_and_success_states() -> None:
 
 def test_clear_ranking_caches() -> None:
     """Test clear_ranking_caches does not raise exceptions."""
-    from custom_components.assist_canonicalizer.ranking import _raw_cached_fuzz_ratio
-
     # Warm up cache
     _raw_cached_fuzz_ratio("test", "test")
     # Verify cache is populated
@@ -2568,3 +2579,249 @@ def test_clear_ranking_caches() -> None:
     clear_ranking_caches()
     # Verify cache is empty
     assert _raw_cached_fuzz_ratio.cache_info().currsize == 0
+
+
+def test_token_count_ratio_empty() -> None:
+    """Test token_count_ratio with empty strings."""
+    assert token_count_ratio("", "candidate") == 0.0
+    assert token_count_ratio("query", "") == 0.0
+
+
+def test_positional_similarity_empty() -> None:
+    """Test _positional_similarity with empty strings."""
+    assert _positional_similarity("", "") == 1.0
+
+
+def test_per_pair_positional_threshold() -> None:
+    """Test _per_pair_positional_threshold with various token lengths."""
+    # Length <= 2
+    assert _per_pair_positional_threshold("a", "bc") > 0.0
+    # Length 3
+    assert _per_pair_positional_threshold("abc", "def") > 0.0
+    # Length <= 5
+    assert _per_pair_positional_threshold("abcd", "efgh") > 0.0
+    # Length > 5
+    assert _per_pair_positional_threshold("abcdefg", "hijklmn") > 0.0
+
+
+def test_is_numeric_slot_value_edge_cases() -> None:
+    """Test _is_numeric_slot_value with edge cases."""
+    # Bool (even though bool is a subclass of int, this should not be treated as numeric)
+    assert not _is_numeric_slot_value(True)
+
+    # Empty string
+    assert not _is_numeric_slot_value("  ")
+
+    # Non-numeric string
+    assert not _is_numeric_slot_value("abc")
+
+    # List or other non-scalar types
+    assert not _is_numeric_slot_value([])
+
+    # Integers
+    assert _is_numeric_slot_value(0)
+    assert _is_numeric_slot_value(42)
+    assert _is_numeric_slot_value(-7)
+
+    # Floats
+    assert _is_numeric_slot_value(3.14)
+    assert _is_numeric_slot_value(-0.001)
+
+    # Numeric strings (integers)
+    assert _is_numeric_slot_value("42")
+    assert _is_numeric_slot_value("-17")
+
+    # Numeric strings (floats)
+    assert _is_numeric_slot_value("3.14")
+    assert _is_numeric_slot_value("-0.001")
+
+
+def test_has_static_slot_query_conflict_penalty() -> None:
+    """Test _has_static_slot_query_conflict when a query slot token doesn't match."""
+    query_slots = frozenset(["light"])
+    candidate_tokens = frozenset(["turn", "on", "fan"])
+    slots = {"name": "fan"}
+    static_slots = frozenset(["name"])
+
+    assert _has_static_slot_query_conflict(query_slots, candidate_tokens, slots, static_slots)
+
+
+def test_rehydration_edge_cases() -> None:
+    """Test rehydration edge cases in rehydration.py."""
+    # _find_rehydration_boundaries prefix >= suffix boundary
+    # c_prefix aligns to 1, c_suffix aligns to 0
+    # query: "a b"
+    # cand: "a wc b"
+    # boundary check where prefix >= suffix
+    assert _find_rehydration_boundaries(("a", "wc", "b"), 1, ("a",)) is None
+
+    # _extract_wc_value fallback
+    # When original query has mismatch, fallback to join of tokens
+    assert _extract_wc_value("A B C", ("a", "b", "c"), 1, 3) == "B C"
+
+    # _trim_wildcard_overlaps suffix overlap
+    assert _trim_wildcard_overlaps("something_else", "something_else_suffix", "_else") == "_else"
+
+    # _extract_original_span mismatch indexes
+    # Invalid index returns empty string
+    assert _extract_original_span("hello world", -1, 5) == ""
+
+    # _is_wildcard_literal_token underscore check
+    # Underscore wildcard name
+    assert _is_wildcard_literal_token(
+        token="some_wc_name",
+        wc_name="some_wc",
+        all_variant_tokens=set(),
+        variant=frozenset(),
+        variants=frozenset(),
+    )
+
+    # rehydrate_wildcard_slots no replacements returns unmodified slots
+    # Passing slots, candidate with wildcard, and a query that doesn't align
+    # should return original slots
+    slots = {"some_key": "some_val"}
+    assert rehydrate_wildcard_slots(slots, "play {song}", "invalid query", "en") == slots
+
+
+def test_ranking_internal_helpers() -> None:
+    """Directly test internal ranking helpers to ensure their stability."""
+    # Non-trivial slot penalty path: conflicting slot tokens.
+    # _check_and_calculate_conflict_penalty takes (cand_slot_tokens: frozenset,
+    # wildcard_tokens: frozenset, candidate, context). Build a minimal context
+    # whose query_slot_tokens conflict with the candidate's slot tokens so that
+    # the penalty is non-trivial (i.e. < 1.0).
+    conflict_ctx = _ScoringContext(
+        query="play jazz songs",
+        query_normalized="play jazz songs",
+        query_tokens=frozenset(["play", "jazz", "songs"]),
+        query_tokens_tuple=("play", "jazz", "songs"),
+        query_token_count=3,
+        query_sorted="jazz play songs",
+        query_grams=frozenset(),
+        query_slot_tokens=frozenset(["jazz"]),  # conflicts with candidate's "rock"
+        query_has_number=False,
+        query_numbers=set(),
+        bm25_ref=None,
+        max_raw_score=0.0,
+        positional_lookup={},
+        positional_literal_tokens=None,
+        non_entity_tokens=None,
+        candidate_slot_tokens=None,
+        slot_tokens_by_index={},
+        min_confidence=0.5,
+        normalized_context={},
+        wildcard_passed_set=frozenset(),
+        rehydrated_cache={},
+        intent_score_cache={},
+        literal_analysis_cache={},
+    )
+    conflict_candidate = Candidate(text="play rock songs", intent_name="HassMediaSearchAndPlay")
+    # cand_slot_tokens = {"songs"} IS present in query_tokens_tuple so cand_coverage = 1.0,
+    # but query_slot_tokens = {"jazz"} is NOT in allowed_cand_tokens, so has_conflict = True.
+    # Result: 1.0 * (0.8 + 0.2 * 0.0) = 0.8  ->  0.0 < 0.8 < 1.0
+    conflict_penalty_from_check = _check_and_calculate_conflict_penalty(
+        frozenset({"songs"}),  # cand_slot_tokens -- present in query tokens
+        frozenset(),  # wildcard_tokens
+        conflict_candidate,
+        conflict_ctx,
+    )
+
+    # The penalty must be non-trivial (conflict reduces it below 1.0)
+    assert 0.0 < conflict_penalty_from_check < 1.0
+
+    # The penalty must reduce a combined score
+    base_score = 0.8
+    combined_score = base_score * conflict_penalty_from_check
+    assert combined_score < base_score
+
+    # _best_positional_score
+    analysis = [(3, 1, [frozenset(["a", "b"])])]
+    assert _best_positional_score(analysis, frozenset(["a", "b"])) == 1.0 / 3.0
+    assert _best_positional_score(analysis, frozenset(["a"])) > 1.0 / 3.0
+    assert _best_positional_score([], frozenset()) == 0.0
+
+    # Dummy ScoringContext setup
+    ctx = _ScoringContext(
+        query="test query",
+        query_normalized="test query",
+        query_tokens=frozenset(["test", "query"]),
+        query_tokens_tuple=("test", "query"),
+        query_token_count=2,
+        query_sorted="query test",
+        query_grams=frozenset(),
+        query_slot_tokens=frozenset(["slot1"]),
+        query_has_number=False,
+        query_numbers=set(),
+        bm25_ref=None,
+        max_raw_score=0.0,
+        positional_lookup={},
+        positional_literal_tokens=None,
+        non_entity_tokens=None,
+        candidate_slot_tokens=None,
+        slot_tokens_by_index={},
+        min_confidence=0.5,
+        normalized_context={},
+        wildcard_passed_set=frozenset(),
+        rehydrated_cache={},
+        intent_score_cache={},
+        literal_analysis_cache={},
+    )
+
+    candidate_dummy = Candidate(text="dummy", intent_name="dummy")
+    assert (
+        _check_and_calculate_conflict_penalty(
+            frozenset(), frozenset(["slot1"]), candidate_dummy, ctx
+        )
+        == 1.0
+    )
+
+    ctx_empty_query_slots = replace(ctx, query_slot_tokens=frozenset())
+    assert (
+        _check_and_calculate_conflict_penalty(
+            frozenset(["slot1"]), frozenset(), candidate_dummy, ctx_empty_query_slots
+        )
+        == 1.0
+    )
+
+    # Test _calculate_slot_penalty short-circuit
+    simple_candidate = Candidate(
+        text="turn on lights",
+        intent_name="HassTurnOn",
+        metadata={},
+    )
+    penalty, wildcard_toks, cand_toks = _calculate_slot_penalty(
+        idx=0,
+        candidate=simple_candidate,
+        context=ctx,
+        rehydrated=None,
+    )
+    assert penalty == 1.0
+    assert wildcard_toks == frozenset()
+    assert cand_toks == frozenset()
+
+    # Test _get_wildcard_slot_tokens with rehydrated candidate
+    register_custom_wildcards_from_sources(
+        "en",
+        {"custom": {"lists": {"song": {"wildcard": True}}}},
+    )
+    wildcard_candidate = Candidate(
+        text="play {song}",
+        intent_name="HassMediaSearchAndPlay",
+        language="en",
+        metadata={"sentence_template": "play {song}", "wildcard_slots": "song"},
+    )
+    rehydrated = ("play thriller", {"song": "thriller"})
+    ctx_wildcard = replace(
+        ctx,
+        candidate_slot_tokens=(frozenset(["song"]),),
+        slot_tokens_by_index={0: frozenset(["song"])},
+    )
+
+    cand_slot, wildcard_toks, _leading = _get_wildcard_slot_tokens(
+        idx=0,
+        candidate=wildcard_candidate,
+        context=ctx_wildcard,
+        rehydrated=rehydrated,
+    )
+    assert "thriller" in wildcard_toks
+    assert "song" not in cand_slot

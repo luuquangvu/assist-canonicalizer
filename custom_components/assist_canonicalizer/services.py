@@ -10,7 +10,6 @@ from collections.abc import Callable, Coroutine
 from functools import partial
 from typing import Any
 
-import home_assistant_intents as intents_module
 import voluptuous as vol
 from homeassistant.core import ServiceCall, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
@@ -58,7 +57,12 @@ def validate_supported_language(value: Any) -> str:
     if not lang.strip():
         raise vol.Invalid("Language cannot be empty")
 
-    get_languages = intents_module.get_languages
+    try:
+        import home_assistant_intents
+    except ImportError as err:
+        raise vol.Invalid("Home Assistant intents package is not installed") from err
+
+    get_languages = home_assistant_intents.get_languages
     if matches := language_module.matches(lang, set(get_languages())):
         return matches[0]
     raise vol.Invalid(f"Language '{lang}' is not supported by Home Assistant")
