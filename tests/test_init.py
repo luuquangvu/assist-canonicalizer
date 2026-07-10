@@ -1,5 +1,6 @@
 """Tests for Assist Canonicalizer integration entry points."""
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -364,12 +365,18 @@ async def test_warmup_single_language_normalizes_input(
 
 
 @pytest.mark.asyncio
-async def test_warmup_pipeline_languages_spawns_tasks() -> None:
-    """Spawn one warmup task per discovered pipeline language."""
+async def test_warmup_pipeline_languages_awaits_child_warmups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Await one warmup child per discovered pipeline language."""
     hass = MagicMock()
     hass.config.language = "en"
-    hass.async_create_task = MagicMock()
     runtime = CanonicalizerRuntime()
+    warmup = AsyncMock()
+    monkeypatch.setattr(
+        "custom_components.assist_canonicalizer._warmup_single_language",
+        warmup,
+    )
 
     pipelines = [MagicMock(language="en"), MagicMock(language="vi")]
     mock_get_pipelines = MagicMock(return_value=pipelines)
@@ -380,30 +387,67 @@ async def test_warmup_pipeline_languages_spawns_tasks() -> None:
     ):
         await _async_warmup_pipeline_languages(hass, runtime)
 
-        assert hass.async_create_task.call_count == 2
-
-        # Close captured coroutines to avoid RuntimeWarning
-        for call_args in hass.async_create_task.call_args_list:
-            call_args[0][0].close()
+    assert warmup.await_count == 2
+    assert {call.args[2] for call in warmup.await_args_list} == {"en", "vi"}
 
 
 @pytest.mark.asyncio
-async def test_warmup_pipeline_languages_fallback_to_default() -> None:
+async def test_shutdown_cancels_task_group_warmup_children(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tracked parent warmup cancellation is propagated to TaskGroup children."""
+    hass = MagicMock()
+    hass.config.language = "en"
+    runtime = CanonicalizerRuntime()
+    child_started = asyncio.Event()
+    child_cancelled = asyncio.Event()
+
+    async def pending_warmup(*_args: Any) -> None:
+        """Wait until the parent TaskGroup propagates cancellation."""
+        child_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            child_cancelled.set()
+            raise
+
+    monkeypatch.setattr(
+        "custom_components.assist_canonicalizer._warmup_single_language",
+        pending_warmup,
+    )
+    with patch.object(
+        custom_components.assist_canonicalizer,
+        "async_get_pipelines",
+        MagicMock(return_value=[MagicMock(language="en")]),
+    ):
+        warmup_task = asyncio.create_task(_async_warmup_pipeline_languages(hass, runtime))
+        runtime.track_warmup_task(warmup_task)
+        await child_started.wait()
+        await runtime.async_shutdown()
+
+    assert warmup_task.cancelled()
+    assert child_cancelled.is_set()
+    assert runtime.warmup_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_warmup_pipeline_languages_fallback_to_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Fall back to hass.config.language when discovery returns empty."""
     hass = MagicMock()
     hass.config.language = "de"
-    hass.async_create_task = MagicMock()
     runtime = CanonicalizerRuntime()
+    warmup = AsyncMock()
+    monkeypatch.setattr(
+        "custom_components.assist_canonicalizer._warmup_single_language",
+        warmup,
+    )
 
     with patch.object(custom_components.assist_canonicalizer, "async_get_pipelines", None):
         await _async_warmup_pipeline_languages(hass, runtime)
 
-        hass.async_create_task.assert_called_once()
-        created_task_arg = hass.async_create_task.call_args[0][0]
-        assert created_task_arg is not None
-
-        # Close captured coroutine to avoid RuntimeWarning
-        created_task_arg.close()
+    warmup.assert_awaited_once_with(hass, runtime, "de")
 
 
 @pytest.mark.asyncio

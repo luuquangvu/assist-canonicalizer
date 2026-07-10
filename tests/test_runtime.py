@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import sys
+import threading
 from collections.abc import Mapping
 from enum import Enum
 from types import ModuleType
@@ -1190,6 +1191,314 @@ async def test_async_rebuild_does_not_publish_after_index_clear(monkeypatch: Any
     assert index is None
     assert runtime.get_index("en") is None
     assert "assist_canonicalizer.index_en" not in MockStore.stored_data
+    assert runtime.rebuild_tasks == {}
+
+
+async def test_async_shutdown_prevents_blocked_rebuild_publication(monkeypatch: Any) -> None:
+    """Do not publish or persist a rebuild that finishes after runtime shutdown starts."""
+    monkeypatch.setattr(homeassistant.helpers.storage, "Store", MockStore)
+    MockStore.reset()
+    runtime = CanonicalizerRuntime()
+    build_started = threading.Event()
+    build_finished = threading.Event()
+    release_build = threading.Event()
+    save_called = False
+    set_index_called = False
+
+    def blocking_build(snapshot: Any) -> CanonicalIndex:
+        """Block inside executor-backed index construction."""
+        build_started.set()
+        assert release_build.wait(timeout=5)
+        build_finished.set()
+        return build_index(
+            snapshot.language,
+            [Candidate(text="turn on light", intent_name="HassTurnOn", language=snapshot.language)],
+        )
+
+    class ThreadedBuildHass(HashableFakeHass):
+        """Fake hass that runs the build step in a real executor thread."""
+
+        def async_create_task(self, coro: Any) -> asyncio.Task[Any]:
+            """Create an asyncio task."""
+            return asyncio.create_task(coro)
+
+        async def async_add_executor_job(self, target: Any, *args: Any) -> Any:
+            """Run the blocked build in an executor thread."""
+            if target is blocking_build:
+                loop = asyncio.get_running_loop()
+                return await loop.run_in_executor(None, target, *args)
+            return target(*args)
+
+    original_save = CanonicalizerRuntime.async_save_index_to_store
+
+    async def record_save(
+        self: CanonicalizerRuntime,
+        *args: Any,
+        **kwargs: Any,
+    ) -> bool:
+        """Record unexpected persistence attempts."""
+        nonlocal save_called
+        if self is runtime:
+            save_called = True
+        return await original_save(self, *args, **kwargs)
+
+    original_set_index = CanonicalizerRuntime.set_index
+
+    def record_set_index(self: CanonicalizerRuntime, index: CanonicalIndex) -> None:
+        """Record unexpected in-memory publication attempts."""
+        nonlocal set_index_called
+        if self is runtime:
+            set_index_called = True
+            return
+        original_set_index(self, index)
+
+    monkeypatch.setattr(runtime_module, "_build_index_from_snapshot", blocking_build)
+    monkeypatch.setattr(CanonicalizerRuntime, "async_save_index_to_store", record_save)
+    monkeypatch.setattr(CanonicalizerRuntime, "set_index", record_set_index)
+    hass = ThreadedBuildHass()
+
+    rebuild_task = asyncio.create_task(runtime.async_rebuild_index(hass, "en"))
+    assert await asyncio.to_thread(build_started.wait, 5)
+    shutdown_task = asyncio.create_task(runtime.async_shutdown())
+    await asyncio.sleep(0)
+    release_build.set()
+
+    try:
+        rebuild_result = await rebuild_task
+    except asyncio.CancelledError:
+        rebuild_result = None
+    await shutdown_task
+
+    assert rebuild_result is None
+    assert build_finished.is_set()
+    assert not save_called
+    assert not set_index_called
+    assert runtime.get_index("en") is None
+    assert "assist_canonicalizer.index_en" not in MockStore.stored_data
+    assert runtime.rebuild_tasks == {}
+
+
+async def test_async_shutdown_waits_for_active_store_operation(monkeypatch: Any) -> None:
+    """Use the storage lock as a barrier for saves that already started."""
+    save_started = asyncio.Event()
+    release_save = asyncio.Event()
+
+    class BlockingSaveStore(MockStore):
+        """Mock store that blocks index saves until released."""
+
+        async def async_save(self, data: dict[str, Any]) -> None:
+            """Block the language index save to test the shutdown barrier."""
+            if self.key == "assist_canonicalizer.index_en":
+                save_started.set()
+                await release_save.wait()
+            await super().async_save(data)
+
+    monkeypatch.setattr(homeassistant.helpers.storage, "Store", BlockingSaveStore)
+    BlockingSaveStore.reset()
+    runtime = CanonicalizerRuntime()
+    hass = HashableFakeHass()
+    index = build_index("en", [Candidate(text="turn on light", intent_name="HassTurnOn")])
+
+    save_task = asyncio.create_task(runtime.async_save_index_to_store(hass, index, "fingerprint"))
+    await save_started.wait()
+    shutdown_task = asyncio.create_task(runtime.async_shutdown())
+    await asyncio.sleep(0)
+
+    assert not shutdown_task.done()
+
+    release_save.set()
+    assert await save_task is False
+    await shutdown_task
+    assert "assist_canonicalizer.index_manifest" not in BlockingSaveStore.stored_data
+
+
+async def test_async_shutdown_drains_cancelled_rebuild_store_writer(monkeypatch: Any) -> None:
+    """Wait for executor-backed storage even when shutdown cancels its rebuild."""
+    save_started = threading.Event()
+    release_save = threading.Event()
+    save_finished = threading.Event()
+
+    class ExecutorBackedSaveStore(MockStore):
+        """Mock a Home Assistant store whose file write runs in an executor."""
+
+        async def async_save(self, data: dict[str, Any]) -> None:
+            """Run the language-store write in a thread that cancellation cannot stop."""
+            if self.key != "assist_canonicalizer.index_en":
+                await super().async_save(data)
+                return
+
+            def blocking_write() -> None:
+                """Block the executor writer until the test releases it."""
+                save_started.set()
+                assert release_save.wait(timeout=5)
+                MockStore.stored_data[self.key] = data
+                save_finished.set()
+
+            await asyncio.get_running_loop().run_in_executor(None, blocking_write)
+
+    monkeypatch.setattr(homeassistant.helpers.storage, "Store", ExecutorBackedSaveStore)
+    MockStore.reset()
+    runtime = CanonicalizerRuntime()
+    hass = HashableFakeHass(async_create_task=lambda coro: asyncio.create_task(coro))
+
+    rebuild_task = asyncio.create_task(runtime.async_rebuild_index(hass, "en"))
+    assert await asyncio.to_thread(save_started.wait, 5)
+    shutdown_task = asyncio.create_task(runtime.async_shutdown())
+    await asyncio.sleep(0.05)
+
+    assert not shutdown_task.done()
+    assert not save_finished.is_set()
+
+    release_save.set()
+    await asyncio.gather(rebuild_task, return_exceptions=True)
+    await shutdown_task
+
+    assert save_finished.is_set()
+    assert "assist_canonicalizer.index_en" in MockStore.stored_data
+    assert "assist_canonicalizer.index_manifest" not in MockStore.stored_data
+
+
+async def test_async_shutdown_drains_direct_store_load_build(monkeypatch: Any) -> None:
+    """Wait for a direct persisted-index build before completing shutdown."""
+    monkeypatch.setattr(homeassistant.helpers.storage, "Store", MockStore)
+    MockStore.reset()
+    hass = HashableFakeHass()
+    source_runtime = CanonicalizerRuntime()
+    snapshot = _create_build_snapshot_and_register_wildcards(
+        "en",
+        *source_runtime._capture_build_inputs(),
+    )
+    stored_index = build_index(
+        "en",
+        [Candidate(text="turn on light", intent_name="HassTurnOn", language="en")],
+    )
+    assert await source_runtime.async_save_index_to_store(
+        hass,
+        stored_index,
+        snapshot.fingerprint,
+    )
+
+    build_started = threading.Event()
+    release_build = threading.Event()
+    build_finished = threading.Event()
+
+    def blocking_build(language: str, candidates: Any) -> CanonicalIndex:
+        """Block reconstruction of the loaded index in a real executor thread."""
+        build_started.set()
+        assert release_build.wait(timeout=5)
+        rebuilt = build_index(language, candidates)
+        build_finished.set()
+        return rebuilt
+
+    class ThreadedLoadHass(HashableFakeHass):
+        """Fake hass that runs persisted-index reconstruction in an executor."""
+
+        async def async_add_executor_job(self, target: Any, *args: Any) -> Any:
+            """Run only the patched index builder in a real executor thread."""
+            if target is blocking_build:
+                return await asyncio.get_running_loop().run_in_executor(None, target, *args)
+            return target(*args)
+
+    monkeypatch.setattr(runtime_module, "build_index", blocking_build)
+    runtime = CanonicalizerRuntime()
+    load_task = asyncio.create_task(runtime.async_load_index_from_store(ThreadedLoadHass(), "en"))
+    assert await asyncio.to_thread(build_started.wait, 5)
+    shutdown_task = asyncio.create_task(runtime.async_shutdown())
+    await asyncio.sleep(0.05)
+
+    assert not shutdown_task.done()
+    assert not build_finished.is_set()
+
+    release_build.set()
+    assert await load_task is None
+    await shutdown_task
+
+    assert build_finished.is_set()
+    assert runtime.get_index("en") is None
+
+
+async def test_async_shutdown_cancels_and_drains_rebuild_tasks() -> None:
+    """Cancel and await all tracked per-language rebuild tasks."""
+    runtime = CanonicalizerRuntime()
+
+    async def pending_rebuild() -> CanonicalIndex | None:
+        """Never finish unless canceled by shutdown."""
+        await asyncio.Event().wait()
+        return None
+
+    task_en = asyncio.create_task(pending_rebuild())
+    task_vi = asyncio.create_task(pending_rebuild())
+    runtime.rebuild_tasks["en"] = (runtime.index_generation, task_en)
+    runtime.rebuild_tasks["vi"] = (runtime.index_generation, task_vi)
+
+    await runtime.async_shutdown()
+
+    assert task_en.cancelled()
+    assert task_vi.cancelled()
+    assert runtime.rebuild_tasks == {}
+    assert runtime.warmup_tasks == set()
+
+
+async def test_async_shutdown_cancels_and_drains_tracked_warmup_task() -> None:
+    """Cancel and await a warmup registered through the public tracking API."""
+    runtime = CanonicalizerRuntime()
+    warmup_started = asyncio.Event()
+
+    async def pending_warmup() -> None:
+        """Remain active until runtime shutdown cancels the warmup."""
+        warmup_started.set()
+        await asyncio.Event().wait()
+
+    warmup_task = asyncio.create_task(pending_warmup())
+    runtime.track_warmup_task(warmup_task)
+    await warmup_started.wait()
+
+    assert warmup_task in runtime.warmup_tasks
+
+    await runtime.async_shutdown()
+
+    assert warmup_task.cancelled()
+    assert runtime.warmup_tasks == set()
+
+
+async def test_async_await_drained_retries_repeated_cancellation() -> None:
+    """Drain work after every cancellation delivered while it remains active."""
+    work_started = asyncio.Event()
+    release_work = asyncio.Event()
+    work_finished = asyncio.Event()
+
+    async def pending_work() -> None:
+        """Block until the test permits the drained operation to complete."""
+        work_started.set()
+        await release_work.wait()
+        work_finished.set()
+
+    drain_task = asyncio.create_task(runtime_module._async_await_drained(pending_work()))
+    await work_started.wait()
+
+    drain_task.cancel()
+    await asyncio.sleep(0)
+    drain_task.cancel()
+    await asyncio.sleep(0)
+
+    assert not drain_task.done()
+
+    release_work.set()
+    with pytest.raises(asyncio.CancelledError):
+        await drain_task
+
+    assert work_finished.is_set()
+
+
+async def test_async_rebuild_index_returns_none_after_shutdown() -> None:
+    """Do not create rebuild work after the runtime is closed."""
+    runtime = CanonicalizerRuntime()
+    await runtime.async_shutdown()
+    hass = HashableFakeHass(async_create_task=lambda coro: pytest.fail("no task expected"))
+
+    result = await runtime.async_rebuild_index(hass, "en")
+
+    assert result is None
     assert runtime.rebuild_tasks == {}
 
 

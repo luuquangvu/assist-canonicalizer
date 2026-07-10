@@ -1,24 +1,17 @@
 name: CI
 
 on:
-  push:
+  push: &ci_trigger
     branches:
       - main
     paths:
       - "**.py"
+      - "**.json"
+      - "**.yaml"
+      - "**.yml"
       - "pyproject.toml"
       - "uv.lock"
-      - ".github/workflows/ci.yaml"
-      - "tools/compatibility_matrix.json"
-  pull_request:
-    branches:
-      - main
-    paths:
-      - "**.py"
-      - "pyproject.toml"
-      - "uv.lock"
-      - ".github/workflows/ci.yaml"
-      - "tools/compatibility_matrix.json"
+  pull_request: *ci_trigger
   workflow_dispatch:
 
 permissions:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from functools import partial
 from typing import Any
@@ -64,7 +65,9 @@ async def async_setup_entry(
 
     async_setup_services(hass)
 
-    hass.async_create_task(_async_warmup_pipeline_languages(hass, runtime))
+    runtime.track_warmup_task(
+        hass.async_create_task(_async_warmup_pipeline_languages(hass, runtime))
+    )
 
     return True
 
@@ -76,7 +79,7 @@ async def async_unload_entry(
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if not unload_ok:
         return False
-    _runtime_from_entry(hass, entry).cleanup()
+    await _runtime_from_entry(hass, entry).async_shutdown()
     async_unload_services(hass)
     domain_data: dict[str, Any] = hass.data.get(DOMAIN, {})
     domain_data.pop(entry.entry_id, None)
@@ -131,6 +134,8 @@ def _handle_intent_updates(
     intents_update: Any,
 ) -> None:
     """Update intent sources and trigger background rebuilds for active languages."""
+    if runtime.closed:
+        return
     active_languages = list(runtime.indexes)
     runtime.update_intent_sources(intents_update)
     for language in active_languages:
@@ -143,6 +148,8 @@ def _debounced_registry_rebuild(
     now: Any = None,
 ) -> None:
     """Refresh registry slot values and rebuild active indexes."""
+    if runtime.closed:
+        return
     runtime.rebuild_timer_cancel = None
     active_languages = list(runtime.indexes)
     _refresh_registry_slot_values(hass, runtime)
@@ -157,6 +164,8 @@ def _schedule_registry_refresh(
     event: Any = None,
 ) -> None:
     """Schedule a debounced refresh after a registry update."""
+    if runtime.closed:
+        return
     if runtime.rebuild_timer_cancel is not None:
         runtime.rebuild_timer_cancel()
         runtime.rebuild_timer_cancel = None
@@ -203,6 +212,8 @@ async def _warmup_single_language(
     language: str,
 ) -> None:
     """Try to load an index from store, falling back to a rebuild. Never raises."""
+    if runtime.closed:
+        return
     try:
         index = runtime.get_index(language)
         if index is not None:
@@ -224,6 +235,8 @@ async def _async_warmup_pipeline_languages(
     runtime: CanonicalizerRuntime,
 ) -> None:
     """Discover configured pipeline languages and warm every index in the background."""
+    if runtime.closed:
+        return
     languages = _discover_pipeline_languages(hass)
     if not languages:
         try:
@@ -231,5 +244,10 @@ async def _async_warmup_pipeline_languages(
         except Exception:
             return
 
-    for language in languages:
-        hass.async_create_task(_warmup_single_language(hass, runtime, language))
+    async with asyncio.TaskGroup() as task_group:
+        for language in languages:
+            if runtime.closed:
+                return
+            # The setup task tracked by the runtime owns this TaskGroup; the
+            # TaskGroup, in turn, cancels and drains its language children.
+            task_group.create_task(_warmup_single_language(hass, runtime, language))

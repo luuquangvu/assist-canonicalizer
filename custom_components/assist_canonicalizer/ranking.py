@@ -689,6 +689,19 @@ def _rank_prefilter_keys(
     ]
 
 
+def _rank_prefilter_keys_with_sparse_bm25(
+    char_scores: Sequence[float],
+    raw_bm25_scores: Mapping[int, float],
+    bm25_inv_max: float,
+) -> list[float]:
+    """Return dense-equivalent keys without allocating a dense BM25 score array."""
+    keys = [-CHAR_NGRAM_WEIGHT * char_score for char_score in char_scores]
+    for index, raw_score in raw_bm25_scores.items():
+        normalized_score = raw_score * bm25_inv_max
+        keys[index] -= BM25_WEIGHT * normalized_score
+    return keys
+
+
 def _rank_prefilter_limit(
     candidate_count: int,
     max_candidates: int = DEFAULT_MAX_CANDIDATES,
@@ -705,6 +718,74 @@ def _top_prefilter_indices(
 ) -> list[int]:
     """Return candidate indices selected by the prefilter heap."""
     return nsmallest(prefilter_limit, range(len(prefilter_keys)), key=prefilter_keys.__getitem__)
+
+
+@dataclass(frozen=True, slots=True)
+class _Bm25Scoring:
+    """BM25 values and accessors for one ranking query.
+
+    Static indexes retain only positive raw scores, while dynamic candidates are
+    scored against a reference index and require a dense score sequence. The
+    accessors keep those representations out of the main ranking flow.
+    """
+
+    index: BM25Index
+    max_raw_score: float
+    dense_scores: Sequence[float] | None = None
+    sparse_raw_scores: Mapping[int, float] | None = None
+    sparse_inv_max: float = 0.0
+
+    def prefilter_keys(self, char_scores: Sequence[float]) -> list[float]:
+        """Return prefilter keys using this query's BM25 representation."""
+        if self.sparse_raw_scores is not None:
+            return _rank_prefilter_keys_with_sparse_bm25(
+                char_scores,
+                self.sparse_raw_scores,
+                self.sparse_inv_max,
+            )
+        return _rank_prefilter_keys(char_scores, self.dense_scores or ())
+
+    def score_at(self, index: int) -> float:
+        """Return the normalized BM25 score for one candidate."""
+        if self.sparse_raw_scores is not None:
+            return self.sparse_raw_scores.get(index, 0.0) * self.sparse_inv_max
+        return 0.0 if self.dense_scores is None else self.dense_scores[index]
+
+
+def _prepare_bm25_scoring(
+    candidates: Sequence[Candidate],
+    query_tokens: tuple[str, ...],
+    bm25_index: BM25Index | None,
+    reference_bm25_index: BM25Index | None,
+) -> _Bm25Scoring:
+    """Build query BM25 state for static or reference-index candidate ranking."""
+    if reference_bm25_index is not None:
+        dense_scores = reference_bm25_index.score_custom_documents_tokens(query_tokens, candidates)
+        max_index = max(range(len(dense_scores)), key=dense_scores.__getitem__, default=0)
+        max_raw_score = 0.0
+        if dense_scores[max_index] > 0.0:
+            max_raw_score = reference_bm25_index.raw_score_tokens(
+                candidates[max_index].normalized_tokens,
+                query_tokens,
+            )
+        return _Bm25Scoring(
+            index=reference_bm25_index,
+            max_raw_score=max_raw_score,
+            dense_scores=dense_scores,
+        )
+
+    index = bm25_index or BM25Index.from_normalized_texts(
+        tuple(candidate.normalized_text for candidate in candidates)
+    )
+    sparse_raw_scores = index.raw_scores_sparse(query_tokens) if query_tokens else {}
+    max_raw_score = max(sparse_raw_scores.values(), default=0.0)
+    sparse_inv_max = 1.0 / max_raw_score if max_raw_score > 0.0 else 0.0
+    return _Bm25Scoring(
+        index=index,
+        max_raw_score=max_raw_score,
+        sparse_raw_scores=sparse_raw_scores,
+        sparse_inv_max=sparse_inv_max,
+    )
 
 
 def _query_slot_tokens_from_index(
@@ -1535,6 +1616,9 @@ def rank_candidates(
     Candidate text containing wildcard placeholders is rehydrated from
     *query* before scoring so that real free-text values contribute to
     the semantic match instead of placeholder tokens.
+    A supplied ``bm25_index`` must have been built from ``candidates`` in the
+    same order. ``reference_bm25_index`` deliberately uses a separate corpus
+    and scores the supplied candidates through its dense path instead.
     ``intent_context`` accepts HassIL-style context mappings and is normalized
     by ``utils.normalize_intent_context``.
     """
@@ -1551,6 +1635,12 @@ def rank_candidates(
         raise ValueError("candidate_char_index length must match candidates")
     if candidate_slot_tokens is not None and len(candidate_slot_tokens) != len(candidates):
         raise ValueError("candidate_slot_tokens length must match candidates")
+    if (
+        reference_bm25_index is None
+        and bm25_index is not None
+        and bm25_index.size != len(candidates)
+    ):
+        raise ValueError("bm25_index length must match candidates")
 
     _rehydrated_cache: dict[int, tuple[str, dict[str, str]]] = {}
 
@@ -1569,8 +1659,7 @@ def rank_candidates(
     if positional_literal_tokens is None:
         all_tokens: set[str] = set()
         for candidate in candidates:
-            literal_text = candidate.metadata.get("literal_text")
-            if literal_text:
+            if literal_text := candidate.metadata.get("literal_text"):
                 for variant in literal_token_variants(literal_text):
                     all_tokens.update(variant)
         positional_literal_tokens = frozenset(all_tokens)
@@ -1586,43 +1675,20 @@ def rank_candidates(
     query_numbers = _query_numeric_values(query_tokens)
     intent_score_cache: dict[tuple[frozenset[str], ...], float] = {}
 
-    max_raw_score = 0.0
-    if reference_bm25_index is not None:
-        bm25_scores = reference_bm25_index.score_custom_documents_tokens(
-            query_tokens_tuple, candidates
-        )
-        max_idx = max(range(len(bm25_scores)), key=bm25_scores.__getitem__, default=0)
-        if bm25_scores[max_idx] > 0.0:
-            max_cand = candidates[max_idx]
-            max_raw_score = reference_bm25_index.raw_score_tokens(
-                max_cand.normalized_tokens, query_tokens_tuple
-            )
-    else:
-        if bm25_index is None:
-            # Fallback: rebuild the BM25 index on the fly. This occurs during dynamic candidate
-            # matching passes where a pre-warmed reference BM25 index is absent due to safety
-            # capping of combinatorial expansions. While this introduces a performance trade-off,
-            # it is necessary to ensure correct lexical scoring of all candidate templates.
-            bm25_index = BM25Index.from_normalized_texts(
-                tuple(candidate.normalized_text for candidate in candidates)
-            )
-        doc_count = len(candidates)
-        if not query_tokens_tuple or not doc_count:
-            bm25_scores = (0.0,) * doc_count
-        else:
-            raw_scores = bm25_index.raw_scores(query_tokens_tuple)
-            max_raw_score = max(raw_scores, default=0.0)
-            bm25_scores = _normalized_bm25_scores_from_raw(raw_scores, doc_count)
-
-    _bm25_ref = reference_bm25_index or bm25_index
+    bm25_scoring = _prepare_bm25_scoring(
+        candidates,
+        query_tokens_tuple,
+        bm25_index,
+        reference_bm25_index,
+    )
     if candidate_char_index is None:
         candidate_char_index = CharNGramIndex.from_grams(
             tuple(char_ngrams_normalized(candidate.normalized_text) for candidate in candidates)
         )
     query_grams = char_ngrams_normalized(query_normalized)
     char_scores = candidate_char_index.score(query_grams)
+    prefilter_keys = bm25_scoring.prefilter_keys(char_scores)
 
-    prefilter_keys = _rank_prefilter_keys(char_scores, bm25_scores)
     prefilter_limit = _rank_prefilter_limit(
         len(candidates), max_candidates, rapidfuzz_prefilter_candidates
     )
@@ -1684,8 +1750,8 @@ def rank_candidates(
         query_slot_tokens=query_slot_tokens,
         query_has_number=query_has_number,
         query_numbers=query_numbers,
-        bm25_ref=_bm25_ref,
-        max_raw_score=max_raw_score,
+        bm25_ref=bm25_scoring.index,
+        max_raw_score=bm25_scoring.max_raw_score,
         positional_lookup=positional_lookup,
         positional_literal_tokens=positional_literal_tokens,
         non_entity_tokens=non_entity_tokens,
@@ -1700,7 +1766,7 @@ def rank_candidates(
     )
     for idx in top_indices:
         candidate = candidates[idx]
-        bm25_score = bm25_scores[idx]
+        bm25_score = bm25_scoring.score_at(idx)
         char_score = char_scores[idx]
         item = _score_single_candidate(
             idx,
@@ -2021,6 +2087,8 @@ def evaluate_confidence_gates(
     if competing_candidate is None:
         return top_candidate, None
     if _is_exact_lexical_match(top_candidate):
+        # Exact canonical text is delegated back to HassIL with live request
+        # context; candidate intent/slot metadata is not executed here.
         return top_candidate, None
     if _is_turn_on_off_same_slot_tie(top_candidate, competing_candidate):
         return top_candidate, None

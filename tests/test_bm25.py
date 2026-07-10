@@ -93,6 +93,43 @@ def test_bm25_score_custom_documents_deduplicates_query_tokens() -> None:
     assert res_repeated == res_single
 
 
+@pytest.mark.parametrize(
+    ("documents", "query_tokens"),
+    [
+        ((), ("hello",)),
+        ((BM25Document(text="", tokens=()),), ("hello",)),
+        (
+            (
+                BM25Document(text="alpha beta", tokens=("alpha", "beta")),
+                BM25Document(text="beta gamma", tokens=("beta", "gamma")),
+                BM25Document(text="alpha alpha", tokens=("alpha", "alpha")),
+            ),
+            ("alpha", "alpha", "missing"),
+        ),
+        (
+            (
+                BM25Document(text="đèn phòng khách", tokens=("đèn", "phòng", "khách")),
+                BM25Document(text="den phong khach", tokens=("den", "phong", "khach")),
+                BM25Document(text="kitchen-light", tokens=("kitchen", "light")),
+            ),
+            ("đèn", "khách", "light"),
+        ),
+    ],
+)
+def test_bm25_raw_scores_sparse_matches_dense(
+    documents: tuple[BM25Document, ...],
+    query_tokens: tuple[str, ...],
+) -> None:
+    """Verify sparse BM25 raw scores are dense-equivalent for touched documents."""
+    index = BM25Index(documents)
+
+    dense = index.raw_scores(query_tokens)
+    sparse = index.raw_scores_sparse(query_tokens)
+
+    assert {idx for idx, score in enumerate(dense) if score > 0.0} == set(sparse)
+    assert tuple(sparse.get(idx, 0.0) for idx in range(len(dense))) == tuple(dense)
+
+
 def test_bm25_score_custom_documents_with_candidates_and_cache() -> None:
     """Verify score_custom_documents accepts Candidate-like objects and uses the cache."""
     index = BM25Index.from_texts(["Hello World", "Testing BM25"])

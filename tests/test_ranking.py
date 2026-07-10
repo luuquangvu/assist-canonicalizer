@@ -7,6 +7,7 @@ import orjson
 import pytest
 
 from custom_components.assist_canonicalizer import ranking
+from custom_components.assist_canonicalizer.bm25 import BM25Index
 from custom_components.assist_canonicalizer.candidate import (
     Candidate,
     CandidateSource,
@@ -38,8 +39,11 @@ from custom_components.assist_canonicalizer.ranking import (
     _positional_similarity,
     _query_slot_tokens_from_index,
     _query_token_coverage,
+    _rank_prefilter_keys,
+    _rank_prefilter_keys_with_sparse_bm25,
     _raw_cached_fuzz_ratio,
     _ScoringContext,
+    _top_prefilter_indices,
     accepted_candidate,
     clear_ranking_caches,
     confidence_gate_rejection_reason,
@@ -1151,6 +1155,109 @@ def test_rank_candidates_prefilters_rapidfuzz_work(monkeypatch) -> None:
     assert rapidfuzz_counter.calls == DEFAULT_RAPIDFUZZ_PREFILTER_CANDIDATES
 
 
+@pytest.mark.parametrize(
+    ("char_scores", "raw_bm25_scores"),
+    [
+        ([0.0, 0.5, 0.0, 0.2, 0.5, 0.0], [0.0, 0.1, 0.0, 0.6, 0.1, 0.0]),
+        ([0.0, 0.0, 0.4, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0, 0.0]),
+        ([0.0, 0.0, 0.0, 0.0], [0.4, 0.0, 0.2, 0.0]),
+    ],
+)
+def test_sparse_bm25_prefilter_keys_match_dense(
+    char_scores: list[float],
+    raw_bm25_scores: list[float],
+) -> None:
+    """Preserve dense keys and selection while storing only touched BM25 scores."""
+    max_raw_score = max(raw_bm25_scores, default=0.0)
+    inv_max = 1.0 / max_raw_score if max_raw_score > 0.0 else 0.0
+    dense_bm25_scores = [score * inv_max for score in raw_bm25_scores]
+    sparse_bm25_scores = {
+        index: score for index, score in enumerate(raw_bm25_scores) if score > 0.0
+    }
+    dense_keys = _rank_prefilter_keys(char_scores, dense_bm25_scores)
+    hybrid_keys = _rank_prefilter_keys_with_sparse_bm25(
+        char_scores,
+        sparse_bm25_scores,
+        inv_max,
+    )
+
+    assert hybrid_keys == dense_keys
+    assert _top_prefilter_indices(hybrid_keys, len(hybrid_keys)) == _top_prefilter_indices(
+        dense_keys,
+        len(dense_keys),
+    )
+
+
+def test_prebuilt_static_bm25_matches_on_the_fly_sparse_ranking() -> None:
+    """Compare prebuilt and on-the-fly sparse-BM25 static ranking."""
+    candidates = [
+        Candidate(text="turn on kitchen light", intent_name="HassTurnOn", language="en"),
+        Candidate(text="turn off kitchen light", intent_name="HassTurnOff", language="en"),
+        Candidate(
+            text="set kitchen light to 50 percent", intent_name="HassLightSet", language="en"
+        ),
+        Candidate(text="turn on bedroom fan", intent_name="HassTurnOn", language="en"),
+        Candidate(text="open garage door", intent_name="HassTurnOn", language="en"),
+    ]
+    query = "turn kitchen light on"
+    normalized_texts = tuple(candidate.normalized_text for candidate in candidates)
+    bm25_index = BM25Index.from_normalized_texts(normalized_texts)
+    char_index = CharNGramIndex.from_grams(
+        tuple(ranking.char_ngrams_normalized(text) for text in normalized_texts)
+    )
+
+    dense_ranked = rank_candidates(query, candidates, max_candidates=5, language="en")
+    hybrid_ranked = rank_candidates(
+        query,
+        candidates,
+        max_candidates=5,
+        bm25_index=bm25_index,
+        candidate_char_index=char_index,
+        language="en",
+    )
+
+    assert [item.candidate for item in hybrid_ranked] == [item.candidate for item in dense_ranked]
+    assert [item.scores for item in hybrid_ranked] == [item.scores for item in dense_ranked]
+    assert accepted_candidate(hybrid_ranked) == accepted_candidate(dense_ranked)
+
+
+def test_reference_bm25_ranking_uses_dense_normalized_scores() -> None:
+    """Use normalized dense reference scores for dynamic candidate ranking."""
+    candidates = [
+        Candidate(text="turn on kitchen light", intent_name="HassTurnOn", language="en"),
+        Candidate(text="turn off kitchen fan", intent_name="HassTurnOff", language="en"),
+    ]
+    query = "turn on"
+    query_tokens = tuple(normalize_text(query).split())
+    reference_bm25_index = BM25Index.from_normalized_texts(
+        ("turn on hall light", "turn off garage fan", "set bedroom temperature")
+    )
+    expected_scores = reference_bm25_index.score_custom_documents_tokens(
+        query_tokens,
+        candidates,
+    )
+
+    scoring = ranking._prepare_bm25_scoring(
+        candidates,
+        query_tokens,
+        None,
+        reference_bm25_index,
+    )
+    ranked = rank_candidates(
+        query,
+        candidates,
+        max_candidates=2,
+        reference_bm25_index=reference_bm25_index,
+        language="en",
+    )
+
+    assert scoring.sparse_raw_scores is None
+    assert tuple(scoring.score_at(index) for index in range(len(candidates))) == expected_scores
+    assert {item.candidate: item.scores.bm25_score for item in ranked} == dict(
+        zip(candidates, expected_scores, strict=True)
+    )
+
+
 def test_rank_candidates_validates_candidate_slot_token_length() -> None:
     """Reject precomputed slot-token data that does not match the candidate list."""
     candidates = [Candidate(text="turn on kitchen light", intent_name="HassTurnOn")]
@@ -1161,6 +1268,15 @@ def test_rank_candidates_validates_candidate_slot_token_length() -> None:
             candidates,
             candidate_slot_tokens=(),
         )
+
+
+def test_rank_candidates_validates_static_bm25_index_length() -> None:
+    """Reject a sparse BM25 index not built from the candidate sequence."""
+    candidates = [Candidate(text="turn on kitchen light", intent_name="HassTurnOn")]
+    bm25_index = BM25Index.from_normalized_texts(("turn on kitchen light", "turn off fan"))
+
+    with pytest.raises(ValueError, match="bm25_index length must match candidates"):
+        rank_candidates("turn on kitchen light", candidates, bm25_index=bm25_index)
 
 
 def test_rapidfuzz_similarity_penalizes_extra_area_tokens() -> None:
