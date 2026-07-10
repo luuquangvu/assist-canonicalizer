@@ -9,6 +9,7 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from homeassistant.components.conversation.const import HOME_ASSISTANT_AGENT
 from homeassistant.components.conversation.models import ConversationInput
 from homeassistant.core import Context
 
@@ -27,7 +28,7 @@ from custom_components.assist_canonicalizer.conversation import (
     AssistCanonicalizerConversationEntity,
     async_setup_entry,
 )
-from custom_components.assist_canonicalizer.indexer import build_index
+from custom_components.assist_canonicalizer.indexer import CanonicalIndex, build_index
 from custom_components.assist_canonicalizer.ranking import RankedCandidate, ScoreBreakdown
 from custom_components.assist_canonicalizer.runtime import CanonicalizerRuntime
 
@@ -440,6 +441,115 @@ async def test_runtime_ranking_receives_satellite_area_context() -> None:
     assert rank.call_args.kwargs["intent_context"] == {
         "area": {"value": "Living Room", "text": "Living Room"}
     }
+
+
+@pytest.mark.asyncio
+async def test_exact_collision_delegates_text_to_hassil_with_original_context() -> None:
+    """Delegate exact same-text collisions to HassIL without executing candidate metadata."""
+    first = Candidate(
+        text="all fan on",
+        intent_name="HassGetState",
+        language="en",
+        metadata={"slots": '{"domain":"fan","state":"on"}'},
+    )
+    second = Candidate(
+        text="all fan on",
+        intent_name="HassTurnOn",
+        language="en",
+        metadata={"slots": '{"domain":"fan"}'},
+    )
+
+    for ordered_candidates in ((first, second), (second, first)):
+        entry = MagicMock()
+        entry.options = {"min_confidence": 0.60, "min_margin": 0.99}
+        entry.entry_id = "test_entry"
+        runtime = CanonicalizerRuntime()
+        runtime.indexes["en"] = CanonicalIndex(language="en", candidates=ordered_candidates)
+        entity = AssistCanonicalizerConversationEntity(entry, runtime)
+
+        hass = MagicMock()
+        hass.async_add_executor_job = AsyncMock(side_effect=lambda target, *args: target(*args))
+        entity.hass = hass
+        context = Context()
+        user_input = MockConversationInput("all fan on", "en", conversation_id="conv-exact")
+        user_input.context = context
+        user_input.device_id = "device-1"
+        user_input.satellite_id = "assist_satellite.kitchen"
+        user_input.extra_system_prompt = "stay local"
+        hassil_result = MagicMock(name="hassil_result")
+        hassil_result.response.error_code = None
+
+        with (
+            patch.object(
+                entity,
+                "_async_try_assist_pipeline_shortcut",
+                AsyncMock(return_value=None),
+            ),
+            patch(
+                "custom_components.assist_canonicalizer.conversation.conversation.async_converse",
+                AsyncMock(return_value=hassil_result),
+            ) as converse,
+        ):
+            result = await entity._async_process_with_runtime(user_input)
+
+        assert result is hassil_result
+        converse.assert_awaited_once_with(
+            hass,
+            "all fan on",
+            "conv-exact",
+            context,
+            language="en",
+            agent_id=HOME_ASSISTANT_AGENT,
+            device_id="device-1",
+            satellite_id="assist_satellite.kitchen",
+            extra_system_prompt="stay local",
+        )
+
+
+@pytest.mark.asyncio
+async def test_exact_collision_hassil_rejection_falls_back_to_raw_text() -> None:
+    """Continue through validation failure and raw fallback when HassIL rejects exact text."""
+    entry = MagicMock()
+    entry.options = {"min_confidence": 0.60, "min_margin": 0.99}
+    entry.entry_id = "test_entry"
+    runtime = CanonicalizerRuntime()
+    runtime.indexes["en"] = CanonicalIndex(
+        language="en",
+        candidates=(
+            Candidate(text="all fans off", intent_name="HassGetState", language="en"),
+            Candidate(text="all fans off", intent_name="HassTurnOff", language="en"),
+        ),
+    )
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    hass = MagicMock()
+    hass.async_add_executor_job = AsyncMock(side_effect=lambda target, *args: target(*args))
+    entity.hass = hass
+    user_input = MockConversationInput("all fans off", "en")
+    validation_error = MagicMock()
+    validation_error.response.error_code = "no_intent_match"
+
+    with (
+        patch.object(
+            entity,
+            "_async_try_assist_pipeline_shortcut",
+            AsyncMock(return_value=None),
+        ),
+        patch.object(
+            entity,
+            "_delegate_text",
+            AsyncMock(side_effect=[validation_error, validation_error, "raw_result"]),
+        ) as delegate,
+    ):
+        result = await entity._async_process_with_runtime(user_input)
+
+    assert result == "raw_result"
+    assert delegate.await_args_list[0].args == ("all fans off", user_input)
+    assert delegate.await_args_list[0].kwargs == {"primary": True}
+    assert delegate.await_args_list[1].args == ("all fans off", user_input)
+    assert delegate.await_args_list[1].kwargs == {"primary": True}
+    assert delegate.await_args_list[2].args == ("all fans off", user_input)
+    assert delegate.await_args_list[2].kwargs == {"primary": False}
+    assert runtime.diagnostics.last_fallback_reason == FallbackReason.VALIDATION_FAILED
 
 
 def test_area_from_user_input_falls_back_to_original_device_area() -> None:

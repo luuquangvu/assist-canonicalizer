@@ -199,6 +199,23 @@ class BM25Index:
                 raw_scores[document_index] += precomputed_score
         return raw_scores
 
+    def raw_scores_sparse(self, query_tokens: tuple[str, ...]) -> dict[int, float]:
+        """Return positive unnormalized BM25 scores keyed by touched document index."""
+        if self._average_length == 0:
+            return {}
+        raw_scores: dict[int, float] = {}
+        seen_tokens: set[str] = set()
+        for token in query_tokens:
+            if token in seen_tokens:
+                continue
+            seen_tokens.add(token)
+            postings = self._postings.get(token)
+            if postings is None:
+                continue
+            for document_index, precomputed_score in postings:
+                raw_scores[document_index] = raw_scores.get(document_index, 0.0) + precomputed_score
+        return raw_scores
+
     def score_custom_documents(
         self,
         query: str,

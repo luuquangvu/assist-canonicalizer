@@ -7,7 +7,7 @@ import contextlib
 import hashlib
 import inspect
 import logging
-from collections.abc import Callable, Mapping, Sequence, Set
+from collections.abc import Awaitable, Callable, Mapping, Sequence, Set
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -69,6 +69,13 @@ _INDEX_MANIFEST_VERSION = 1
 _MAX_REBUILD_ATTEMPTS = 5
 
 
+def _new_set_event() -> asyncio.Event:
+    """Return an asyncio event initialized in the set state."""
+    event = asyncio.Event()
+    event.set()
+    return event
+
+
 @dataclass(frozen=True, slots=True)
 class IndexBuildSnapshot:
     """Immutable inputs and fingerprint for one candidate index build."""
@@ -81,7 +88,12 @@ class IndexBuildSnapshot:
 
 @dataclass(slots=True)
 class CanonicalizerRuntime:
-    """Mutable runtime state shared by the integration entry and agent."""
+    """Mutable runtime state shared by the integration entry and agent.
+
+    Lifecycle invariant: shutdown closes work admission before it cancels tasks.
+    Methods that start or publish work must reject a closed runtime, and methods
+    that span an await must recheck the relevant generation before publishing.
+    """
 
     indexes: dict[str, CanonicalIndex] = field(default_factory=dict)
     diagnostics: CanonicalizerDiagnostics = field(default_factory=CanonicalizerDiagnostics)
@@ -98,18 +110,33 @@ class CanonicalizerRuntime:
     rebuild_tasks: dict[str, tuple[int, asyncio.Task[CanonicalIndex | None]]] = field(
         default_factory=dict
     )
+    warmup_tasks: set[asyncio.Task[Any]] = field(default_factory=set, repr=False)
     _logged_rebuilds: set[tuple[str, int]] = field(default_factory=set, repr=False)
     index_generation: int = 0
     source_generation: int = 0
     rebuild_timer_cancel: Callable[[], None] | None = None
     _storage_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    _active_index_loads: int = field(default=0, init=False, repr=False)
+    _index_loads_drained: asyncio.Event = field(
+        default_factory=_new_set_event,
+        init=False,
+        repr=False,
+    )
+    _closed: bool = field(default=False, init=False, repr=False)
+
+    @property
+    def closed(self) -> bool:
+        """Return whether this runtime is shutting down or fully closed."""
+        return self._closed
 
     def get_index(self, language: str) -> CanonicalIndex | None:
         """Return the cached index for a language."""
-        return self.indexes.get(normalize_language(language))
+        return None if self._closed else self.indexes.get(normalize_language(language))
 
     def set_index(self, index: CanonicalIndex) -> None:
         """Store a language-specific index."""
+        if self._closed:
+            return
         self.indexes[normalize_language(index.language)] = index
         self.update_diagnostics(
             candidate_count=index.candidate_count,
@@ -125,6 +152,8 @@ class CanonicalizerRuntime:
         raise_on_error: bool = False,
     ) -> CanonicalIndex | None:
         """Rebuild one language index once while concurrent callers await it."""
+        if self._closed:
+            return None
         language = normalize_language(language)
         generation = self.index_generation
         task_state = self.rebuild_tasks.get(language)
@@ -137,6 +166,8 @@ class CanonicalizerRuntime:
             task = None
 
         if task is None:
+            if self._closed:
+                return None
             self._logged_rebuilds.discard((language, generation))
             task = hass.async_create_task(
                 _run_rebuild(
@@ -173,19 +204,43 @@ class CanonicalizerRuntime:
 
     async def async_load_index_from_store(self, hass: Any, language: str) -> CanonicalIndex | None:
         """Load an index only when its persisted source fingerprint is current."""
+        if not self._start_index_load():
+            return None
+        try:
+            return await self._async_load_index_from_store(hass, language)
+        finally:
+            self._finish_index_load()
+
+    async def _async_load_index_from_store(
+        self,
+        hass: Any,
+        language: str,
+    ) -> CanonicalIndex | None:
+        """Load one persisted index while the public operation tracks its lifetime."""
         language = normalize_language(language)
         generation = self.index_generation
         source_generation = self.source_generation
         build_inputs = self._capture_build_inputs()
-        snapshot = await hass.async_add_executor_job(
+        snapshot = await _async_add_executor_job_drained(
+            hass,
             _create_build_snapshot_and_register_wildcards,
             language,
             *build_inputs,
         )
-        if self.index_generation != generation or self.source_generation != source_generation:
+        if (
+            self._closed
+            or self.index_generation != generation
+            or self.source_generation != source_generation
+        ):
             return None
 
         async with self._storage_lock:
+            if (
+                self._closed
+                or self.index_generation != generation
+                or self.source_generation != source_generation
+            ):
+                return None
             manifest = await self._async_load_store_manifest(hass)
             if manifest is None:
                 return None
@@ -194,7 +249,7 @@ class CanonicalizerRuntime:
                 return None
             store = _index_store(hass, language)
             try:
-                data = await store.async_load()
+                data = await _async_await_drained(store.async_load())
             except Exception:
                 return None
 
@@ -204,7 +259,7 @@ class CanonicalizerRuntime:
                 fingerprint=snapshot.fingerprint,
                 cache_epoch=cache_epoch,
             ):
-                await store.async_remove()
+                await _async_await_drained(store.async_remove())
                 persisted_languages.discard(language)
                 await self._async_save_store_manifest(
                     hass,
@@ -214,7 +269,7 @@ class CanonicalizerRuntime:
                 return None
             candidates = _deserialize_candidates(data)
             if candidates is None or len(candidates) != data["candidate_count"]:
-                await store.async_remove()
+                await _async_await_drained(store.async_remove())
                 persisted_languages.discard(language)
                 await self._async_save_store_manifest(
                     hass,
@@ -223,8 +278,12 @@ class CanonicalizerRuntime:
                 )
                 return None
 
-        index = await hass.async_add_executor_job(build_index, language, candidates)
-        if self.index_generation != generation or self.source_generation != source_generation:
+        index = await _async_add_executor_job_drained(hass, build_index, language, candidates)
+        if (
+            self._closed
+            or self.index_generation != generation
+            or self.source_generation != source_generation
+        ):
             return None
         self.language_intent_sources[language] = snapshot.intent_sources
         self.set_index(index)
@@ -240,6 +299,8 @@ class CanonicalizerRuntime:
         expected_source_generation: int | None = None,
     ) -> bool:
         """Save an index with the source fingerprint that produced it."""
+        if self._closed:
+            return False
         language = normalize_language(index.language)
         candidates_data = [_serialize_candidate(candidate) for candidate in index.candidates]
         data = {
@@ -269,19 +330,26 @@ class CanonicalizerRuntime:
                 return False
 
             data["cache_epoch"] = cache_epoch
-            await _index_store(hass, language).async_save(data)
+            await _async_await_drained(_index_store(hass, language).async_save(data))
+            if not self._storage_generation_matches(
+                expected_index_generation,
+                expected_source_generation,
+            ):
+                return False
             persisted_languages.add(language)
             await self._async_save_store_manifest(hass, cache_epoch, persisted_languages)
         return True
 
     async def async_clear_index(self, hass: Any, language: str | None = None) -> None:
         """Clear memory and persisted indexes for one language or every language."""
+        if self._closed:
+            return
         normalized_language = normalize_language(language) if language is not None else None
         async with self._storage_lock:
             self.clear_index(normalized_language)
             manifest = await self._async_load_store_manifest(hass)
             if normalized_language is not None:
-                await _index_store(hass, normalized_language).async_remove()
+                await _async_await_drained(_index_store(hass, normalized_language).async_remove())
                 if manifest is not None:
                     cache_epoch, persisted_languages = manifest
                     persisted_languages.discard(normalized_language)
@@ -295,7 +363,7 @@ class CanonicalizerRuntime:
             persisted_languages = manifest[1] if manifest is not None else set()
             await self._async_save_store_manifest(hass, uuid4().hex, set())
             for persisted_language in persisted_languages:
-                await _index_store(hass, persisted_language).async_remove()
+                await _async_await_drained(_index_store(hass, persisted_language).async_remove())
 
     def rank_with_dynamic_candidates(
         self,
@@ -314,6 +382,8 @@ class CanonicalizerRuntime:
         ``intent_context`` is forwarded as the HassIL-style mapping consumed by
         indexed and dynamic ranking paths.
         """
+        if self._closed:
+            return ()
         language = normalize_language(language)
         ranked = index.rank(
             query,
@@ -414,11 +484,15 @@ class CanonicalizerRuntime:
 
     def configure_config_path(self, config_path: Callable[..., str]) -> None:
         """Configure Home Assistant config path access for custom sentences."""
+        if self._closed:
+            return
         self.config_path = config_path
         self._invalidate_source_dependent_indexes(clear_sources=True)
 
     def update_registry_slot_values(self, slot_values: Mapping[str, tuple[str, ...]]) -> None:
         """Update cached registry metadata used for candidate expansion."""
+        if self._closed:
+            return
         updated_values = {key: tuple(values) for key, values in slot_values.items()}
         if updated_values == self.registry_slot_values:
             return
@@ -429,6 +503,8 @@ class CanonicalizerRuntime:
 
     def update_intent_sources(self, intents_update: Mapping[Any, Mapping[str, Any]]) -> None:
         """Update cached Home Assistant conversation intent sources."""
+        if self._closed:
+            return
         updated_sources = {
             _source_key(source): source_config for source, source_config in intents_update.items()
         }
@@ -454,6 +530,8 @@ class CanonicalizerRuntime:
 
     def _intent_sources_for_query(self, language: str) -> dict[str, Mapping[str, Any]]:
         """Return cached intent sources for query-time candidate expansion."""
+        if self._closed:
+            return {}
         language = normalize_language(language)
         cached = self.language_intent_sources.get(language)
         return cached if cached is not None else self._all_intent_sources(language)
@@ -462,6 +540,8 @@ class CanonicalizerRuntime:
         self, language: str
     ) -> tuple[DynamicRegistryIntent, ...]:
         """Return compiled query-independent registry templates for a language."""
+        if self._closed:
+            return ()
         language = normalize_language(language)
         cached = self.dynamic_registry_intents.get(language)
         if cached is not None:
@@ -498,6 +578,8 @@ class CanonicalizerRuntime:
 
     def _all_intent_sources(self, language: str) -> dict[str, Mapping[str, Any]]:
         """Return built-in, custom, and subscribed intent sources."""
+        if self._closed:
+            return {}
         language = normalize_language(language)
         sources = load_language_intent_sources(language, config_path=self.config_path)
         sources.update(self.intent_sources)
@@ -534,16 +616,36 @@ class CanonicalizerRuntime:
     ) -> bool:
         """Return whether a pending store write still belongs to current inputs."""
         return (
-            expected_index_generation is None or self.index_generation == expected_index_generation
-        ) and (
-            expected_source_generation is None
-            or self.source_generation == expected_source_generation
+            not self._closed
+            and (
+                expected_index_generation is None
+                or self.index_generation == expected_index_generation
+            )
+            and (
+                expected_source_generation is None
+                or self.source_generation == expected_source_generation
+            )
         )
+
+    def _start_index_load(self) -> bool:
+        """Register an index load unless runtime shutdown has started."""
+        if self._closed:
+            return False
+        if self._active_index_loads == 0:
+            self._index_loads_drained.clear()
+        self._active_index_loads += 1
+        return True
+
+    def _finish_index_load(self) -> None:
+        """Release one index load and signal when every load has drained."""
+        self._active_index_loads -= 1
+        if self._active_index_loads == 0:
+            self._index_loads_drained.set()
 
     async def _async_load_store_manifest(self, hass: Any) -> tuple[str, set[str]] | None:
         """Load the cache epoch and known persisted language keys."""
         try:
-            data = await _manifest_store(hass).async_load()
+            data = await _async_await_drained(_manifest_store(hass).async_load())
         except Exception:
             return None
         if not isinstance(data, dict):
@@ -565,16 +667,42 @@ class CanonicalizerRuntime:
         languages: set[str],
     ) -> None:
         """Persist the cache epoch and known language store keys."""
-        await _manifest_store(hass).async_save(
-            {
-                "cache_epoch": cache_epoch,
-                "languages": sorted(languages),
-            }
+        await _async_await_drained(
+            _manifest_store(hass).async_save(
+                {
+                    "cache_epoch": cache_epoch,
+                    "languages": sorted(languages),
+                }
+            )
         )
 
     def add_cleanup_callback(self, callback: Callable[[], None]) -> None:
         """Remember a cleanup callback for unload."""
+        if self._closed:
+            callback()
+            return
         self.cleanup_callbacks.append(callback)
+
+    def track_warmup_task(self, task: Any) -> None:
+        """Track a warmup task so shutdown can cancel and drain it."""
+        if not isinstance(task, asyncio.Task):
+            return
+        if self._closed:
+            task.cancel()
+            return
+        self.warmup_tasks.add(task)
+        task.add_done_callback(lambda done_task: self.warmup_tasks.discard(done_task))
+
+    async def async_shutdown(self) -> None:
+        """Cancel runtime-owned work, wait for storage, and clear caches."""
+        tasks = self._begin_shutdown()
+        current_task = _current_task_or_none()
+        if await_tasks := tuple(task for task in tasks if task is not current_task):
+            await asyncio.gather(*await_tasks, return_exceptions=True)
+        await self._index_loads_drained.wait()
+        async with self._storage_lock:
+            pass
+        self._clear_runtime_state_and_caches()
 
     def cleanup(self) -> None:
         """Run registered cleanup callbacks and purge global module-level caches.
@@ -588,6 +716,15 @@ class CanonicalizerRuntime:
         Ordering: timers and callbacks are torn down first so that no in-flight work
         can observe partially cleared cache state.
         """
+        self._begin_shutdown()
+        self._clear_runtime_state_and_caches()
+
+    def _begin_shutdown(self) -> tuple[asyncio.Task[Any], ...]:
+        """Start shutdown synchronously and return runtime-owned tasks to drain."""
+        if not self._closed:
+            self._closed = True
+            self.index_generation += 1
+            self.source_generation += 1
         if self.rebuild_timer_cancel is not None:
             self.rebuild_timer_cancel()
             self.rebuild_timer_cancel = None
@@ -595,6 +732,29 @@ class CanonicalizerRuntime:
         self.cleanup_callbacks.clear()
         for callback in callbacks:
             callback()
+        tasks: set[asyncio.Task[Any]] = set(self.warmup_tasks)
+        tasks.update(task for _generation, task in self.rebuild_tasks.values())
+        self.warmup_tasks.clear()
+        self.rebuild_tasks.clear()
+        self._logged_rebuilds.clear()
+        current_task = _current_task_or_none()
+        for task in tasks:
+            if task is not current_task and not task.done():
+                task.cancel()
+        return tuple(tasks)
+
+    def _clear_runtime_state_and_caches(self) -> None:
+        """Clear runtime-owned collections and shared module-level caches."""
+        self.indexes.clear()
+        self.intent_sources.clear()
+        self.language_intent_sources.clear()
+        self.registry_slot_values.clear()
+        self.registry_slot_index = RegistrySlotIndex({})
+        self.registry_slot_indexes.clear()
+        self.dynamic_registry_intents.clear()
+        self.rebuild_tasks.clear()
+        self.warmup_tasks.clear()
+        self.update_diagnostics(candidate_count=0, dynamic_candidate_count=0)
         clear_normalization_caches()
         clear_bm25_caches()
         clear_rehydration_caches()
@@ -654,15 +814,24 @@ async def _run_rebuild(
     """Build from a stable source generation and persist the matching fingerprint."""
     try:
         for _ in range(_MAX_REBUILD_ATTEMPTS):
+            if runtime.closed:
+                return None
             source_generation = runtime.source_generation
             build_inputs = runtime._capture_build_inputs()
-            snapshot = await hass.async_add_executor_job(
+            snapshot = await _async_add_executor_job_drained(
+                hass,
                 _create_build_snapshot_and_register_wildcards,
                 language,
                 *build_inputs,
             )
-            index = await hass.async_add_executor_job(_build_index_from_snapshot, snapshot)
-            if runtime.index_generation != generation:
+            if runtime.closed:
+                return None
+            index = await _async_add_executor_job_drained(
+                hass,
+                _build_index_from_snapshot,
+                snapshot,
+            )
+            if runtime.closed or runtime.index_generation != generation:
                 return None
             if runtime.source_generation != source_generation:
                 continue
@@ -674,11 +843,13 @@ async def _run_rebuild(
                 expected_index_generation=generation,
                 expected_source_generation=source_generation,
             )
-            if runtime.index_generation != generation:
+            if runtime.closed or runtime.index_generation != generation:
                 return None
             if runtime.source_generation != source_generation or not saved:
                 continue
 
+            if runtime.closed:
+                return None
             runtime.language_intent_sources[language] = snapshot.intent_sources
             runtime.set_index(index)
             return index
@@ -735,6 +906,53 @@ def _build_index_from_snapshot(snapshot: IndexBuildSnapshot) -> CanonicalIndex:
         snapshot.registry_slot_values,
     )
     return build_index(snapshot.language, candidates)
+
+
+def _current_task_or_none() -> asyncio.Task[Any] | None:
+    """Return the current asyncio task when called inside a running loop."""
+    try:
+        return asyncio.current_task()
+    except RuntimeError:
+        return None
+
+
+async def _async_add_executor_job_drained(hass: Any, func: Callable[..., Any], *args: Any) -> Any:
+    """Run teardown-critical executor work before honoring cancellation.
+
+    Use only for runtime-owned work that must finish before shutdown releases a
+    storage or lifecycle barrier. Do not use it for request-scoped work that is
+    safe to abandon, because cancellation waits for the executor job to finish.
+    """
+    return await _async_await_drained(hass.async_add_executor_job(func, *args))
+
+
+async def _async_await_drained[T](awaitable: Awaitable[T]) -> T:
+    """Await work to completion before propagating cancellation to the caller.
+
+    Shielding means cancellation cannot stop executor-backed storage or index
+    work. During shutdown, keep awaiting that work so its caller cannot release
+    a lifecycle barrier while the underlying operation can still mutate state.
+    The awaitable must therefore be safe to complete after cancellation.
+
+    Catching one cancellation permits the next await to block normally. The
+    loop retries only when another cancellation is delivered, and must retain
+    that behavior so shutdown still drains the underlying work before raising.
+    """
+    job = asyncio.ensure_future(awaitable)
+    try:
+        return await asyncio.shield(job)
+    except asyncio.CancelledError:
+        while not job.done():
+            try:
+                await asyncio.shield(job)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not job.cancelled():
+            with contextlib.suppress(Exception):
+                job.result()
+        raise
 
 
 def _canonical_fingerprint_value(value: Any) -> Any:
