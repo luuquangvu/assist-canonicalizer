@@ -143,14 +143,14 @@ Công cụ xếp hạng được đo kiểm (benchmark) so với bộ nhận di�
 
 <!-- BENCHMARK_OVERALL_START -->
 
-> Phiên bản phụ thuộc benchmark: `homeassistant` 2026.7.1, `home-assistant-intents` 2026.6.24.
+> Phiên bản phụ thuộc benchmark: `homeassistant` 2026.7.2, `home-assistant-intents` 2026.6.24.
 
 | Chế độ    | Đúng Intent/Slot | Nhận diện sai (Mismatch) | Dự phòng (Fallback) |
 | :-------- | ---------------: | -----------------------: | ------------------: |
 | `hassil`  |            48.3% |                     0.0% |               51.7% |
-| `lexical` |        **91.7%** |                 **2.2%** |            **6.1%** |
+| `lexical` |        **92.3%** |                 **1.4%** |            **6.3%** |
 
-> Độ chính xác nhận diện Intent/Slot tăng từ **48.3% lên 91.7%**. Tổng tỷ lệ lỗi (nhận diện sai + chuyển sang dự phòng) giảm mạnh từ **51.7% xuống còn 8.3%**.
+> Độ chính xác nhận diện Intent/Slot tăng từ **48.3% lên 92.3%**. Tổng tỷ lệ lỗi (nhận diện sai + chuyển sang dự phòng) giảm mạnh từ **51.7% xuống còn 7.7%**.
 
 <!-- BENCHMARK_OVERALL_END -->
 
@@ -161,13 +161,13 @@ Công cụ xếp hạng được đo kiểm (benchmark) so với bộ nhận di�
 | Ngôn ngữ | Chế độ    | Đúng Intent/Slot | Nhận diện sai (Mismatch) | Dự phòng (Fallback) |
 | :------- | :-------- | ---------------: | -----------------------: | ------------------: |
 | EN       | `hassil`  |            56.2% |                     0.0% |               43.8% |
-| EN       | `lexical` |        **90.1%** |                 **4.1%** |            **5.8%** |
+| EN       | `lexical` |        **91.7%** |                 **2.5%** |            **5.8%** |
 | DE       | `hassil`  |            50.9% |                     0.0% |               49.1% |
 | DE       | `lexical` |        **94.6%** |                 **0.9%** |            **4.5%** |
 | FR       | `hassil`  |            51.4% |                     0.0% |               48.6% |
-| FR       | `lexical` |        **92.7%** |                 **1.8%** |            **5.5%** |
+| FR       | `lexical` |        **93.6%** |                 **0.9%** |            **5.5%** |
 | NL       | `hassil`  |            48.4% |                     0.0% |               51.6% |
-| NL       | `lexical` |        **89.3%** |                 **2.5%** |            **8.2%** |
+| NL       | `lexical` |        **89.3%** |                 **1.6%** |            **9.0%** |
 | VI       | `hassil`  |            30.8% |                     0.0% |               69.2% |
 | VI       | `lexical` |        **92.3%** |                 **1.1%** |            **6.6%** |
 
@@ -330,8 +330,8 @@ Assist Canonicalizer tự động lắng nghe các sự kiện thay đổi từ 
 
 Để duy trì tiêu chuẩn cao về độ tin cậy và sự ổn định lâu dài, dự án áp dụng quy trình kiểm soát chất lượng và bảo mật tự động hiện đại:
 
-- **Đánh giá mã nguồn tự động (PR Review)**: Sử dụng [CodeRabbit](https://coderabbit.ai) để phân tích chi tiết mọi thay đổi, giúp phát hiện sớm các lỗi logic và trường hợp biên trước khi phát hành.
-- **Tối ưu hóa mã nguồn**: [Sourcery](https://sourcery.ai) liên tục rà soát mã nguồn để đề xuất các cấu trúc Python sạch, hiệu quả và chuẩn mực hơn.
+- **Đánh giá mã nguồn tự động (PR Review)**: Sử dụng [CodeRabbit AI](https://coderabbit.ai) để phân tích chi tiết mọi thay đổi, giúp phát hiện sớm các lỗi logic và trường hợp biên trước khi phát hành.
+- **Tối ưu hóa mã nguồn**: [Sourcery AI](https://sourcery.ai) liên tục rà soát mã nguồn để đề xuất các cấu trúc Python sạch, hiệu quả và chuẩn mực hơn.
 - **Phân tích tĩnh & Bảo mật**: [CodeQL](https://codeql.github.com) thực hiện quét chuyên sâu để nhận diện các rủi ro bảo mật tiềm ẩn, đảm bảo mã nguồn tuân thủ các quy chuẩn an toàn.
 - **Quy trình kiểm thử nghiêm ngặt**:
   - **[Ruff](https://github.com/astral-sh/ruff)**: Định dạng và kiểm tra lỗi (linting) Python tốc độ cao cho mã nguồn nhất quán.
@@ -341,7 +341,7 @@ Assist Canonicalizer tự động lắng nghe các sự kiện thay đổi từ 
   - **[Prettier](https://github.com/prettier/prettier)**: Duy trì định dạng nhất quán cho các tệp tài liệu và cấu hình.
 
 > [!NOTE]
-> Mọi kết quả từ các công cụ tự động đều được quản trị viên dự án trực tiếp rà soát và xác nhận kỹ lưỡng, đảm bảo sự ổn định cao nhất cho người dùng.
+> Mọi kết quả từ các công cụ AI tự động đều được quản trị viên dự án trực tiếp rà soát và xác nhận kỹ lưỡng, đảm bảo sự ổn định cao nhất cho người dùng.
 
 ---
 

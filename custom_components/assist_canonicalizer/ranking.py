@@ -6,7 +6,7 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import lru_cache, partial
-from heapq import nsmallest
+from heapq import nlargest, nsmallest
 from math import isclose
 from typing import Any
 
@@ -86,6 +86,12 @@ def _cached_fuzz_ratio(s1: str, s2: str) -> float:
 
 
 _LiteralVariantAnalysis = list[tuple[int, int, list[frozenset[str]]]]
+WildcardVariantGroup = tuple[
+    tuple[tuple[frozenset[str], int, int], ...],
+    frozenset[str],
+    int,
+    tuple[int, ...],
+]
 _KNOWN_OPPOSING_INTENT_TIE_PAIRS: tuple[tuple[str, str], ...] = (
     ("HassTurnOn", "HassTurnOff"),
     ("HassMediaUnpause", "HassMediaPause"),
@@ -170,24 +176,41 @@ class CharNGramIndex:
 
     def score(self, query_grams: frozenset[str]) -> list[float]:
         """Return exact normalized Jaccard scores for all indexed candidates."""
+        intersections = self.intersections(query_grams)
+        query_count = len(query_grams)
+        scores = [0.0] * len(self.gram_counts)
+        for index, intersection_size in enumerate(intersections):
+            if intersection_size == 0:
+                continue
+            scores[index] = _char_ngram_score_from_intersection(
+                query_count,
+                self.gram_counts[index],
+                intersection_size,
+            )
+        return scores
+
+    def intersections(self, query_grams: frozenset[str]) -> list[int]:
+        """Return query/candidate n-gram intersection counts for all candidates."""
         _nothing: tuple[int, ...] = ()
-        if not query_grams:
-            return [0.0] * len(self.gram_counts)
         intersections = [0] * len(self.gram_counts)
+        if not query_grams:
+            return intersections
         _postings = self.postings
         _postings_get = _postings.get
         for gram in query_grams:
             for index in _postings_get(gram, _nothing):
                 intersections[index] += 1
-        query_count = len(query_grams)
-        _gram_counts = self.gram_counts
-        scores = [0.0] * len(self.gram_counts)
-        for index, intersection_size in enumerate(intersections):
-            if intersection_size == 0:
-                continue
-            union_size = query_count + _gram_counts[index] - intersection_size
-            scores[index] = intersection_size / union_size if union_size else 0.0
-        return scores
+        return intersections
+
+
+def _char_ngram_score_from_intersection(
+    query_count: int,
+    candidate_count: int,
+    intersection_size: int,
+) -> float:
+    """Return a Jaccard score from precomputed set cardinalities."""
+    union_size = query_count + candidate_count - intersection_size
+    return intersection_size / union_size if union_size else 0.0
 
 
 def rapidfuzz_similarity_normalized(
@@ -389,7 +412,14 @@ def _is_fuzzy_literal_token_match(literal_token: str, query_token: str) -> bool:
 
 
 def _is_fuzzy_slot_token_match(slot_token: str, query_token: str) -> bool:
-    """Return whether a query token is a bounded one-edit slot-token typo."""
+    """Return whether a query token is a bounded slot-token variation.
+
+    In addition to one-character edits, a canonical slot token accepts a
+    four-or-more-character query prefix (a common truncated-name form) and one
+    adjacent transposition. The direction of the prefix check is deliberate:
+    user input may abbreviate a known registry value, while a short registry
+    value must not claim an unrelated longer query token.
+    """
     slot_len = len(slot_token)
     query_len = len(query_token)
     if (
@@ -401,15 +431,25 @@ def _is_fuzzy_slot_token_match(slot_token: str, query_token: str) -> bool:
         return False
     if min(slot_len, query_len) < SLOT_FUZZY_TOKEN_MIN_LENGTH:
         return False
+    if query_len < slot_len and slot_token.startswith(query_token):
+        return True
     if abs(slot_len - query_len) > 1:
         return False
     if slot_len == query_len:
-        return (
-            sum(
-                slot_char != query_char
-                for slot_char, query_char in zip(slot_token, query_token, strict=True)
+        differences = [
+            index
+            for index, (slot_char, query_char) in enumerate(
+                zip(slot_token, query_token, strict=True)
             )
-            == 1
+            if slot_char != query_char
+        ]
+        if len(differences) == 1:
+            return True
+        return (
+            len(differences) == 2
+            and differences[1] == differences[0] + 1
+            and slot_token[differences[0]] == query_token[differences[1]]
+            and slot_token[differences[1]] == query_token[differences[0]]
         )
     return _is_fuzzy_literal_token_match(slot_token, query_token)
 
@@ -537,8 +577,20 @@ def _wildcard_variants_match(
     for variant, var_len, req in variants_with_len:
         if var_len == 0:
             return True
-        if len(variant & query_tokens) >= req:
-            return True
+        if req == var_len:
+            if variant.issubset(query_tokens):
+                return True
+            continue
+        if req == 1:
+            if not variant.isdisjoint(query_tokens):
+                return True
+            continue
+        matched = 0
+        for token in variant:
+            if token in query_tokens:
+                matched += 1
+                if matched >= req:
+                    return True
     return False
 
 
@@ -584,12 +636,23 @@ def _prefilter_wildcard_candidates(
     candidates: Sequence[Candidate],
     query_tokens: frozenset[str],
     wildcard_always_passes: frozenset[int] | None,
-    wildcard_variants_with_len: dict[int, tuple[tuple[frozenset[str], int, int], ...]] | None,
-    wildcard_token_to_indices: dict[str, tuple[int, ...]] | None,
+    wildcard_variants_with_len: (
+        dict[int, tuple[tuple[frozenset[str], int, int], ...]] | None
+    ) = None,
+    wildcard_token_to_indices: dict[str, tuple[int, ...]] | None = None,
     wildcard_literal_tokens_by_index: dict[int, frozenset[str]] | None = None,
     wildcard_min_required_by_index: dict[int, int] | None = None,
+    wildcard_variant_groups: tuple[WildcardVariantGroup, ...] | None = None,
 ) -> set[int]:
     """Prefilter wildcard candidates using precomputed structures or on-the-fly coverage."""
+    if wildcard_always_passes is not None and wildcard_variant_groups is not None:
+        passed = set(wildcard_always_passes)
+        for variants, literal_tokens, min_required, indices in wildcard_variant_groups:
+            if min_required > 0 and len(literal_tokens & query_tokens) < min_required:
+                continue
+            if _wildcard_variants_match(variants, query_tokens):
+                passed.update(indices)
+        return passed
     if (
         wildcard_always_passes is not None
         and wildcard_variants_with_len is not None
@@ -620,6 +683,52 @@ def _prefilter_wildcard_candidates(
     }
 
 
+def _top_additional_wildcard_indices(
+    wildcard_indices: set[int],
+    query_tokens: frozenset[str],
+    wildcard_variants_with_len: (dict[int, tuple[tuple[frozenset[str], int, int], ...]] | None),
+    prefilter_keys: Sequence[float],
+    limit: int,
+) -> list[int]:
+    """Return the strongest wildcard rescue candidates within a bounded budget.
+
+    Wildcards need a separate rescue path because their placeholder text can
+    score poorly before rehydration. Literal-token coverage provides the
+    placeholder-independent retrieval signal; the normal BM25/character score
+    breaks ties. Bounding only the additional rescue candidates keeps the
+    general lexical prefilter intact while preventing unbounded rehydration.
+    """
+    if len(wildcard_indices) <= limit:
+        return sorted(wildcard_indices)
+
+    variant_relevance: dict[tuple[tuple[frozenset[str], int, int], ...], tuple[float, int]] = {}
+
+    def relevance(index: int) -> tuple[float, int, float, int]:
+        variants = (
+            wildcard_variants_with_len.get(index, ())
+            if wildcard_variants_with_len is not None
+            else ()
+        )
+        cached_relevance = variant_relevance.get(variants)
+        if cached_relevance is None:
+            best_coverage = 0.0
+            best_matched = 0
+            for variant, variant_length, _ in variants:
+                if variant_length == 0:
+                    continue
+                matched = len(variant & query_tokens)
+                coverage = matched / variant_length
+                if (coverage, matched) > (best_coverage, best_matched):
+                    best_coverage = coverage
+                    best_matched = matched
+            cached_relevance = (best_coverage, best_matched)
+            variant_relevance[variants] = cached_relevance
+        best_coverage, best_matched = cached_relevance
+        return best_coverage, best_matched, -prefilter_keys[index], -index
+
+    return nlargest(limit, wildcard_indices, key=relevance)
+
+
 def _exact_lookup_ranked(
     query: str,
     query_normalized: str,
@@ -639,8 +748,12 @@ def _exact_lookup_ranked(
     if exact_no_diacritics_lookup is not None:
         query_no_diac = normalize_text_no_diacritics(query, language)
         if no_diac_matches := exact_no_diacritics_lookup.get(query_no_diac):
-            unique_intents = {c.intent_name for c in no_diac_matches}
-            if len(unique_intents) == 1:
+            unique_intents = {candidate.intent_name for candidate in no_diac_matches}
+            same_slots = all(
+                candidate.parsed_slots == no_diac_matches[0].parsed_slots
+                for candidate in no_diac_matches[1:]
+            )
+            if len(unique_intents) == 1 and same_slots:
                 return tuple(
                     RankedCandidate(candidate=c, scores=_PERFECT_SCORE)
                     for c in no_diac_matches[:max_candidates]
@@ -699,6 +812,30 @@ def _rank_prefilter_keys_with_sparse_bm25(
     for index, raw_score in raw_bm25_scores.items():
         normalized_score = raw_score * bm25_inv_max
         keys[index] -= BM25_WEIGHT * normalized_score
+    return keys
+
+
+def _rank_prefilter_keys_from_intersections(
+    intersections: Sequence[int],
+    query_gram_count: int,
+    candidate_gram_counts: Sequence[int],
+    raw_bm25_scores: Mapping[int, float],
+    bm25_inv_max: float,
+) -> list[float]:
+    """Build static prefilter keys without materializing dense character scores."""
+    keys = [0.0] * len(intersections)
+    for index, intersection_size in enumerate(intersections):
+        if intersection_size == 0:
+            continue
+        char_score = _char_ngram_score_from_intersection(
+            query_gram_count,
+            candidate_gram_counts[index],
+            intersection_size,
+        )
+        keys[index] = -CHAR_NGRAM_WEIGHT * char_score
+    for index, raw_score in raw_bm25_scores.items():
+        normalized_bm25 = raw_score * bm25_inv_max
+        keys[index] = -(-keys[index] + BM25_WEIGHT * normalized_bm25)
     return keys
 
 
@@ -788,24 +925,33 @@ def _prepare_bm25_scoring(
     )
 
 
-def _query_slot_tokens_from_index(
+def _query_slot_tokens_from_candidates(
     query_tokens: frozenset[str],
     top_indices: Sequence[int],
-    slot_token_to_indices: dict[str, tuple[int, ...]],
+    candidate_slot_tokens: tuple[frozenset[str], ...],
+    fuzzy_excluded_tokens: frozenset[str] | None = None,
 ) -> frozenset[str]:
-    """Return indexed slot tokens referenced exactly or fuzzily by the query."""
-    top_index_set = set(top_indices)
-    active_slot_tokens: list[str] = []
-    matched_tokens: set[str] = set()
-    for token, indexes in slot_token_to_indices.items():
-        if all(idx not in top_index_set for idx in indexes):
-            continue
-        active_slot_tokens.append(token)
-        if token in query_tokens:
-            matched_tokens.add(token)
+    """Return query slot tokens using only the prefiltered candidate records."""
+    active_slot_tokens = {token for index in top_indices for token in candidate_slot_tokens[index]}
+    return _query_slot_tokens_from_active(
+        query_tokens,
+        active_slot_tokens,
+        fuzzy_excluded_tokens=fuzzy_excluded_tokens,
+    )
 
+
+def _query_slot_tokens_from_active(
+    query_tokens: frozenset[str],
+    active_slot_tokens: Sequence[str] | set[str],
+    *,
+    fuzzy_excluded_tokens: frozenset[str] | None = None,
+) -> frozenset[str]:
+    """Return exact and bounded fuzzy matches within active slot tokens."""
+    matched_tokens: set[str] = {token for token in active_slot_tokens if token in query_tokens}
     for query_token in query_tokens:
-        if query_token in matched_tokens:
+        if query_token in matched_tokens or (
+            fuzzy_excluded_tokens is not None and query_token in fuzzy_excluded_tokens
+        ):
             continue
         matched_tokens.update(
             slot_token
@@ -1605,8 +1751,8 @@ def rank_candidates(
     wildcard_token_to_indices: dict[str, tuple[int, ...]] | None = None,
     wildcard_literal_tokens_by_index: dict[int, frozenset[str]] | None = None,
     wildcard_min_required_by_index: dict[int, int] | None = None,
+    wildcard_variant_groups: tuple[WildcardVariantGroup, ...] | None = None,
     candidate_slot_tokens: tuple[frozenset[str], ...] | None = None,
-    slot_token_to_indices: dict[str, tuple[int, ...]] | None = None,
     slot_preferences: set[tuple[str, str]] | None = None,
     intent_context: Mapping[str, Any] | None = None,
     min_confidence: float = DEFAULT_MIN_CONFIDENCE,
@@ -1655,6 +1801,8 @@ def rank_candidates(
     )
     if exact_ranked is not None:
         return exact_ranked
+    if not query_normalized:
+        return ()
 
     if positional_literal_tokens is None:
         all_tokens: set[str] = set()
@@ -1686,8 +1834,20 @@ def rank_candidates(
             tuple(char_ngrams_normalized(candidate.normalized_text) for candidate in candidates)
         )
     query_grams = char_ngrams_normalized(query_normalized)
-    char_scores = candidate_char_index.score(query_grams)
-    prefilter_keys = bm25_scoring.prefilter_keys(char_scores)
+    if bm25_scoring.sparse_raw_scores is not None:
+        char_intersections = candidate_char_index.intersections(query_grams)
+        char_scores: Sequence[float] | None = None
+        prefilter_keys = _rank_prefilter_keys_from_intersections(
+            char_intersections,
+            len(query_grams),
+            candidate_char_index.gram_counts,
+            bm25_scoring.sparse_raw_scores,
+            bm25_scoring.sparse_inv_max,
+        )
+    else:
+        char_intersections = None
+        char_scores = candidate_char_index.score(query_grams)
+        prefilter_keys = bm25_scoring.prefilter_keys(char_scores)
 
     prefilter_limit = _rank_prefilter_limit(
         len(candidates), max_candidates, rapidfuzz_prefilter_candidates
@@ -1702,12 +1862,20 @@ def rank_candidates(
         wildcard_token_to_indices,
         wildcard_literal_tokens_by_index,
         wildcard_min_required_by_index,
+        wildcard_variant_groups,
     )
     if wildcard_passed_set:
         top_set = set(top_indices)
-        for wi in wildcard_passed_set:
-            if wi not in top_set:
-                top_indices.append(wi)
+        additional_wildcards = wildcard_passed_set - top_set
+        top_indices.extend(
+            _top_additional_wildcard_indices(
+                additional_wildcards,
+                query_tokens,
+                wildcard_variants_with_len,
+                prefilter_keys,
+                prefilter_limit,
+            )
+        )
 
     positional_lookup = (
         _build_positional_lookup(positional_literal_tokens, query_tokens)
@@ -1721,19 +1889,14 @@ def rank_candidates(
             token for tokens in slot_tokens_by_index.values() for token in tokens
         )
         query_slot_tokens = query_tokens & active_slot_tokens
-    elif slot_token_to_indices is not None:
-        slot_tokens_by_index = {}
-        query_slot_tokens = _query_slot_tokens_from_index(
-            query_tokens,
-            top_indices,
-            slot_token_to_indices,
-        )
     else:
         slot_tokens_by_index = {}
-        active_slot_tokens = frozenset(
-            token for idx in top_indices for token in candidate_slot_tokens[idx]
+        query_slot_tokens = _query_slot_tokens_from_candidates(
+            query_tokens,
+            top_indices,
+            candidate_slot_tokens,
+            positional_literal_tokens,
         )
-        query_slot_tokens = query_tokens & active_slot_tokens
 
     literal_analysis_cache: dict[
         tuple[str, tuple[frozenset[str], ...]], _LiteralVariantAnalysis
@@ -1767,7 +1930,17 @@ def rank_candidates(
     for idx in top_indices:
         candidate = candidates[idx]
         bm25_score = bm25_scoring.score_at(idx)
-        char_score = char_scores[idx]
+        char_score = (
+            _char_ngram_score_from_intersection(
+                len(query_grams),
+                candidate_char_index.gram_counts[idx],
+                char_intersections[idx],
+            )
+            if char_intersections is not None
+            else char_scores[idx]
+            if char_scores is not None
+            else 0.0
+        )
         item = _score_single_candidate(
             idx,
             candidate,
@@ -1862,13 +2035,32 @@ def _intent_tie_preferences_by_index(
     treats epsilon-different structural ties as equal.
     """
     tie_groups: list[tuple[float, float, int, list[_RankedItem]]] = []
+    group_indices_by_bucket: defaultdict[tuple[int, int, int], list[int]] = defaultdict(list)
+    tolerance = _STRUCTURAL_TIE_ABS_TOLERANCE
     for item in ranked_tuples:
         slot_preference = _ranked_tuple_slot_preference(
             item,
             slot_preferences=slot_preferences,
             rehydrated_cache=rehydrated_cache,
         )
-        for group_final, group_slot_preference, group_specificity, group in tie_groups:
+        final_bucket = round(item.final_score / tolerance)
+        slot_bucket = round(slot_preference / tolerance)
+        nearby_group_indices: list[int] = []
+        for final_offset in (-1, 0, 1):
+            for slot_offset in (-1, 0, 1):
+                nearby_group_indices.extend(
+                    group_indices_by_bucket.get(
+                        (
+                            item.slot_specificity,
+                            final_bucket + final_offset,
+                            slot_bucket + slot_offset,
+                        ),
+                        (),
+                    )
+                )
+        matched_group_index = None
+        for group_index in sorted(nearby_group_indices):
+            group_final, group_slot_preference, group_specificity, group = tie_groups[group_index]
             if (
                 item.slot_specificity == group_specificity
                 and isclose(
@@ -1885,9 +2077,14 @@ def _intent_tie_preferences_by_index(
                 )
             ):
                 group.append(item)
+                matched_group_index = group_index
                 break
-        else:
+        if matched_group_index is None:
+            group_index = len(tie_groups)
             tie_groups.append((item.final_score, slot_preference, item.slot_specificity, [item]))
+            group_indices_by_bucket[(item.slot_specificity, final_bucket, slot_bucket)].append(
+                group_index
+            )
 
     preferences_by_index: dict[int, tuple[int, float, float]] = {}
     for group_final, group_slot_preference, _, group in tie_groups:
@@ -1947,23 +2144,31 @@ def _apply_intent_disambiguation(
     ranked: list[RankedCandidate],
     tiebreaker_margin: float = TIEBREAKER_INTENT_MARGIN,
 ) -> None:
-    """Re-rank when a different-intent candidate is nearly tied with the top.
+    """Re-rank when the strongest different-intent candidate nearly ties the top.
 
-    When the top two candidates belong to different intents and their score
-    gap is less than ``tiebreaker_margin``, the second candidate is promoted
-    to position 0 if it has a higher intent_score.
+    Same-intent candidate variants are skipped. If the first real competitor's
+    score gap is below ``tiebreaker_margin``, it is promoted when its intent
+    evidence is stronger.
     """
     if len(ranked) < 2:
         return
     top = ranked[0]
-    competitor = ranked[1]
-    if competitor.candidate.intent_name == top.candidate.intent_name:
+    competitor_index = next(
+        (
+            index
+            for index, candidate in enumerate(ranked[1:], start=1)
+            if candidate.candidate.intent_name != top.candidate.intent_name
+        ),
+        None,
+    )
+    if competitor_index is None:
         return
+    competitor = ranked[competitor_index]
     margin = top.scores.final_score - competitor.scores.final_score
     if margin > tiebreaker_margin:
         return
     if competitor.scores.intent_score > top.scores.intent_score:
-        ranked[0], ranked[1] = competitor, top
+        ranked[0], ranked[competitor_index] = competitor, top
 
 
 def _passes_high_confidence_relaxed_margin(

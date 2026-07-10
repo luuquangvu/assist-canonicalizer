@@ -663,6 +663,7 @@ def _build_candidate(
     slot_output_values: Mapping[str, Mapping[str, Any]] | None = None,
     static_slots_dict: dict[str, str] | None = None,
     literal_variants: tuple[frozenset[str], ...] | None = None,
+    normalized_expanded_sentence: str | None = None,
 ) -> Candidate:
     """Construct a Candidate with extracted slot metadata."""
     slots, raw_slots = _extract_slots_from_expanded_text(
@@ -688,6 +689,11 @@ def _build_candidate(
         language=language,
         metadata=metadata,
         slot_values=tuple(str(value) for value in slots.values() if value is not None),
+        normalized_text=(
+            normalized_expanded_sentence
+            if normalized_expanded_sentence is not None and clean_sentence == expanded_sentence
+            else ""
+        ),
     )
     if literal_variants is not None:
         object.__setattr__(candidate, "_literal_variants", literal_variants)
@@ -1213,7 +1219,7 @@ def _append_query_template_candidates(
 
     base_metadata = dict(template.metadata)
 
-    for expanded_sentence in _query_candidate_texts(
+    for expanded_sentence, expanded_normalized in _query_candidate_texts(
         template.sentence,
         slot_values,
         template.expansion_rules,
@@ -1225,9 +1231,10 @@ def _append_query_template_candidates(
             query_normalized,
             query_no_diac,
             language,
+            candidate_normalized=expanded_normalized,
         ):
             continue
-        key = (normalize_text(expanded_sentence), intent_name)
+        key = (expanded_normalized, intent_name)
         if key in seen:
             continue
         seen.add(key)
@@ -1243,6 +1250,7 @@ def _append_query_template_candidates(
                 slot_output_values,
                 static_slots_dict,
                 literal_variants=template.literal_token_variants,
+                normalized_expanded_sentence=expanded_normalized,
             )
         )
         if len(candidates) >= limit:
@@ -1570,9 +1578,12 @@ def _is_exact_query_rescue_candidate(
     query_normalized: str,
     query_no_diac: str | None,
     language: str,
+    *,
+    candidate_normalized: str | None = None,
 ) -> bool:
     """Return whether a domain-area dynamic rescue exactly matches the query."""
-    candidate_normalized = normalize_text(expanded_sentence)
+    if candidate_normalized is None:
+        candidate_normalized = normalize_text(expanded_sentence)
     if candidate_normalized == query_normalized:
         return True
     return bool(
@@ -1895,10 +1906,11 @@ def _query_candidate_texts(
     expansion_rules: Mapping[str, str],
     query_normalized: str,
     query_tokens: frozenset[str],
-) -> tuple[str, ...]:
+) -> tuple[tuple[str, str], ...]:
     """Return query-relevant candidate texts for a dynamic template."""
     if is_fixed_sentence(sentence):
-        return (_clean_expanded_text(sentence),)
+        cleaned = _clean_expanded_text(sentence)
+        return ((cleaned, normalize_text(cleaned)),)
     expanded = expand_sentence_template(
         sentence,
         slot_values,
@@ -1909,12 +1921,11 @@ def _query_candidate_texts(
         ),
         fair=True,
     )
+    normalized_expanded = tuple((text, normalize_text(text)) for text in expanded)
     return tuple(
         sorted(
-            expanded,
-            key=lambda text: _text_relevance_key(
-                normalize_text(text), query_normalized, query_tokens
-            ),
+            normalized_expanded,
+            key=lambda item: _text_relevance_key(item[1], query_normalized, query_tokens),
             reverse=True,
         )[:DEFAULT_MAX_CANDIDATES_PER_TEMPLATE]
     )

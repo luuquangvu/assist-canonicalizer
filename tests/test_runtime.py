@@ -1036,6 +1036,7 @@ async def test_persistent_store_save_and_load(monkeypatch: Any) -> None:
         assert loaded_cand.metadata["sentence_template"] == "bật {name}"
         assert loaded_cand.slot_values == ("đèn",)
         assert clean_runtime.get_index("vi") is loaded_index
+        assert clean_runtime.dynamic_registry_intents["vi"] == snapshot.dynamic_registry_intents
     finally:
         MockStore.reset()
 
@@ -1793,6 +1794,7 @@ def test_rebuild_index_synchronous() -> None:
 
         index = _build_index_from_snapshot(snapshot)
 
+    assert snapshot.dynamic_registry_intents
     assert index.language == "vi"
     assert index.candidate_count > 0
     assert index.candidates[0].text == "bật đèn"

@@ -143,14 +143,14 @@ The ranking engine was benchmarked against the default Home Assistant intent rec
 
 <!-- BENCHMARK_OVERALL_START -->
 
-> Benchmark dependency versions: `homeassistant` 2026.7.1, `home-assistant-intents` 2026.6.24.
+> Benchmark dependency versions: `homeassistant` 2026.7.2, `home-assistant-intents` 2026.6.24.
 
 | Mode      | Intent/Slot | Mismatch | Fallback |
 | :-------- | ----------: | -------: | -------: |
 | `hassil`  |       48.3% |     0.0% |    51.7% |
-| `lexical` |   **91.7%** | **2.2%** | **6.1%** |
+| `lexical` |   **92.3%** | **1.4%** | **6.3%** |
 
-> Intent/slot accuracy jumped from **48.3% to 91.7%**. The combined error rate (mismatch + fallback) dropped from **51.7% to 8.3%**.
+> Intent/slot accuracy jumped from **48.3% to 92.3%**. The combined error rate (mismatch + fallback) dropped from **51.7% to 7.7%**.
 
 <!-- BENCHMARK_OVERALL_END -->
 
@@ -161,13 +161,13 @@ The ranking engine was benchmarked against the default Home Assistant intent rec
 | Language | Mode      | Intent/Slot | Mismatch | Fallback |
 | :------- | :-------- | ----------: | -------: | -------: |
 | EN       | `hassil`  |       56.2% |     0.0% |    43.8% |
-| EN       | `lexical` |   **90.1%** | **4.1%** | **5.8%** |
+| EN       | `lexical` |   **91.7%** | **2.5%** | **5.8%** |
 | DE       | `hassil`  |       50.9% |     0.0% |    49.1% |
 | DE       | `lexical` |   **94.6%** | **0.9%** | **4.5%** |
 | FR       | `hassil`  |       51.4% |     0.0% |    48.6% |
-| FR       | `lexical` |   **92.7%** | **1.8%** | **5.5%** |
+| FR       | `lexical` |   **93.6%** | **0.9%** | **5.5%** |
 | NL       | `hassil`  |       48.4% |     0.0% |    51.6% |
-| NL       | `lexical` |   **89.3%** | **2.5%** | **8.2%** |
+| NL       | `lexical` |   **89.3%** | **1.6%** | **9.0%** |
 | VI       | `hassil`  |       30.8% |     0.0% |    69.2% |
 | VI       | `lexical` |   **92.3%** | **1.1%** | **6.6%** |
 
@@ -328,8 +328,8 @@ For systematic debugging, follow this sequence:
 
 To ensure long-term reliability and stability, this project utilizes a modern stack of automated development and security tools:
 
-- **Automated Code Review**: [CodeRabbit](https://coderabbit.ai) provides deep analysis of every Pull Request, identifying potential logic flaws and edge cases before they reach your system.
-- **Code Optimization**: [Sourcery](https://sourcery.ai) suggests cleaner, more idiomatic Python patterns to maintain a high-quality codebase.
+- **Automated Code Review**: [CodeRabbit AI](https://coderabbit.ai) provides deep analysis of every Pull Request, identifying potential logic flaws and edge cases before they reach your system.
+- **Code Optimization**: [Sourcery AI](https://sourcery.ai) suggests cleaner, more idiomatic Python patterns to maintain a high-quality codebase.
 - **Static Analysis & Security**: [CodeQL](https://codeql.github.com) performs industry-standard scans to detect security vulnerabilities and ensure compliance with best practices.
 - **Rigorous Development Workflow**:
   - **[Ruff](https://github.com/astral-sh/ruff)**: High-performance linting and formatting for consistent Python code.
@@ -339,7 +339,7 @@ To ensure long-term reliability and stability, this project utilizes a modern st
   - **[Prettier](https://github.com/prettier/prettier)**: Consistent formatting for documentation and configuration files.
 
 > [!NOTE]
-> All automated insights are manually reviewed and validated by the project maintainer to ensure every change aligns with the project's standards.
+> All AI automated insights are manually reviewed and validated by the project maintainer to ensure every change aligns with the project's standards.
 
 ---
 

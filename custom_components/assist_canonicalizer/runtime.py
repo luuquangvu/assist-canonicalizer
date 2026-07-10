@@ -83,6 +83,7 @@ class IndexBuildSnapshot:
     language: str
     intent_sources: dict[str, Mapping[str, Any]]
     registry_slot_values: dict[str, tuple[str, ...]]
+    dynamic_registry_intents: tuple[DynamicRegistryIntent, ...]
     fingerprint: str
 
 
@@ -286,6 +287,7 @@ class CanonicalizerRuntime:
         ):
             return None
         self.language_intent_sources[language] = snapshot.intent_sources
+        self.dynamic_registry_intents[language] = snapshot.dynamic_registry_intents
         self.set_index(index)
         return index
 
@@ -851,6 +853,7 @@ async def _run_rebuild(
             if runtime.closed:
                 return None
             runtime.language_intent_sources[language] = snapshot.intent_sources
+            runtime.dynamic_registry_intents[language] = snapshot.dynamic_registry_intents
             runtime.set_index(index)
             return index
     except asyncio.CancelledError:
@@ -881,6 +884,12 @@ def _create_build_snapshot_and_register_wildcards(
     register_custom_wildcards_from_sources(language, sources)
     wildcard_slot_names(language)
     wildcard_slot_names_sorted(language)
+    dynamic_registry_intents = compile_dynamic_registry_intents(
+        sources,
+        language,
+        include_literal_only_templates=True,
+        include_area_only_templates=False,
+    )
     fingerprint_payload = {
         "build_version": _INDEX_BUILD_VERSION,
         "language": language,
@@ -894,6 +903,7 @@ def _create_build_snapshot_and_register_wildcards(
         language=language,
         intent_sources=sources,
         registry_slot_values=registry_slot_values,
+        dynamic_registry_intents=dynamic_registry_intents,
         fingerprint=fingerprint,
     )
 

@@ -327,13 +327,13 @@
       }
     },
     {
-      "query": "turn off bedroom",
+      "query": "close livin window",
       "language": "en",
       "expected_intent": "HassTurnOff",
-      "expected_canonical": "close bedroom window",
+      "expected_canonical": "close living room window",
       "category": "missing_words",
       "expected_slots": {
-        "area": "bedroom",
+        "area": "living room",
         "device_class": "window",
         "domain": "cover"
       }
@@ -393,7 +393,7 @@
       }
     },
     {
-      "query": "turn on living",
+      "query": "turn on living light",
       "language": "en",
       "expected_intent": "HassTurnOn",
       "expected_canonical": "turn on living room light",

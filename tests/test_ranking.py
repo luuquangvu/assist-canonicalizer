@@ -37,13 +37,16 @@ from custom_components.assist_canonicalizer.ranking import (
     _is_numeric_slot_value,
     _per_pair_positional_threshold,
     _positional_similarity,
-    _query_slot_tokens_from_index,
+    _query_slot_tokens_from_candidates,
     _query_token_coverage,
     _rank_prefilter_keys,
+    _rank_prefilter_keys_from_intersections,
     _rank_prefilter_keys_with_sparse_bm25,
     _raw_cached_fuzz_ratio,
     _ScoringContext,
+    _top_additional_wildcard_indices,
     _top_prefilter_indices,
+    _wildcard_variants_match,
     accepted_candidate,
     clear_ranking_caches,
     confidence_gate_rejection_reason,
@@ -1031,40 +1034,91 @@ def test_static_slot_query_conflict_detects_missing_active_slot_tokens() -> None
     )
 
 
-def test_query_slot_tokens_from_index_uses_bounded_fuzzy_slot_matches() -> None:
-    """Map bounded one-edit query typos to indexed slot tokens."""
-    indexed: Any = {
-        "badezimmerlüfter": (0,),
-        "window": (1,),
-        "fan": (2,),
-        "door": (3,),
-    }
+def test_query_slot_tokens_from_candidates_uses_bounded_fuzzy_slot_matches() -> None:
+    """Map bounded edits, transpositions, and prefixes within candidate slots."""
+    candidate_slot_tokens = tuple(
+        frozenset({token})
+        for token in ("badezimmerlüfter", "window", "fan", "door", "phong", "télévision")
+    )
 
-    assert _query_slot_tokens_from_index(
-        frozenset({"badzimmerlüfter", "windw", "fon", "doar"}),
-        (0, 1, 2, 3),
-        indexed,
-    ) == frozenset({"badezimmerlüfter", "door", "window"})
+    assert _query_slot_tokens_from_candidates(
+        frozenset({"badzimmerlüfter", "windw", "fon", "doar", "phogn", "télé"}),
+        (0, 1, 2, 3, 4, 5),
+        candidate_slot_tokens,
+    ) == frozenset({"badezimmerlüfter", "door", "phong", "télévision", "window"})
 
 
-def test_query_slot_tokens_from_index_rejects_distant_fuzzy_slot_matches() -> None:
+def test_query_slot_tokens_from_candidates_rejects_distant_fuzzy_slot_matches() -> None:
     """Reject slot-token typos outside the bounded one-edit guard."""
-    indexed: Any = {"badezimmerlüfter": (0,)}
-
     assert (
-        _query_slot_tokens_from_index(
+        _query_slot_tokens_from_candidates(
             frozenset(
                 {
                     "badzximmerlüfter",
                     "badezimmerlüfterfoobar",
                     "xadezimmerlüfter",
+                    "bad",
                 }
             ),
             (0,),
-            indexed,
+            (frozenset({"badezimmerlüfter"}),),
         )
         == frozenset()
     )
+
+
+def test_query_slot_tokens_from_candidates_ignores_unselected_candidates() -> None:
+    """Collect active fuzzy slot tokens from prefiltered candidates only."""
+    query_tokens = frozenset({"badzimmerlüfter", "windw", "unrelated"})
+    candidate_slot_tokens = (
+        frozenset({"badezimmerlüfter"}),
+        frozenset({"window"}),
+        frozenset({"unselected"}),
+    )
+
+    assert _query_slot_tokens_from_candidates(
+        query_tokens,
+        (0, 1),
+        candidate_slot_tokens,
+    ) == frozenset({"badezimmerlüfter", "window"})
+
+
+def test_query_slot_tokens_do_not_reuse_literal_as_slot_prefix() -> None:
+    """Keep a known action literal from claiming a longer slot-value prefix."""
+    assert _query_slot_tokens_from_candidates(
+        frozenset({"shut", "window"}),
+        (0,),
+        (frozenset({"shutter", "window"}),),
+        frozenset({"shut"}),
+    ) == frozenset({"window"})
+
+
+def test_rank_candidates_uses_truncated_registry_slot_evidence() -> None:
+    """Prefer a truncated registry name over unrelated same-intent slots."""
+    television = Candidate(
+        text="allume la télévision",
+        intent_name="HassTurnOn",
+        language="fr",
+        metadata={
+            "literal_text": "allume",
+            "slots": orjson.dumps({"name": "télévision"}).decode(),
+        },
+        slot_values=("télévision",),
+    )
+    unrelated_light = Candidate(
+        text="allume la salon",
+        intent_name="HassTurnOn",
+        language="fr",
+        metadata={
+            "literal_text": "allume",
+            "slots": orjson.dumps({"domain": "light", "area": "salon"}).decode(),
+        },
+        slot_values=("light", "salon"),
+    )
+
+    ranked = build_index("fr", [unrelated_light, television]).rank("allume la télé")
+
+    assert ranked[0].candidate is television
 
 
 def test_rank_candidates_penalizes_static_competitor_with_fuzzy_slot_token() -> None:
@@ -1186,6 +1240,114 @@ def test_sparse_bm25_prefilter_keys_match_dense(
         dense_keys,
         len(dense_keys),
     )
+
+
+@pytest.mark.parametrize(
+    ("candidate_grams", "query_grams", "raw_bm25_scores"),
+    [
+        (
+            (frozenset({"abc", "bcd"}), frozenset({"bcd"}), frozenset()),
+            frozenset({"abc", "bcd"}),
+            [0.0, 0.1, 0.0],
+        ),
+        (
+            (frozenset({"abc"}), frozenset({"xyz"})),
+            frozenset(),
+            [0.4, 0.0],
+        ),
+        ((), frozenset({"abc"}), []),
+    ],
+)
+def test_intersection_prefilter_keys_match_dense_scores(
+    candidate_grams: tuple[frozenset[str], ...],
+    query_grams: frozenset[str],
+    raw_bm25_scores: list[float],
+) -> None:
+    """Fuse character scoring and prefilter keys without changing their values."""
+    char_index = CharNGramIndex.from_grams(candidate_grams)
+    dense_char_scores = char_index.score(query_grams)
+    max_raw_score = max(raw_bm25_scores, default=0.0)
+    inv_max = 1.0 / max_raw_score if max_raw_score > 0.0 else 0.0
+    dense_bm25_scores = [score * inv_max for score in raw_bm25_scores]
+    sparse_bm25_scores = {
+        index: score for index, score in enumerate(raw_bm25_scores) if score > 0.0
+    }
+
+    fused_keys = _rank_prefilter_keys_from_intersections(
+        char_index.intersections(query_grams),
+        len(query_grams),
+        char_index.gram_counts,
+        sparse_bm25_scores,
+        inv_max,
+    )
+
+    assert fused_keys == _rank_prefilter_keys(dense_char_scores, dense_bm25_scores)
+
+
+def test_additional_wildcard_prefilter_is_bounded_by_literal_relevance() -> None:
+    """Bound wildcard rescues while preferring stronger literal-token evidence."""
+    query_tokens = frozenset({"add", "milk", "shopping", "list"})
+    variants: Any = {
+        0: ((frozenset({"add"}), 1, 1),),
+        1: ((frozenset({"add", "shopping", "list"}), 3, 3),),
+        2: ((frozenset({"shopping", "list"}), 2, 2),),
+        3: ((frozenset({"add", "list"}), 2, 2),),
+    }
+    prefilter_keys = [-0.9, -0.2, -0.8, -0.7]
+
+    selected = _top_additional_wildcard_indices(
+        set(variants),
+        query_tokens,
+        variants,
+        prefilter_keys,
+        limit=2,
+    )
+
+    assert selected == [1, 2]
+
+
+def test_additional_wildcard_prefilter_preserves_all_candidates_within_budget() -> None:
+    """Preserve deterministic index order when wildcard rescues fit the budget."""
+    assert _top_additional_wildcard_indices(
+        {3, 1},
+        frozenset({"add"}),
+        None,
+        [0.0] * 4,
+        limit=2,
+    ) == [1, 3]
+
+
+def test_grouped_wildcard_prefilter_evaluates_shared_variants_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Expand indexes only after one coverage check for a shared wildcard group."""
+    variants = ((frozenset({"add", "to", "list"}), 3, 3),)
+    calls = 0
+    original = ranking._wildcard_variants_match
+
+    def counted(
+        values: tuple[tuple[frozenset[str], int, int], ...],
+        query_tokens: frozenset[str],
+    ) -> bool:
+        nonlocal calls
+        calls += 1
+        return original(values, query_tokens)
+
+    monkeypatch.setattr(ranking, "_wildcard_variants_match", counted)
+
+    passed = ranking._prefilter_wildcard_candidates(
+        (),
+        frozenset({"add", "milk", "to", "list"}),
+        frozenset({4}),
+        {},
+        {},
+        {},
+        {},
+        ((variants, frozenset({"add", "to", "list"}), 3, (1, 2, 3)),),
+    )
+
+    assert passed == {1, 2, 3, 4}
+    assert calls == 1
 
 
 def test_prebuilt_static_bm25_matches_on_the_fly_sparse_ranking() -> None:
@@ -1709,6 +1871,45 @@ def test_rank_candidates_exact_no_diacritics_short_circuit() -> None:
     assert ranked[0].scores.final_score == 1.0
 
 
+def test_rank_candidates_partial_diacritic_omission_short_circuits() -> None:
+    """Treat missing diacritics as directional omissions even in mixed text."""
+    index = build_index(
+        "vi",
+        [Candidate(text="bật đèn phòng khách", intent_name="HassTurnOn", language="vi")],
+    )
+
+    ranked = index.rank("bat đèn phòng khách")
+
+    assert ranked[0].candidate.text == "bật đèn phòng khách"
+    assert ranked[0].scores.final_score == 1.0
+
+
+def test_rank_candidates_no_diacritics_same_intent_slot_collision_is_ambiguous() -> None:
+    """Avoid perfect promotion when base-identical candidates carry different slots."""
+    index = build_index(
+        "vi",
+        [
+            Candidate(
+                text="bật bàn",
+                intent_name="HassTurnOn",
+                language="vi",
+                metadata={"slots": '{"name":"bàn"}'},
+            ),
+            Candidate(
+                text="bật bạn",
+                intent_name="HassTurnOn",
+                language="vi",
+                metadata={"slots": '{"name":"bạn"}'},
+            ),
+        ],
+    )
+
+    ranked = index.rank("bat ban")
+
+    assert len(ranked) == 2
+    assert all(candidate.scores.final_score < 1.0 for candidate in ranked)
+
+
 def test_rank_candidates_no_diacritics_collision_falls_back_to_fuzzy() -> None:
     """Verify collision under no-diacritics normalization runs full fuzzy ranking."""
     # "bật cửa" (HassTurnOn) vs "bạt cửa" (HassTurnOff)
@@ -1765,6 +1966,7 @@ def test_ranking_helpers_and_validation_errors() -> None:
 
     # test rank_candidates empty candidates
     assert rank_candidates("bật đèn", []) == ()
+    assert rank_candidates("   !!!   ", candidates) == ()
 
 
 def test_apply_intent_disambiguation_promotes_higher_intent_score_within_margin() -> None:
@@ -1875,6 +2077,29 @@ def test_apply_intent_disambiguation_keeps_order_for_same_intent() -> None:
     # Because the intents are identical, the original ordering should be preserved
     assert ranked[0] is first
     assert ranked[1] is second
+
+
+def test_apply_intent_disambiguation_skips_same_intent_variants() -> None:
+    """Compare the top candidate with the first genuinely competing intent."""
+    margin = ranking.TIEBREAKER_INTENT_MARGIN
+
+    first = RankedCandidate(
+        candidate=Candidate(text="turn kitchen light", intent_name="HassTurnOn"),
+        scores=ScoreBreakdown(0.9, 0.9, 0.9, 0.5, 1.0),
+    )
+    same_intent = RankedCandidate(
+        candidate=Candidate(text="switch kitchen light", intent_name="HassTurnOn"),
+        scores=ScoreBreakdown(0.9, 0.9, 0.9, 0.6, 1.0 - margin / 4.0),
+    )
+    competitor = RankedCandidate(
+        candidate=Candidate(text="turn kitchen light off", intent_name="HassTurnOff"),
+        scores=ScoreBreakdown(0.9, 0.9, 0.9, 0.9, 1.0 - margin / 2.0),
+    )
+    ranked = [first, same_intent, competitor]
+
+    ranking._apply_intent_disambiguation(ranked)
+
+    assert ranked == [competitor, same_intent, first]
 
 
 @pytest.mark.current_intents
@@ -2120,6 +2345,34 @@ def test_wildcard_variants_analysis_keeps_multilingual_word_containing_wildcard(
         (frozenset({"diffuser"}), 1, 1),
     )
     assert all_tokens == frozenset({"diffuser", "messagerie"})
+
+
+@pytest.mark.parametrize(
+    ("variants", "query_tokens", "expected"),
+    [
+        (((frozenset(), 0, 0),), frozenset(), True),
+        (((frozenset({"add", "list"}), 2, 2),), frozenset({"add", "list"}), True),
+        (((frozenset({"add", "list"}), 2, 2),), frozenset({"add"}), False),
+        (((frozenset({"play"}), 1, 1),), frozenset({"play"}), True),
+        (
+            ((frozenset({"add", "item", "to", "list"}), 4, 3),),
+            frozenset({"add", "to", "list"}),
+            True,
+        ),
+        (
+            ((frozenset({"add", "item", "to", "list"}), 4, 3),),
+            frozenset({"add", "list"}),
+            False,
+        ),
+    ],
+)
+def test_wildcard_variants_match_preserves_coverage_semantics(
+    variants: tuple[tuple[frozenset[str], int, int], ...],
+    query_tokens: frozenset[str],
+    expected: bool,
+) -> None:
+    """Cover empty, full-subset, single-token, and partial thresholds."""
+    assert _wildcard_variants_match(variants, query_tokens) is expected
 
 
 @pytest.mark.current_intents
