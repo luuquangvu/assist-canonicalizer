@@ -225,7 +225,7 @@ _exact_lookup_ranked: Any = None
 _exact_intent_score: Any = None
 _normalized_bm25_scores_from_raw: Any = None
 _positional_intent_score_from_lookup: Any = None
-_query_slot_tokens_from_index: Any = None
+_query_slot_tokens_from_candidates: Any = None
 _rank_prefilter_keys: Any = None
 _rank_prefilter_limit: Any = None
 _rank_query_setup: Any = None
@@ -253,7 +253,7 @@ def _bootstrap_project_imports() -> None:
     global BM25Index, CharNGramIndex, rapidfuzz_similarity_normalized, lexical_score
     global _build_positional_lookup, _exact_lookup_ranked, _exact_intent_score
     global _normalized_bm25_scores_from_raw, _positional_intent_score_from_lookup
-    global _query_slot_tokens_from_index, _rank_prefilter_keys, _rank_prefilter_limit
+    global _query_slot_tokens_from_candidates, _rank_prefilter_keys, _rank_prefilter_limit
     global _rank_query_setup, _top_prefilter_indices
     global literal_token_variants, _apply_intent_disambiguation, _prefilter_wildcard_candidates
     global _is_perfect_rank_result
@@ -329,7 +329,7 @@ def _bootstrap_project_imports() -> None:
         _prefilter_wildcard_candidates as imported_prefilter_wildcard_candidates,
     )
     from custom_components.assist_canonicalizer.ranking import (
-        _query_slot_tokens_from_index as imported_query_slot_tokens_from_index,
+        _query_slot_tokens_from_candidates as imported_query_slot_tokens_from_candidates,
     )
     from custom_components.assist_canonicalizer.ranking import (
         _rank_prefilter_keys as imported_rank_prefilter_keys,
@@ -393,7 +393,7 @@ def _bootstrap_project_imports() -> None:
     _exact_intent_score = imported_exact_intent_score
     _normalized_bm25_scores_from_raw = imported_normalized_bm25_scores_from_raw
     _positional_intent_score_from_lookup = imported_positional_intent_score_from_lookup
-    _query_slot_tokens_from_index = imported_query_slot_tokens_from_index
+    _query_slot_tokens_from_candidates = imported_query_slot_tokens_from_candidates
     _rank_prefilter_keys = imported_rank_prefilter_keys
     _rank_prefilter_limit = imported_rank_prefilter_limit
     _rank_query_setup = imported_rank_query_setup
@@ -3859,10 +3859,8 @@ class RankStageContext:
     exact_no_diacritics_lookup: Mapping[str, Sequence[Any]]
     wildcard_always_passes: frozenset[int]
     wildcard_variants_with_len: Mapping[int, tuple[tuple[frozenset[str], int, int], ...]]
-    wildcard_token_to_indices: Mapping[str, tuple[int, ...]]
-    wildcard_literal_tokens_by_index: Mapping[int, frozenset[str]]
-    wildcard_min_required_by_index: Mapping[int, int]
-    slot_token_to_indices: Mapping[str, tuple[int, ...]]
+    wildcard_variant_groups: tuple[Any, ...]
+    candidate_slot_tokens: tuple[frozenset[str], ...]
     prefilter_limit: int
     cases: tuple[RankStageCase, ...]
 
@@ -3964,10 +3962,8 @@ def _build_rank_stage_context(
         exact_no_diacritics_lookup=index._exact_no_diacritics_lookup,
         wildcard_always_passes=index._wildcard_always_passes,
         wildcard_variants_with_len=index._wildcard_variants_with_len,
-        wildcard_token_to_indices=index._wildcard_token_to_indices,
-        wildcard_literal_tokens_by_index=index._wildcard_literal_tokens_by_index,
-        wildcard_min_required_by_index=index._wildcard_min_required_by_index,
-        slot_token_to_indices=index._slot_token_to_indices,
+        wildcard_variant_groups=index._wildcard_variant_groups,
+        candidate_slot_tokens=index._candidate_slot_tokens,
         prefilter_limit=_rank_prefilter_limit(len(candidates)),
         cases=(),
     )
@@ -3983,10 +3979,8 @@ def _build_rank_stage_context(
         exact_no_diacritics_lookup=context.exact_no_diacritics_lookup,
         wildcard_always_passes=context.wildcard_always_passes,
         wildcard_variants_with_len=context.wildcard_variants_with_len,
-        wildcard_token_to_indices=context.wildcard_token_to_indices,
-        wildcard_literal_tokens_by_index=context.wildcard_literal_tokens_by_index,
-        wildcard_min_required_by_index=context.wildcard_min_required_by_index,
-        slot_token_to_indices=context.slot_token_to_indices,
+        wildcard_variant_groups=context.wildcard_variant_groups,
+        candidate_slot_tokens=context.candidate_slot_tokens,
         prefilter_limit=context.prefilter_limit,
         cases=cases,
     )
@@ -4183,14 +4177,14 @@ def _warm_rank_stage_components(contexts: Sequence[RankStageContext]) -> None:
             context.candidates,
             case.tokens,
             context.wildcard_always_passes,
-            context.wildcard_variants_with_len,
-            context.wildcard_token_to_indices,
-            context.wildcard_literal_tokens_by_index,
-            context.wildcard_min_required_by_index,
+            wildcard_variant_groups=context.wildcard_variant_groups,
         )
         _ = _build_positional_lookup(context.positional_literal_tokens, case.tokens)
-        _ = _query_slot_tokens_from_index(
-            case.tokens, case.top_indices, context.slot_token_to_indices
+        _ = _query_slot_tokens_from_candidates(
+            case.tokens,
+            case.top_indices,
+            context.candidate_slot_tokens,
+            context.positional_literal_tokens,
         )
         _ = _accepted_candidate(case.ranked)
 
@@ -4260,10 +4254,7 @@ def _profile_rank_stage_components(
             context.candidates,
             case.tokens,
             context.wildcard_always_passes,
-            context.wildcard_variants_with_len,
-            context.wildcard_token_to_indices,
-            context.wildcard_literal_tokens_by_index,
-            context.wildcard_min_required_by_index,
+            wildcard_variant_groups=context.wildcard_variant_groups,
         )
     _record_component_elapsed(component_results, "wildcard_prefilter", t0, case_count)
 
@@ -4274,8 +4265,11 @@ def _profile_rank_stage_components(
 
     t0 = time.perf_counter()
     for context, case in case_pairs:
-        _ = _query_slot_tokens_from_index(
-            case.tokens, case.top_indices, context.slot_token_to_indices
+        _ = _query_slot_tokens_from_candidates(
+            case.tokens,
+            case.top_indices,
+            context.candidate_slot_tokens,
+            context.positional_literal_tokens,
         )
     _record_component_elapsed(component_results, "query_slot_token_filter", t0, case_count)
 

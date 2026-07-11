@@ -19,6 +19,20 @@ from .normalization import normalize_text
 from .utils import wildcard_slot_names
 
 
+@lru_cache(maxsize=512)
+def _raw_cached_fuzz_ratio(s1: str, s2: str) -> float:
+    """Return RapidFuzz's ratio with LRU caching."""
+    return fuzz.ratio(s1, s2)
+
+
+def _cached_fuzz_ratio(s1: str, s2: str) -> float:
+    """Return RapidFuzz's ratio with LRU caching.
+
+    The argument order is normalized to maximize cache hit rate.
+    """
+    return _raw_cached_fuzz_ratio(s1, s2) if s1 <= s2 else _raw_cached_fuzz_ratio(s2, s1)
+
+
 def _normalize_and_split(text: str) -> tuple[str, tuple[str, ...]]:
     """Normalize text and return both the normalized text and its tokens tuple."""
     norm = normalize_text(text)
@@ -313,7 +327,7 @@ def _token_similarity(c_tok: str, q_tok: str, is_wildcard: bool = False) -> floa
     max_len = max(len_c, len_q)
     if min_len == 0 or max_len >= MAX_TOKEN_LENGTH_RATIO * min_len:
         return 0.0
-    return float(fuzz.ratio(c_tok, q_tok)) / 100.0
+    return _cached_fuzz_ratio(c_tok, q_tok) / 100.0
 
 
 def _align_prefix_boundary(
@@ -561,3 +575,4 @@ def clear_rehydration_caches() -> None:
     _get_rehydration_candidate.cache_clear()
     _get_escaped_pattern.cache_clear()
     _wildcard_variants_analysis_cached.cache_clear()
+    _raw_cached_fuzz_ratio.cache_clear()

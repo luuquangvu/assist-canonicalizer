@@ -15,7 +15,7 @@ from .const import (
     DEFAULT_MIN_CONFIDENCE,
 )
 from .normalization import char_ngrams_normalized, literal_tokens_list
-from .ranking import CharNGramIndex, RankedCandidate, rank_candidates
+from .ranking import CharNGramIndex, RankedCandidate, WildcardVariantGroup, rank_candidates
 from .rehydration import wildcard_variants_analysis
 
 
@@ -28,11 +28,8 @@ class _CanonicalIndexData:
     exact_no_diacritics_lookup: dict[str, list[Candidate]]
     wildcard_always_passes: frozenset[int]
     wildcard_variants_with_len: dict[int, tuple[tuple[frozenset[str], int, int], ...]]
-    wildcard_token_to_indices: dict[str, tuple[int, ...]]
-    wildcard_literal_tokens_by_index: dict[int, frozenset[str]]
-    wildcard_min_required_by_index: dict[int, int]
+    wildcard_variant_groups: tuple[WildcardVariantGroup, ...]
     candidate_slot_tokens: tuple[frozenset[str], ...]
-    slot_token_to_indices: dict[str, tuple[int, ...]]
 
 
 def _build_index_state(candidates: tuple[Candidate, ...]) -> _CanonicalIndexData:
@@ -42,11 +39,10 @@ def _build_index_state(candidates: tuple[Candidate, ...]) -> _CanonicalIndexData
     exact_no_diacritics: dict[str, list[Candidate]] = {}
     wildcard_always_passes: list[int] = []
     wildcard_variants_with_len: dict[int, tuple[tuple[frozenset[str], int, int], ...]] = {}
-    wildcard_token_to_indices: defaultdict[str, list[int]] = defaultdict(list)
-    wildcard_literal_tokens_by_index: dict[int, frozenset[str]] = {}
-    wildcard_min_required_by_index: dict[int, int] = {}
+    wildcard_group_indices: defaultdict[tuple[tuple[frozenset[str], int, int], ...], list[int]] = (
+        defaultdict(list)
+    )
     candidate_slot_tokens: list[frozenset[str]] = []
-    slot_token_to_indices: defaultdict[str, list[int]] = defaultdict(list)
 
     for i, candidate in enumerate(candidates):
         exact_normalized.setdefault(candidate.normalized_text, []).append(candidate)
@@ -55,22 +51,17 @@ def _build_index_state(candidates: tuple[Candidate, ...]) -> _CanonicalIndexData
         if literal_text := candidate.metadata.get("literal_text"):
             all_tokens.update(literal_tokens_list(literal_text))
         if candidate.has_wildcard:
-            var_with_len, all_tokens_set = wildcard_variants_analysis(candidate)
+            var_with_len, _ = wildcard_variants_analysis(candidate)
             wildcard_variants_with_len[i] = var_with_len
-            wildcard_literal_tokens_by_index[i] = all_tokens_set
-            if var_with_len:
-                wildcard_min_required_by_index[i] = min(req for _, _, req in var_with_len)
             always_passes = not candidate.literal_variants or any(
                 length == 0 for _, length, _ in var_with_len
             )
             if always_passes:
                 wildcard_always_passes.append(i)
-            for tok in all_tokens_set:
-                wildcard_token_to_indices[tok].append(i)
+            else:
+                wildcard_group_indices[var_with_len].append(i)
         slot_tokens = candidate.slot_tokens_set
         candidate_slot_tokens.append(slot_tokens)
-        for token in slot_tokens:
-            slot_token_to_indices[token].append(i)
 
     return _CanonicalIndexData(
         positional_literal_tokens=frozenset(all_tokens),
@@ -78,13 +69,16 @@ def _build_index_state(candidates: tuple[Candidate, ...]) -> _CanonicalIndexData
         exact_no_diacritics_lookup=exact_no_diacritics,
         wildcard_always_passes=frozenset(wildcard_always_passes),
         wildcard_variants_with_len=wildcard_variants_with_len,
-        wildcard_token_to_indices={
-            tok: tuple(idxs) for tok, idxs in wildcard_token_to_indices.items()
-        },
-        wildcard_literal_tokens_by_index=wildcard_literal_tokens_by_index,
-        wildcard_min_required_by_index=wildcard_min_required_by_index,
+        wildcard_variant_groups=tuple(
+            (
+                variants,
+                frozenset(token for variant, _, _ in variants for token in variant),
+                min(required for _, _, required in variants),
+                tuple(indices),
+            )
+            for variants, indices in wildcard_group_indices.items()
+        ),
         candidate_slot_tokens=tuple(candidate_slot_tokens),
-        slot_token_to_indices={tok: tuple(idxs) for tok, idxs in slot_token_to_indices.items()},
     )
 
 
@@ -112,20 +106,11 @@ class CanonicalIndex:
     _wildcard_variants_with_len: dict[int, tuple[tuple[frozenset[str], int, int], ...]] = field(
         init=False, repr=False, compare=False, default_factory=dict
     )
-    _wildcard_token_to_indices: dict[str, tuple[int, ...]] = field(
-        init=False, repr=False, compare=False, default_factory=dict
-    )
-    _wildcard_literal_tokens_by_index: dict[int, frozenset[str]] = field(
-        init=False, repr=False, compare=False, default_factory=dict
-    )
-    _wildcard_min_required_by_index: dict[int, int] = field(
-        init=False, repr=False, compare=False, default_factory=dict
+    _wildcard_variant_groups: tuple[WildcardVariantGroup, ...] = field(
+        init=False, repr=False, compare=False, default_factory=tuple
     )
     _candidate_slot_tokens: tuple[frozenset[str], ...] = field(
         init=False, repr=False, compare=False, default_factory=tuple
-    )
-    _slot_token_to_indices: dict[str, tuple[int, ...]] = field(
-        init=False, repr=False, compare=False, default_factory=dict
     )
 
     def __post_init__(self) -> None:
@@ -177,11 +162,8 @@ class CanonicalIndex:
             language=self.language,
             wildcard_always_passes=self._wildcard_always_passes,
             wildcard_variants_with_len=self._wildcard_variants_with_len,
-            wildcard_token_to_indices=self._wildcard_token_to_indices,
-            wildcard_literal_tokens_by_index=self._wildcard_literal_tokens_by_index,
-            wildcard_min_required_by_index=self._wildcard_min_required_by_index,
+            wildcard_variant_groups=self._wildcard_variant_groups,
             candidate_slot_tokens=self._candidate_slot_tokens,
-            slot_token_to_indices=self._slot_token_to_indices,
             slot_preferences=slot_preferences,
             intent_context=intent_context,
             min_confidence=min_confidence,
