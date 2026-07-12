@@ -201,7 +201,7 @@
       "language": "en",
       "expected_intent": "HassTurnOn",
       "expected_canonical": "turn on living room light",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "area": "living room",
         "domain": "light"
@@ -212,7 +212,7 @@
       "language": "en",
       "expected_intent": "HassTurnOff",
       "expected_canonical": "turn off bathroom fan",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "area": "bathroom",
         "domain": "fan"
@@ -223,7 +223,7 @@
       "language": "en",
       "expected_intent": "HassTurnOn",
       "expected_canonical": "open bedroom window",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "area": "bedroom",
         "device_class": "window",
@@ -245,7 +245,7 @@
       "language": "en",
       "expected_intent": "HassTurnOff",
       "expected_canonical": "turn off water heater",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "name": "water heater"
       }
@@ -255,7 +255,7 @@
       "language": "en",
       "expected_intent": "HassTurnOff",
       "expected_canonical": "close bedroom window",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "area": "bedroom",
         "device_class": "window",
@@ -267,7 +267,7 @@
       "language": "en",
       "expected_intent": "HassTurnOff",
       "expected_canonical": "turn off living room light",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "area": "living room",
         "domain": "light"
@@ -278,7 +278,7 @@
       "language": "en",
       "expected_intent": "HassTurnOn",
       "expected_canonical": "turn on bathroom fan",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "area": "bathroom",
         "domain": "fan"
@@ -289,7 +289,7 @@
       "language": "en",
       "expected_intent": "HassTurnOn",
       "expected_canonical": "turn on light",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "name": "light"
       }
@@ -299,7 +299,7 @@
       "language": "en",
       "expected_intent": "HassTurnOff",
       "expected_canonical": "turn off fan",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "name": "fan"
       }
@@ -771,7 +771,7 @@
       "language": "en",
       "expected_intent": "HassBroadcast",
       "expected_canonical": "announce dinner's ready now",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "message": "dinner's ready now"
       }
@@ -795,7 +795,7 @@
       "language": "en",
       "expected_intent": "HassClimateSetTemperature",
       "expected_canonical": "set temp to 0 degrees",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "temperature": "0.0",
         "area": "living room"
@@ -819,7 +819,7 @@
       "language": "en",
       "expected_intent": "HassDecreaseTimer",
       "expected_canonical": "remove 1 second from the timer",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "seconds": "1.0",
         "name": "the"
@@ -841,7 +841,7 @@
       "language": "en",
       "expected_intent": "HassFanSetSpeed",
       "expected_canonical": "fan 100%",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "name": "fan",
         "percentage": "100.0"
@@ -862,7 +862,7 @@
       "language": "en",
       "expected_intent": "HassIncreaseTimer",
       "expected_canonical": "add 1 second to my timer",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "seconds": "1.0",
         "name": "my"
@@ -884,7 +884,7 @@
       "language": "en",
       "expected_intent": "HassListAddItem",
       "expected_canonical": "add groceries to my shopping list",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "item": "groceries",
         "name": "shopping list"
@@ -944,7 +944,7 @@
       "language": "en",
       "expected_intent": "HassSetPosition",
       "expected_canonical": "set bedroom window to 0%",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "area": "bedroom",
         "device_class": "window",
@@ -968,7 +968,7 @@
       "language": "en",
       "expected_intent": "HassSetVolume",
       "expected_canonical": "set tv volume to 0 percent",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "name": "tv",
         "volume_level": "0.0"
@@ -1019,7 +1019,7 @@
       "language": "en",
       "expected_intent": "HassVacuumReturnToBase",
       "expected_canonical": "return the vacuum to base",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "name": "vacuum"
       }
@@ -1039,7 +1039,7 @@
       "language": "en",
       "expected_intent": "HassVacuumStart",
       "expected_canonical": "start the vacuum",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "name": "vacuum"
       }
@@ -1297,6 +1297,92 @@
       "category": "semantic_challenge",
       "expected_slots": {
         "name": "vacuum"
+      }
+    },
+    {
+      "query": "hey assistant turn on living room light",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on living room light",
+      "category": "extra_words",
+      "expected_slots": {
+        "area": "living room",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "hey assistant turn off bathroom fan",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off bathroom fan",
+      "category": "extra_words",
+      "expected_slots": {
+        "area": "bathroom",
+        "domain": "fan"
+      }
+    },
+    {
+      "query": "hey assistant close bedroom window",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "close bedroom window",
+      "category": "extra_words",
+      "expected_slots": {
+        "area": "bedroom",
+        "device_class": "window",
+        "domain": "cover"
+      }
+    },
+    {
+      "query": "hey assistant turn on water heater",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on water heater",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "water heater"
+      }
+    },
+    {
+      "query": "hey assistant turn off water heater",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off water heater",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "water heater"
+      }
+    },
+    {
+      "query": "hey assistant turn off living room light",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off living room light",
+      "category": "extra_words",
+      "expected_slots": {
+        "area": "living room",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "hey assistant turn on bathroom fan",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on bathroom fan",
+      "category": "extra_words",
+      "expected_slots": {
+        "area": "bathroom",
+        "domain": "fan"
+      }
+    },
+    {
+      "query": "hey assistant turn on light",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on light",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "light"
       }
     }
   ],

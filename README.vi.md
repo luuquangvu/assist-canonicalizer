@@ -137,7 +137,7 @@ flowchart TD
 
 ## Hiệu năng đo kiểm (Benchmark Performance)
 
-Công cụ xếp hạng được đo kiểm (benchmark) so với bộ nhận diện intent mặc định (HassIL) của Home Assistant bằng cách sử dụng các bộ dữ liệu thử nghiệm thực tế trên 5 ngôn ngữ (DE, EN, FR, NL, VI).
+Công cụ xếp hạng được đo kiểm (benchmark) bằng cách sử dụng các bộ dữ liệu thử nghiệm thực tế trên 5 ngôn ngữ (DE, EN, FR, NL, VI).
 
 ### Kết quả tổng quan
 
@@ -147,10 +147,10 @@ Công cụ xếp hạng được đo kiểm (benchmark) so với bộ nhận di�
 
 | Chế độ    | Đúng Intent/Slot | Nhận diện sai (Mismatch) | Dự phòng (Fallback) |
 | :-------- | ---------------: | -----------------------: | ------------------: |
-| `hassil`  |            48.3% |                     0.0% |               51.7% |
-| `lexical` |        **92.3%** |                 **1.4%** |            **6.3%** |
+| `hassil`  |            47.7% |                     0.0% |               52.3% |
+| `lexical` |        **92.7%** |                 **1.5%** |            **5.8%** |
 
-> Độ chính xác nhận diện Intent/Slot tăng từ **48.3% lên 92.3%**. Tổng tỷ lệ lỗi (nhận diện sai + chuyển sang dự phòng) giảm mạnh từ **51.7% xuống còn 7.7%**.
+> Độ chính xác nhận diện Intent/Slot tăng từ **47.7% lên 92.7%**. Tổng tỷ lệ lỗi (nhận diện sai + chuyển sang dự phòng) giảm mạnh từ **52.3% xuống còn 7.3%**.
 
 <!-- BENCHMARK_OVERALL_END -->
 
@@ -160,20 +160,22 @@ Công cụ xếp hạng được đo kiểm (benchmark) so với bộ nhận di�
 
 | Ngôn ngữ | Chế độ    | Đúng Intent/Slot | Nhận diện sai (Mismatch) | Dự phòng (Fallback) |
 | :------- | :-------- | ---------------: | -----------------------: | ------------------: |
-| EN       | `hassil`  |            56.2% |                     0.0% |               43.8% |
-| EN       | `lexical` |        **91.7%** |                 **2.5%** |            **5.8%** |
-| DE       | `hassil`  |            50.9% |                     0.0% |               49.1% |
-| DE       | `lexical` |        **94.6%** |                 **0.9%** |            **4.5%** |
-| FR       | `hassil`  |            51.4% |                     0.0% |               48.6% |
-| FR       | `lexical` |        **93.6%** |                 **0.9%** |            **5.5%** |
-| NL       | `hassil`  |            48.4% |                     0.0% |               51.6% |
-| NL       | `lexical` |        **89.3%** |                 **1.6%** |            **9.0%** |
-| VI       | `hassil`  |            30.8% |                     0.0% |               69.2% |
-| VI       | `lexical` |        **92.3%** |                 **1.1%** |            **6.6%** |
+| EN       | `hassil`  |            52.7% |                     0.0% |               47.3% |
+| EN       | `lexical` |        **92.2%** |                 **2.3%** |            **5.4%** |
+| DE       | `hassil`  |            48.4% |                     0.0% |               51.6% |
+| DE       | `lexical` |        **95.1%** |                 **0.8%** |            **4.1%** |
+| FR       | `hassil`  |            49.6% |                     0.0% |               50.4% |
+| FR       | `lexical` |        **93.3%** |                 **1.7%** |            **5.0%** |
+| NL       | `hassil`  |            48.8% |                     0.0% |               51.2% |
+| NL       | `lexical` |        **89.9%** |                 **1.6%** |            **8.5%** |
+| VI       | `hassil`  |            37.0% |                     0.0% |               63.0% |
+| VI       | `lexical` |        **93.0%** |                 **1.0%** |            **6.0%** |
 
 <!-- BENCHMARK_LANGS_END -->
 
 > [!NOTE]
+> Trong bài kiểm tra hiệu năng này, chúng ta giả định rằng khoảng một nửa số lần các ý định của chúng ta hoạt động với HassIL mặc định. Thực tế có thể khác do thói quen sử dụng của bạn.
+>
 > Độ chính xác, số lượng ứng viên và độ trễ có thể thay đổi tùy thuộc vào môi trường, bao gồm các yếu tố như số lượng thực thể, khu vực, tầng, phiên bản Home Assistant và phần cứng được sử dụng.
 
 Tất cả kết quả đo kiểm trên được tạo ra bằng các bộ dữ liệu kiểm thử thực tế tại thư mục [`tests/real_world/`](tests/real_world/). Báo cáo chi tiết có tại thư mục [`benchmark/`](benchmark/). Kết quả thực tế trên hệ thống của bạn sẽ khác biệt tùy thuộc cấu hình thiết bị Home Assistant cụ thể.
@@ -341,7 +343,7 @@ Assist Canonicalizer tự động lắng nghe các sự kiện thay đổi từ 
   - **[Prettier](https://github.com/prettier/prettier)**: Duy trì định dạng nhất quán cho các tệp tài liệu và cấu hình.
 
 > [!NOTE]
-> Mọi kết quả từ các công cụ AI tự động đều được quản trị viên dự án trực tiếp rà soát và xác nhận kỹ lưỡng, đảm bảo sự ổn định cao nhất cho người dùng.
+> Mọi kết quả từ các công cụ tự động đều được quản trị viên dự án trực tiếp rà soát và xác nhận kỹ lưỡng, đảm bảo sự ổn định cao nhất cho người dùng.
 
 ---
 

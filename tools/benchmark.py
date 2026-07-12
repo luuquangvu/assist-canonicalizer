@@ -63,6 +63,7 @@ BENCHMARK_DIR = "scratch/profile"
 BASELINE_DIR = "scratch/profile/baseline"
 RANK_STAGE_QUERY_SAMPLE_SIZE = 3
 RUNTIME_SLOW_QUERY_LIMIT = 10
+HASSIL_BEST_METADATA_KEY = "hass_custom_sentence"
 
 MODE_ACCURACY = "accuracy"
 MODE_PERFORMANCE = "performance"
@@ -675,17 +676,16 @@ def _validate_single_test_case(case: Any, lang: str, path: str, index: int) -> d
 def _validate_test_cases(test_cases: list[Any], lang: str, path: str) -> list[dict[str, Any]]:
     """Validate and return real-world test cases from one dataset."""
     validated: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str]] = set()
+    seen_queries: dict[str, int] = {}
     for index, case in enumerate(test_cases, start=1):
         validated_case = _validate_single_test_case(case, lang, path, index)
-        dedup_key = (
-            validated_case["query"],
-            validated_case["expected_intent"],
-            validated_case["expected_canonical"],
-        )
-        if dedup_key in seen:
-            continue
-        seen.add(dedup_key)
+        query_key = " ".join(validated_case["query"].casefold().split())
+        if previous_index := seen_queries.get(query_key):
+            raise ValueError(
+                f"{path}: test case #{index} duplicates query from case #{previous_index}: "
+                f"{validated_case['query']!r}"
+            )
+        seen_queries[query_key] = index
         validated.append(validated_case)
     return validated
 
@@ -752,6 +752,39 @@ def run_hassil_recognize_all(
             if intent_context:
                 kwargs["intent_context"] = dict(intent_context)
             return list(hassil.recognize_all(query, intents, **kwargs))
+        except hassil.errors.MissingListError as err:
+            match = _MISSING_LIST_RE.search(str(err))
+            if match is None:
+                raise
+            list_name = match.group(1)
+            if list_name in stubbed:
+                raise
+            stubbed.add(list_name)
+            working_lists[list_name] = hassil.TextSlotList(list_name, [])
+
+
+def run_hassil_recognize_best(
+    query: str,
+    intents: hassil.intents.Intents,
+    slot_lists: dict[str, hassil.intents.SlotList],
+    intent_context: Mapping[str, Any] | None = None,
+    language: str | None = None,
+) -> Any | None:
+    """Run HassIL with the same best-result preferences as Home Assistant."""
+    working_lists = dict(slot_lists)
+    stubbed: set[str] = set()
+    while True:
+        try:
+            kwargs: dict[str, Any] = {
+                "slot_lists": working_lists,
+                "best_metadata_key": HASSIL_BEST_METADATA_KEY,
+                "best_slot_name": "name",
+            }
+            if intent_context:
+                kwargs["intent_context"] = dict(intent_context)
+            if language:
+                kwargs["language"] = language
+            return hassil.recognize_best(query, intents, **kwargs)
         except hassil.errors.MissingListError as err:
             match = _MISSING_LIST_RE.search(str(err))
             if match is None:
@@ -910,7 +943,6 @@ class CategoryStats:
     intent_correct: int = 0
     slots_correct: int = 0
     intent_slots_correct: int = 0
-    top1_intent_slots_correct: int = 0
     fallback: int = 0
     latency_ms_total: float = 0.0
     drift: int = 0
@@ -945,12 +977,6 @@ class CategoryStats:
         return (self.intent_slots_correct / den * 100) if den else 0.0
 
     @property
-    def top1_intent_slot_accuracy(self) -> float:
-        """Return percentage of top-ranked candidates with correct intent+slots."""
-        den = self.total - self.drift
-        return (self.top1_intent_slots_correct / den * 100) if den else 0.0
-
-    @property
     def mismatch(self) -> int:
         """Return count of cases that are not fallback but still wrong."""
         return self.total - self.intent_slots_correct - self.fallback - self.drift
@@ -974,7 +1000,6 @@ class CategoryStats:
         self.intent_correct += other.intent_correct
         self.slots_correct += other.slots_correct
         self.intent_slots_correct += other.intent_slots_correct
-        self.top1_intent_slots_correct += other.top1_intent_slots_correct
         self.fallback += other.fallback
         self.latency_ms_total += other.latency_ms_total
         self.drift += other.drift
@@ -987,7 +1012,6 @@ class CategoryStats:
             "intent_correct": self.intent_correct,
             "slots_correct": self.slots_correct,
             "intent_slots_correct": self.intent_slots_correct,
-            "top1_intent_slots_correct": self.top1_intent_slots_correct,
             "fallback": self.fallback,
             "drift": self.drift,
             "mismatch": self.mismatch,
@@ -995,7 +1019,6 @@ class CategoryStats:
             "intent_accuracy": self.intent_accuracy,
             "slots_accuracy": self.slots_accuracy,
             "intent_slot_accuracy": self.intent_slot_accuracy,
-            "top1_intent_slot_accuracy": self.top1_intent_slot_accuracy,
             "mismatch_rate": self.mismatch_rate,
             "fallback_rate": self.fallback_rate,
             "average_latency_ms": self.average_latency_ms,
@@ -1288,44 +1311,6 @@ def _record_case_counters(
         stats.intent_slots_correct += 1
 
 
-def _record_top1_case_counter(
-    stats: CategoryStats,
-    ranked: tuple[RankedCandidate, ...] | None,
-    selected: RankedCandidate | None,
-    selected_slots: Mapping[str, Any],
-    expected_intent: str,
-    expected_slots: Sequence[Mapping[str, Any]],
-    *,
-    query: str | None,
-    language: str | None,
-    hassil_intents: Any | None,
-    hassil_slot_lists: dict[str, Any] | None,
-    intent_context: Mapping[str, Any] | None,
-) -> None:
-    """Record whether rank position 1 would have matched intent+slots."""
-    if not ranked:
-        return
-    top = ranked[0]
-    top_slots = (
-        dict(selected_slots)
-        if selected is top
-        else _case_actual_slots(
-            top,
-            query,
-            hassil_intents,
-            hassil_slot_lists,
-            intent_context,
-        )
-    )
-    lang = language or top.candidate.language
-    if _intents_match(top.candidate.intent_name, expected_intent) and _slots_match_any(
-        top_slots,
-        expected_slots,
-        language=lang,
-    ):
-        stats.top1_intent_slots_correct += 1
-
-
 def _case_failure_reason(canonical_ok: bool, intent_ok: bool, slots_ok: bool) -> str:
     """Return the joined mismatch reason labels for a completed case."""
     reasons = []
@@ -1364,19 +1349,6 @@ def _record_case_result(
     )
     if is_drift:
         return False, "drift", actual_slots, selected
-    _record_top1_case_counter(
-        stats,
-        ranked,
-        selected,
-        actual_slots,
-        expected_intent,
-        expected_slots,
-        query=query,
-        language=language,
-        hassil_intents=hassil_intents,
-        hassil_slot_lists=hassil_slot_lists,
-        intent_context=intent_context,
-    )
     if selected is None:
         stats.fallback += 1
         return False, "fallback", actual_slots, selected
@@ -1432,7 +1404,10 @@ def _case_row(
     canonical_ok = actual_text == case["expected_canonical"]
     intent_ok = actual_intent == case["expected_intent"]
     slots_ok = _slots_match_any(actual_slots, expected_slots, language=lang)
-    if mode_name == "hassil":
+    evaluation_path = (
+        selected.candidate.metadata.get("evaluation_path") if selected is not None else None
+    ) or ("hassil_baseline" if mode_name == "hassil" else "ranking")
+    if mode_name == "hassil" or evaluation_path == "hassil_shortcut":
         final_score = None
         top_score = None
         competing_score = None
@@ -1447,6 +1422,7 @@ def _case_row(
     return {
         "language": lang,
         "mode": mode_name,
+        "evaluation_path": evaluation_path,
         "category": case["category"],
         "query": case["query"],
         "context": dict(case.get("context", {})),
@@ -1624,13 +1600,12 @@ def _summary_payload(results: dict[str, dict[str, CategoryStats]]) -> dict[str, 
 def _print_summary_table(title: str, results: dict[str, dict[str, CategoryStats]]) -> None:
     """Print aggregate metrics for one language or the global run."""
     print(f"\n{title}")
-    print("-" * 186)
+    print("-" * 166)
     headers = (
         f"{'Category':<24} | "
         f"{'Total':<5} | "
         f"{'Hass Acc':<17} | "
         f"{'Lex Acc':<17} | "
-        f"{'Lex Top-1':<17} | "
         f"{'Hass Mis':<17} | "
         f"{'Lex Mis':<17} | "
         f"{'Hass Fall':<17} | "
@@ -1638,7 +1613,7 @@ def _print_summary_table(title: str, results: dict[str, dict[str, CategoryStats]
         f"{'Lex ms':<8}"
     )
     print(headers)
-    print("-" * 186)
+    print("-" * 166)
     categories = sorted(results["lexical"].keys())
     for category in categories:
         hass_stats = results["hassil"].get(category, CategoryStats())
@@ -1649,7 +1624,6 @@ def _print_summary_table(title: str, results: dict[str, dict[str, CategoryStats]
             f"{category:<24} | {lex_stats.total:<5} | "
             f"{_metric_str(hass_stats.intent_slots_correct, hass_slots_den):<17} | "
             f"{_metric_str(lex_stats.intent_slots_correct, lex_slots_den):<17} | "
-            f"{_metric_str(lex_stats.top1_intent_slots_correct, lex_slots_den):<17} | "
             f"{_metric_str(hass_stats.mismatch, hass_slots_den):<17} | "
             f"{_metric_str(lex_stats.mismatch, lex_slots_den):<17} | "
             f"{_metric_str(hass_stats.fallback, hass_slots_den):<17} | "
@@ -1660,19 +1634,18 @@ def _print_summary_table(title: str, results: dict[str, dict[str, CategoryStats]
     lex_total = _aggregate_mode_stats(results, "lexical")
     hass_overall_den = hass_total.total - hass_total.drift
     lex_overall_den = lex_total.total - lex_total.drift
-    print("-" * 186)
+    print("-" * 166)
     print(
         f"{'Overall':<24} | {lex_total.total:<5} | "
         f"{_metric_str(hass_total.intent_slots_correct, hass_overall_den):<17} | "
         f"{_metric_str(lex_total.intent_slots_correct, lex_overall_den):<17} | "
-        f"{_metric_str(lex_total.top1_intent_slots_correct, lex_overall_den):<17} | "
         f"{_metric_str(hass_total.mismatch, hass_overall_den):<17} | "
         f"{_metric_str(lex_total.mismatch, lex_overall_den):<17} | "
         f"{_metric_str(hass_total.fallback, hass_overall_den):<17} | "
         f"{_metric_str(lex_total.fallback, lex_overall_den):<17} | "
         f"{lex_total.average_latency_ms:<8.1f}"
     )
-    print("-" * 186)
+    print("-" * 166)
 
 
 def _print_ablation_table(title: str, ablations: dict[str, dict[str, CategoryStats]]) -> None:
@@ -1752,7 +1725,6 @@ def _markdown_metric(stats: Mapping[str, Any]) -> str:
     """Return a compact Markdown metric string."""
     return (
         f"{stats['intent_slot_accuracy']:.1f}% intent/slot, "
-        f"{stats.get('top1_intent_slot_accuracy', 0):.1f}% top-1, "
         f"{stats['canonical_accuracy']:.1f}% canonical, "
         f"{stats['mismatch_rate']:.1f}% mismatch, "
         f"{stats['fallback_rate']:.1f}% fallback"
@@ -1770,7 +1742,6 @@ class _MarkdownReportRow:
         "intent_slot_s",
         "lang",
         "mismatch_s",
-        "top1_s",
         "total_s",
     )
 
@@ -1780,7 +1751,6 @@ class _MarkdownReportRow:
         self.backticked_mode = f"`{mode_name}`"
         self.total_s = str(int(stats.get("total", 0)))
         self.intent_slot_s = f"{stats.get('intent_slot_accuracy', 0):.1f}%"
-        self.top1_s = f"{stats.get('top1_intent_slot_accuracy', 0):.1f}%"
         self.canonical_s = f"{stats.get('canonical_accuracy', 0):.1f}%"
         self.mismatch_s = f"{stats.get('mismatch_rate', 0):.1f}%"
         self.fallback_s = f"{stats.get('fallback_rate', 0):.1f}%"
@@ -1814,11 +1784,10 @@ def _markdown_data_row(row: _MarkdownReportRow, col_widths: list[int]) -> str:
         f" {row.backticked_mode:<{col_widths[0]}} ",
         f" {row.total_s:>{col_widths[1]}} ",
         f" {row.intent_slot_s:>{col_widths[2]}} ",
-        f" {row.top1_s:>{col_widths[3]}} ",
-        f" {row.canonical_s:>{col_widths[4]}} ",
-        f" {row.mismatch_s:>{col_widths[5]}} ",
-        f" {row.fallback_s:>{col_widths[6]}} ",
-        f" {row.avg_ms_s:>{col_widths[7]}} ",
+        f" {row.canonical_s:>{col_widths[3]}} ",
+        f" {row.mismatch_s:>{col_widths[4]}} ",
+        f" {row.fallback_s:>{col_widths[5]}} ",
+        f" {row.avg_ms_s:>{col_widths[6]}} ",
     )
     return "|" + "|".join(cols) + "|"
 
@@ -1829,13 +1798,12 @@ def _markdown_report(report: Mapping[str, Any]) -> str:
         "Mode",
         "Total",
         "Intent/Slot",
-        "Top-1",
         "Canonical",
         "Mismatch",
         "Fallback",
         "Avg ms",
     )
-    _col_aligns = ("<", ">", ">", ">", ">", ">", ">", ">")
+    _col_aligns = ("<", ">", ">", ">", ">", ">", ">")
     _col_widths: list[int] = [len(h) for h in _headers]
 
     _all_rows: list[_MarkdownReportRow] = []
@@ -1850,7 +1818,6 @@ def _markdown_report(report: Mapping[str, Any]) -> str:
                 row.backticked_mode,
                 row.total_s,
                 row.intent_slot_s,
-                row.top1_s,
                 row.canonical_s,
                 row.mismatch_s,
                 row.fallback_s,
@@ -2004,7 +1971,6 @@ def _text_summary_table(title: str, payload: Mapping[str, Any]) -> list[str]:
         "Total",
         "Hass Acc",
         "Lex Acc",
-        "Lex Top-1",
         "Hass Mis",
         "Lex Mis",
         "Hass Fall",
@@ -2026,7 +1992,6 @@ def _text_summary_table(title: str, payload: Mapping[str, Any]) -> list[str]:
                 str(lex_total),
                 _metric_str(hass_cat.get("intent_slots_correct", 0), hass_cat.get("total", 0)),
                 _metric_str(lex_cat.get("intent_slots_correct", 0), lex_cat.get("total", 0)),
-                _metric_str(lex_cat.get("top1_intent_slots_correct", 0), lex_cat.get("total", 0)),
                 _metric_str(hass_cat.get("mismatch", 0), hass_cat.get("total", 0)),
                 _metric_str(lex_cat.get("mismatch", 0), lex_cat.get("total", 0)),
                 _metric_str(hass_cat.get("fallback", 0), hass_cat.get("total", 0)),
@@ -2042,10 +2007,6 @@ def _text_summary_table(title: str, payload: Mapping[str, Any]) -> list[str]:
         str(lex_overall.get("total", 0)),
         _metric_str(hass_overall.get("intent_slots_correct", 0), hass_overall.get("total", 0)),
         _metric_str(lex_overall.get("intent_slots_correct", 0), lex_overall.get("total", 0)),
-        _metric_str(
-            lex_overall.get("top1_intent_slots_correct", 0),
-            lex_overall.get("total", 0),
-        ),
         _metric_str(hass_overall.get("mismatch", 0), hass_overall.get("total", 0)),
         _metric_str(lex_overall.get("mismatch", 0), lex_overall.get("total", 0)),
         _metric_str(hass_overall.get("fallback", 0), hass_overall.get("total", 0)),
@@ -2265,8 +2226,15 @@ def _evaluate_mode_candidates(
     expected_slots: Sequence[Mapping[str, Any]],
     intent_context: Mapping[str, Any] | None = None,
 ) -> tuple[RankedCandidate, ...]:
-    """Run candidate generation and ranking for the given mode."""
-    if mode_name != "hassil":
+    """Evaluate HassIL alone or the production shortcut-then-ranking flow."""
+    res = run_hassil_recognize_best(
+        query,
+        hassil_intents,
+        hassil_slot_lists,
+        intent_context,
+        lang,
+    )
+    if mode_name == "lexical" and res is None:
         return runtime.rank_with_dynamic_candidates(
             lang,
             index,
@@ -2274,22 +2242,6 @@ def _evaluate_mode_candidates(
             slot_preferences=benchmark_slot_prefs,
             intent_context=intent_context,
         )
-    res_list = run_hassil_recognize_all(
-        query,
-        hassil_intents,
-        hassil_slot_lists,
-        intent_context,
-    )
-    res = None
-    for r in res_list:
-        actual_slots = {name: entity.value for name, entity in r.entities.items()}
-        if _intents_match(r.intent.name, expected_intent) and _slots_match_any(
-            actual_slots, expected_slots, language=lang
-        ):
-            res = r
-            break
-    if res is None and res_list:
-        res = res_list[0]
     if res is not None:
         actual_slots = {name: entity.value for name, entity in res.entities.items()}
         is_intent_ok = _intents_match(res.intent.name, expected_intent)
@@ -2300,7 +2252,12 @@ def _evaluate_mode_candidates(
         candidate = Candidate(
             text=canonical_text,
             intent_name=res.intent.name,
-            metadata={"slots": orjson.dumps(actual_slots).decode("utf-8")},
+            metadata={
+                "slots": orjson.dumps(actual_slots).decode("utf-8"),
+                "evaluation_path": (
+                    "hassil_baseline" if mode_name == "hassil" else "hassil_shortcut"
+                ),
+            },
         )
         scores = _ScoreBreakdown(
             rapidfuzz_score=1.0,
@@ -2522,9 +2479,22 @@ def _evaluate_language_mode(
         all_case_rows.append(result.row)
 
         if mode_name == "lexical" and not skip_ablations:
+            ablation_ranked = result.ranked
+            used_hassil_shortcut = (
+                result.selected is not None
+                and result.selected.candidate.metadata.get("evaluation_path") == "hassil_shortcut"
+            )
+            if used_hassil_shortcut:
+                ablation_ranked = context.runtime.rank_with_dynamic_candidates(
+                    context.language,
+                    context.index,
+                    case["query"],
+                    slot_preferences=benchmark_slot_prefs,
+                    intent_context=case.get("context"),
+                )
             _record_ablations(
                 ablations,
-                result.ranked,
+                ablation_ranked,
                 case,
                 result.expected_slots,
                 language=context.language,
@@ -5436,7 +5406,7 @@ def main() -> None:
         "--skip-hassil",
         action="store_true",
         default=False,
-        help="Skip HassIL baseline evaluation (lexical mode only)",
+        help="Skip the standalone HassIL baseline (lexical mode still uses its shortcut)",
     )
     parser.add_argument(
         "--skip-ablations",
@@ -5474,13 +5444,13 @@ def main() -> None:
         "--min-intent-slot-accuracy",
         type=float,
         default=None,
-        help="Fail when lexical intent/slot accuracy falls below this percentage",
+        help="Fail when production-flow intent/slot accuracy falls below this percentage",
     )
     parser.add_argument(
         "--max-fallback-rate",
         type=float,
         default=None,
-        help="Fail when lexical fallback rate exceeds this percentage",
+        help="Fail when production-flow fallback rate exceeds this percentage",
     )
 
     # Performance mode stats

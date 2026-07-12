@@ -173,7 +173,7 @@
       "language": "de",
       "expected_intent": "HassTurnOn",
       "expected_canonical": "schalte das wohnzimmerlicht ein",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "area": "wohnzimmer",
         "domain": "light"
@@ -184,7 +184,7 @@
       "language": "de",
       "expected_intent": "HassTurnOn",
       "expected_canonical": "schalte den wasserkocher ein",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "name": "wasserkocher"
       }
@@ -194,7 +194,7 @@
       "language": "de",
       "expected_intent": "HassTurnOff",
       "expected_canonical": "schalte das licht aus",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "name": "licht"
       }
@@ -204,7 +204,7 @@
       "language": "de",
       "expected_intent": "HassTurnOff",
       "expected_canonical": "schalte das licht aus",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "name": "licht"
       }
@@ -214,7 +214,7 @@
       "language": "de",
       "expected_intent": "HassVacuumStart",
       "expected_canonical": "starte den staubsauger",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "name": "staubsauger"
       }
@@ -906,7 +906,7 @@
       "language": "de",
       "expected_intent": "HassTurnOn",
       "expected_canonical": "schalt küchenlicht ein",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "name": "küchenlicht"
       }
@@ -946,7 +946,7 @@
       "language": "de",
       "expected_intent": "HassTurnOn",
       "expected_canonical": "schalte das schlafzimmerlicht ein",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "name": "schlafzimmerlicht"
       }
@@ -967,7 +967,7 @@
       "language": "de",
       "expected_intent": "HassTurnOff",
       "expected_canonical": "schalte den wasserkocher aus",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "name": "wasserkocher"
       }
@@ -1159,6 +1159,113 @@
       "category": "semantic_challenge",
       "expected_slots": {
         "name": "staubsauger"
+      }
+    },
+    {
+      "query": "könntest du bitte das wohnzimmerlicht ausschalten",
+      "language": "de",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "schalte das wohnzimmerlicht aus",
+      "category": "supported_filler",
+      "expected_slots": {
+        "area": "wohnzimmer",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "würdest du bitte den badezimmerlüfter einschalten",
+      "language": "de",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "schalte den badezimmerlüfter ein",
+      "category": "supported_filler",
+      "expected_slots": {
+        "area": "badezimmer",
+        "domain": "fan"
+      }
+    },
+    {
+      "query": "hey schalte das wohnzimmerlicht ein",
+      "language": "de",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "schalte das wohnzimmerlicht ein",
+      "category": "extra_words",
+      "expected_slots": {
+        "area": "wohnzimmer",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "hey schalte den wasserkocher ein",
+      "language": "de",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "schalte den wasserkocher ein",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "wasserkocher"
+      }
+    },
+    {
+      "query": "hey schließe das schlafzimmerfenster",
+      "language": "de",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "schließe das schlafzimmerfenster",
+      "category": "extra_words",
+      "expected_slots": {
+        "area": "schlafzimmer",
+        "device_class": "window",
+        "domain": "cover"
+      }
+    },
+    {
+      "query": "hey schalte das licht aus",
+      "language": "de",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "schalte das licht aus",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "licht"
+      }
+    },
+    {
+      "query": "hey schalte den lüfter aus",
+      "language": "de",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "schalte den lüfter aus",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "lüfter"
+      }
+    },
+    {
+      "query": "hey starte staubsauger",
+      "language": "de",
+      "expected_intent": "HassVacuumStart",
+      "expected_canonical": "starte staubsauger",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "staubsauger"
+      }
+    },
+    {
+      "query": "hey schalte das wohnzimmerlicht aus",
+      "language": "de",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "schalte das wohnzimmerlicht aus",
+      "category": "extra_words",
+      "expected_slots": {
+        "area": "wohnzimmer",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "hey schalte den badezimmerlüfter ein",
+      "language": "de",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "schalte den badezimmerlüfter ein",
+      "category": "extra_words",
+      "expected_slots": {
+        "area": "badezimmer",
+        "domain": "fan"
       }
     }
   ],

@@ -173,7 +173,7 @@
       "language": "nl",
       "expected_intent": "HassTurnOff",
       "expected_canonical": "de woonkamerlamp uitzetten",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "area": "woonkamer",
         "domain": "light"
@@ -184,7 +184,7 @@
       "language": "nl",
       "expected_intent": "HassTurnOn",
       "expected_canonical": "keukenlamp aan",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "area": "keuken",
         "domain": "light"
@@ -892,7 +892,7 @@
       "language": "nl",
       "expected_intent": "HassTurnOn",
       "expected_canonical": "keuken lamp aan",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "area": "keuken",
         "domain": "light"
@@ -931,22 +931,11 @@
       "category": "extra_words"
     },
     {
-      "query": "kun je de woonkamerlamp uitzetten",
-      "language": "nl",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "de woonkamerlamp uitzetten",
-      "category": "extra_words",
-      "expected_slots": {
-        "area": "woonkamer",
-        "domain": "light"
-      }
-    },
-    {
       "query": "wil je de woonkamerlamp uitzetten",
       "language": "nl",
       "expected_intent": "HassTurnOff",
       "expected_canonical": "de woonkamerlamp uitzetten",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "area": "woonkamer",
         "domain": "light"
@@ -974,29 +963,11 @@
       "category": "complex_distortion"
     },
     {
-      "query": "welke dag is et",
-      "language": "nl",
-      "expected_intent": "HassGetCurrentDate",
-      "expected_canonical": "welke dag is het",
-      "category": "complex_distortion"
-    },
-    {
       "query": "welke dag is hhet",
       "language": "nl",
       "expected_intent": "HassGetCurrentDate",
       "expected_canonical": "welke dag is het",
       "category": "complex_distortion"
-    },
-    {
-      "query": "keukken lamp aan",
-      "language": "nl",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "keuken lamp aan",
-      "category": "complex_distortion",
-      "expected_slots": {
-        "area": "keuken",
-        "domain": "light"
-      }
     },
     {
       "query": "kuken lamp aan",
@@ -1069,7 +1040,7 @@
       "language": "nl",
       "expected_intent": "HassTurnOn",
       "expected_canonical": "slaapkamerlamp aan",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "area": "slaapkamer",
         "domain": "light"
@@ -1080,7 +1051,7 @@
       "language": "nl",
       "expected_intent": "HassTurnOn",
       "expected_canonical": "slaapkamerlamp aan",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "area": "slaapkamer",
         "domain": "light"
@@ -1241,6 +1212,81 @@
       "expected_intent": "HassMediaPause",
       "expected_canonical": "televisie pauze",
       "category": "semantic_challenge",
+      "expected_slots": {
+        "name": "televisie"
+      }
+    },
+    {
+      "query": "alsjeblieft keuken lamp aan",
+      "language": "nl",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "keuken lamp aan",
+      "category": "supported_filler",
+      "expected_slots": {
+        "area": "keuken",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "kun je badkamerventilator uitzetten",
+      "language": "nl",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "badkamerventilator uitzetten",
+      "category": "supported_filler",
+      "expected_slots": {
+        "area": "badkamer",
+        "domain": "fan"
+      }
+    },
+    {
+      "query": "wil je televisie uitzetten",
+      "language": "nl",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "televisie uit",
+      "category": "supported_filler",
+      "expected_slots": {
+        "name": "televisie"
+      }
+    },
+    {
+      "query": "graag de keukenlamp uitzetten",
+      "language": "nl",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "de keukenlamp uitzetten",
+      "category": "supported_filler",
+      "expected_slots": {
+        "area": "keuken",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "hey assistent keuken lamp aan",
+      "language": "nl",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "keuken lamp aan",
+      "category": "extra_words",
+      "expected_slots": {
+        "area": "keuken",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "hey assistent woonkamer lamp aan",
+      "language": "nl",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "woonkamer lamp aan",
+      "category": "extra_words",
+      "expected_slots": {
+        "area": "woonkamer",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "hey assistent televisie uit",
+      "language": "nl",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "televisie uit",
+      "category": "extra_words",
       "expected_slots": {
         "name": "televisie"
       }

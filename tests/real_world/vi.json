@@ -225,7 +225,7 @@
       "language": "vi",
       "expected_intent": "HassTurnOff",
       "expected_canonical": "tắt quạt phòng tắm đi",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "name": "quạt",
         "area": "phòng tắm"
@@ -587,7 +587,7 @@
       "language": "vi",
       "expected_intent": "HassClimateSetTemperature",
       "expected_canonical": "đặt nhiệt thành 0độ",
-      "category": "extra_words",
+      "category": "intent_coverage",
       "expected_slots": {
         "temperature": "0.0"
       }
@@ -947,6 +947,100 @@
       "category": "semantic_challenge",
       "expected_slots": {
         "name": "bình nóng lạnh"
+      }
+    },
+    {
+      "query": "làm ơn bật đèn phòng khách",
+      "language": "vi",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "bật đèn phòng khách",
+      "category": "supported_filler",
+      "expected_slots": {
+        "area": "phòng khách",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "vui lòng tắt quạt phòng tắm",
+      "language": "vi",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "tắt quạt phòng tắm",
+      "category": "supported_filler",
+      "expected_slots": {
+        "name": "quạt",
+        "area": "phòng tắm"
+      }
+    },
+    {
+      "query": "xin đóng cửa sổ phòng ngủ",
+      "language": "vi",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "đóng cửa sổ phòng ngủ",
+      "category": "supported_filler",
+      "expected_slots": {
+        "name": "cửa sổ phòng ngủ"
+      }
+    },
+    {
+      "query": "hãy tắt bình nóng lạnh",
+      "language": "vi",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "tắt bình nóng lạnh",
+      "category": "supported_filler",
+      "expected_slots": {
+        "name": "bình nóng lạnh"
+      }
+    },
+    {
+      "query": "bạn có thể bật đèn",
+      "language": "vi",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "bật đèn",
+      "category": "supported_filler",
+      "expected_slots": {
+        "name": "đèn"
+      }
+    },
+    {
+      "query": "xin hãy tắt quạt",
+      "language": "vi",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "tắt quạt",
+      "category": "supported_filler",
+      "expected_slots": {
+        "name": "quạt"
+      }
+    },
+    {
+      "query": "làm ơn bật bình nóng lạnh",
+      "language": "vi",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "bật bình nóng lạnh",
+      "category": "supported_filler",
+      "expected_slots": {
+        "name": "bình nóng lạnh"
+      }
+    },
+    {
+      "query": "vui lòng tắt đèn phòng khách",
+      "language": "vi",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "tắt đèn phòng khách",
+      "category": "supported_filler",
+      "expected_slots": {
+        "name": "đèn",
+        "area": "phòng khách"
+      }
+    },
+    {
+      "query": "hãy bật đèn phòng ngủ",
+      "language": "vi",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "bật đèn phòng ngủ",
+      "category": "supported_filler",
+      "expected_slots": {
+        "area": "phòng ngủ",
+        "domain": "light"
       }
     }
   ],
