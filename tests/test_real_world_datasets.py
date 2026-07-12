@@ -68,6 +68,7 @@ def _discover_languages() -> tuple[str, ...]:
 HARD_CATEGORIES = frozenset(
     {
         "complex_distortion",
+        "extra_words",
         "missing_words",
         "semantic_challenge",
         "spelling_mistake",
@@ -78,8 +79,10 @@ HASSIL_ALIGN_CATEGORIES = frozenset(
     {
         "exact_match",
         "intent_coverage",
+        "supported_filler",
     }
 )
+WORD_ADDITION_CATEGORIES = frozenset({"extra_words", "supported_filler"})
 REQUIRED_CATEGORY_MINIMUMS = {
     "complex_distortion": 10,
     "exact_match": 10,
@@ -88,8 +91,10 @@ REQUIRED_CATEGORY_MINIMUMS = {
     "missing_words": 10,
     "semantic_challenge": 10,
     "spelling_mistake": 10,
+    "supported_filler": 10,
     "synonym_paraphrase": 10,
 }
+KNOWN_CATEGORIES = frozenset(REQUIRED_CATEGORY_MINIMUMS)
 
 
 def _candidate_slot_keys(candidate: Candidate) -> frozenset[str]:
@@ -250,7 +255,15 @@ def test_real_world_categories_are_balanced(dataset_context: DatasetContext) -> 
         for category, minimum in REQUIRED_CATEGORY_MINIMUMS.items()
         if counts.get(category, 0) < minimum
     }
+    unexpected = sorted(set(counts) - KNOWN_CATEGORIES)
+    assert not unexpected, f"{dataset_context.language}: unknown categories: {unexpected}"
     assert not missing, f"{dataset_context.language}: category counts too low: {missing}"
+
+
+def test_real_world_category_contracts_cover_every_category() -> None:
+    """Require every dataset category to declare one HassIL support contract."""
+    assert HARD_CATEGORIES.isdisjoint(HASSIL_ALIGN_CATEGORIES)
+    assert HARD_CATEGORIES | HASSIL_ALIGN_CATEGORIES == KNOWN_CATEGORIES
 
 
 @pytest.mark.current_intents
@@ -323,14 +336,16 @@ def test_real_world_hard_categories_are_not_direct_hassil_matches(
         exact_static = (
             benchmark.normalize_text(case["query"]) in dataset_context.static_normalized_texts
         )
-        hassil_ok = _recognizes_expected(dataset_context, case)
-        if exact_static or hassil_ok:
+        direct_hassil_match = bool(
+            _hassil_results(dataset_context, case["query"], case.get("context"))
+        )
+        if exact_static or direct_hassil_match:
             failures.append(
                 {
                     "query": case["query"],
                     "category": case["category"],
                     "exact_static": exact_static,
-                    "hassil_ok": hassil_ok,
+                    "direct_hassil_match": direct_hassil_match,
                 }
             )
     if failures:
@@ -373,17 +388,50 @@ def test_real_world_registry_has_domain_scoped_slots(
 
 
 @pytest.mark.current_intents
-def test_real_world_extra_words_are_not_exact_candidates(
+def test_real_world_word_addition_categories_align_with_hassil_support(
     dataset_context: DatasetContext,
 ) -> None:
-    """Assert extra_words cases contain text beyond a static canonical command."""
-    failures = []
+    """Separate HassIL-supported filler from genuinely unsupported extra words."""
+    failures: list[dict[str, Any]] = []
     for case in dataset_context.cases:
-        if case["category"] != "extra_words":
+        category = case["category"]
+        if category not in WORD_ADDITION_CATEGORIES:
             continue
-        if benchmark.normalize_text(case["query"]) in dataset_context.static_normalized_texts:
-            failures.append(case["query"])
-    assert not failures, f"{dataset_context.language}: extra_words exact candidates: {failures}"
+        query = case["query"]
+        canonical = case["expected_canonical"]
+        has_added_text = benchmark.normalize_text(query) != benchmark.normalize_text(canonical)
+        hassil_supports = _recognizes_expected_hassil_outcome(dataset_context, case)
+        expected_hassil_support = category == "supported_filler"
+        if not has_added_text or hassil_supports != expected_hassil_support:
+            failures.append(
+                {
+                    "query": query,
+                    "category": category,
+                    "has_added_text": has_added_text,
+                    "hassil_supports": hassil_supports,
+                    "expected_hassil_support": expected_hassil_support,
+                }
+            )
+    assert not failures, f"{dataset_context.language}: word-addition category mismatch: {failures}"
+
+
+@pytest.mark.current_intents
+def test_real_world_hassil_align_categories_match_production_result(
+    dataset_context: DatasetContext,
+) -> None:
+    """Require aligned categories to match Home Assistant's selected HassIL result."""
+    failures = [
+        {
+            "query": case["query"],
+            "category": case["category"],
+            "expected_intent": case["expected_intent"],
+            "expected_slots": case.get("expected_slots", {}),
+        }
+        for case in dataset_context.cases
+        if case["category"] in HASSIL_ALIGN_CATEGORIES
+        and not _recognizes_expected_hassil_outcome(dataset_context, case)
+    ]
+    assert not failures, f"{dataset_context.language}: HassIL-aligned category mismatch: {failures}"
 
 
 @pytest.mark.current_intents
@@ -532,21 +580,6 @@ def test_real_world_expected_slots_align_with_hassil(
     )
 
 
-def _recognizes_expected(context: DatasetContext, case: Mapping[str, Any]) -> bool:
-    """Return whether HassIL directly recognizes a case as the expected result."""
-    results = _hassil_results(context, case["query"], case.get("context"))
-    expected_slots = case.get("expected_slots", {})
-    return any(
-        benchmark._intents_match(result.intent.name, case["expected_intent"])
-        and benchmark._slots_match(
-            {name: entity.value for name, entity in result.entities.items()},
-            expected_slots,
-            language=context.language,
-        )
-        for result in results
-    )
-
-
 def _hassil_cache_key(
     query: str,
     intent_context: Mapping[str, Any] | None = None,
@@ -556,6 +589,42 @@ def _hassil_cache_key(
         tuple(sorted(intent_context.items(), key=lambda item: item[0])) if intent_context else ()
     )
     return query, context_items
+
+
+def _recognizes_expected_hassil_outcome(
+    context: DatasetContext,
+    case: Mapping[str, Any],
+) -> bool:
+    """Return whether HassIL recognizes a case like its clean canonical command."""
+    intent_context = case.get("context")
+    expected_intent = case["expected_intent"]
+    canonical_results = _hassil_results(
+        context,
+        case["expected_canonical"],
+        intent_context,
+    )
+    expected_slots = [
+        {name: entity.value for name, entity in result.entities.items()}
+        for result in canonical_results
+        if benchmark._intents_match(result.intent.name, expected_intent)
+    ] or [case.get("expected_slots", {})]
+
+    result = benchmark.run_hassil_recognize_best(
+        case["query"],
+        context.intents,
+        context.slot_lists,
+        intent_context,
+        context.language,
+    )
+    return bool(
+        result is not None
+        and benchmark._intents_match(result.intent.name, expected_intent)
+        and benchmark._slots_match_any(
+            {name: entity.value for name, entity in result.entities.items()},
+            expected_slots,
+            language=context.language,
+        )
+    )
 
 
 def _hassil_results(
@@ -769,6 +838,21 @@ def test_benchmark_validate_test_cases_rejects_invalid_context() -> None:
         benchmark._validate_test_cases(cases, "en", "test.json")
 
 
+def test_benchmark_validate_test_cases_rejects_duplicate_commands() -> None:
+    """Dataset validation must expose duplicate commands instead of hiding them."""
+    base_case = {
+        "query": "turn on the light",
+        "expected_intent": "HassTurnOn",
+        "expected_canonical": "turn on light",
+        "expected_slots": {"name": "light"},
+        "category": "supported_filler",
+    }
+    cases = [base_case, {**base_case, "query": "  TURN on the light  "}]
+
+    with pytest.raises(ValueError, match=r"case #2 duplicates query from case #1"):
+        benchmark._validate_test_cases(cases, "en", "test.json")
+
+
 def test_benchmark_run_hassil_recognize_all_passes_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -789,6 +873,104 @@ def test_benchmark_run_hassil_recognize_all_passes_context(
     )
 
     assert captured == [{"area": "kitchen"}]
+
+
+def test_benchmark_run_hassil_recognize_best_matches_home_assistant_preferences(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Best-result recognition should use Home Assistant's strict-match preferences."""
+    captured: dict[str, Any] = {}
+    expected = object()
+
+    def fake_recognize_best(*_args: Any, **kwargs: Any) -> object:
+        captured.update(kwargs)
+        return expected
+
+    monkeypatch.setattr(benchmark.hassil, "recognize_best", fake_recognize_best)
+
+    result = benchmark.run_hassil_recognize_best(
+        "turn on light",
+        cast(hassil.intents.Intents, object()),
+        {},
+        {"area": "kitchen"},
+        "en",
+    )
+
+    assert result is expected
+    assert captured["best_metadata_key"] == "hass_custom_sentence"
+    assert captured["best_slot_name"] == "name"
+    assert captured["intent_context"] == {"area": "kitchen"}
+    assert captured["language"] == "en"
+
+
+def test_benchmark_lexical_mode_uses_production_hassil_shortcut(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production evaluation must not rank a command already accepted by HassIL."""
+    hassil_result = SimpleNamespace(
+        intent=SimpleNamespace(name="HassTurnOn"),
+        entities={"name": SimpleNamespace(value="light")},
+    )
+    monkeypatch.setattr(
+        benchmark,
+        "run_hassil_recognize_best",
+        lambda *_args, **_kwargs: hassil_result,
+    )
+
+    class FailingRuntime:
+        """Fail if the production shortcut incorrectly reaches ranking."""
+
+        def rank_with_dynamic_candidates(self, *_args: Any, **_kwargs: Any) -> None:
+            """Raise because shortcut cases must never enter candidate ranking."""
+            raise AssertionError("ranking must be bypassed")
+
+    ranked = benchmark._evaluate_mode_candidates(
+        "lexical",
+        "please turn on the light",
+        "en",
+        FailingRuntime(),
+        object(),
+        object(),
+        {},
+        None,
+        "turn on the light",
+        "HassTurnOn",
+        [{"name": "light"}],
+    )
+
+    assert ranked[0].candidate.intent_name == "HassTurnOn"
+    assert ranked[0].candidate.metadata["evaluation_path"] == "hassil_shortcut"
+
+
+def test_benchmark_lexical_mode_ranks_after_production_hassil_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production evaluation must rank only when raw HassIL recognition fails."""
+    monkeypatch.setattr(
+        benchmark,
+        "run_hassil_recognize_best",
+        lambda *_args, **_kwargs: None,
+    )
+    expected_ranked = cast(tuple[RankedCandidate, ...], (object(),))
+    runtime = SimpleNamespace(
+        rank_with_dynamic_candidates=lambda *_args, **_kwargs: expected_ranked
+    )
+
+    ranked = benchmark._evaluate_mode_candidates(
+        "lexical",
+        "unsupported filler turn on the light",
+        "en",
+        runtime,
+        object(),
+        object(),
+        {},
+        None,
+        "turn on the light",
+        "HassTurnOn",
+        [{"name": "light"}],
+    )
+
+    assert ranked is expected_ranked
 
 
 def test_dataset_hassil_cache_includes_context(monkeypatch: pytest.MonkeyPatch) -> None:
