@@ -16,7 +16,7 @@ from .const import (
 )
 from .normalization import char_ngrams_normalized, literal_tokens_list
 from .ranking import CharNGramIndex, RankedCandidate, WildcardVariantGroup, rank_candidates
-from .rehydration import wildcard_variants_analysis
+from .rehydration import WildcardVariantAnalysis, wildcard_variants_analysis
 
 
 @dataclass
@@ -27,7 +27,7 @@ class _CanonicalIndexData:
     exact_normalized_lookup: dict[str, list[Candidate]]
     exact_no_diacritics_lookup: dict[str, list[Candidate]]
     wildcard_always_passes: frozenset[int]
-    wildcard_variants_with_len: dict[int, tuple[tuple[frozenset[str], int, int], ...]]
+    wildcard_variant_analyses: dict[int, tuple[WildcardVariantAnalysis, ...]]
     wildcard_variant_groups: tuple[WildcardVariantGroup, ...]
     candidate_slot_tokens: tuple[frozenset[str], ...]
 
@@ -38,8 +38,8 @@ def _build_index_state(candidates: tuple[Candidate, ...]) -> _CanonicalIndexData
     exact_normalized: dict[str, list[Candidate]] = {}
     exact_no_diacritics: dict[str, list[Candidate]] = {}
     wildcard_always_passes: list[int] = []
-    wildcard_variants_with_len: dict[int, tuple[tuple[frozenset[str], int, int], ...]] = {}
-    wildcard_group_indices: defaultdict[tuple[tuple[frozenset[str], int, int], ...], list[int]] = (
+    wildcard_variant_analyses: dict[int, tuple[WildcardVariantAnalysis, ...]] = {}
+    wildcard_group_indices: defaultdict[tuple[WildcardVariantAnalysis, ...], list[int]] = (
         defaultdict(list)
     )
     candidate_slot_tokens: list[frozenset[str]] = []
@@ -51,15 +51,15 @@ def _build_index_state(candidates: tuple[Candidate, ...]) -> _CanonicalIndexData
         if literal_text := candidate.metadata.get("literal_text"):
             all_tokens.update(literal_tokens_list(literal_text))
         if candidate.has_wildcard:
-            var_with_len, _ = wildcard_variants_analysis(candidate)
-            wildcard_variants_with_len[i] = var_with_len
+            variants, _ = wildcard_variants_analysis(candidate)
+            wildcard_variant_analyses[i] = variants
             always_passes = not candidate.literal_variants or any(
-                length == 0 for _, length, _ in var_with_len
+                not variant.literal_tokens for variant in variants
             )
             if always_passes:
                 wildcard_always_passes.append(i)
             else:
-                wildcard_group_indices[var_with_len].append(i)
+                wildcard_group_indices[variants].append(i)
         slot_tokens = candidate.slot_tokens_set
         candidate_slot_tokens.append(slot_tokens)
 
@@ -68,13 +68,15 @@ def _build_index_state(candidates: tuple[Candidate, ...]) -> _CanonicalIndexData
         exact_normalized_lookup=exact_normalized,
         exact_no_diacritics_lookup=exact_no_diacritics,
         wildcard_always_passes=frozenset(wildcard_always_passes),
-        wildcard_variants_with_len=wildcard_variants_with_len,
+        wildcard_variant_analyses=wildcard_variant_analyses,
         wildcard_variant_groups=tuple(
-            (
-                variants,
-                frozenset(token for variant, _, _ in variants for token in variant),
-                min(required for _, _, required in variants),
-                tuple(indices),
+            WildcardVariantGroup(
+                variants=variants,
+                literal_tokens=frozenset(
+                    token for variant in variants for token in variant.literal_tokens
+                ),
+                min_required_match_count=min(variant.required_match_count for variant in variants),
+                candidate_indices=tuple(indices),
             )
             for variants, indices in wildcard_group_indices.items()
         ),
@@ -103,7 +105,7 @@ class CanonicalIndex:
     _wildcard_always_passes: frozenset[int] = field(
         init=False, repr=False, compare=False, default_factory=frozenset
     )
-    _wildcard_variants_with_len: dict[int, tuple[tuple[frozenset[str], int, int], ...]] = field(
+    _wildcard_variant_analyses: dict[int, tuple[WildcardVariantAnalysis, ...]] = field(
         init=False, repr=False, compare=False, default_factory=dict
     )
     _wildcard_variant_groups: tuple[WildcardVariantGroup, ...] = field(
@@ -161,7 +163,7 @@ class CanonicalIndex:
             exact_no_diacritics_lookup=self._exact_no_diacritics_lookup,
             language=self.language,
             wildcard_always_passes=self._wildcard_always_passes,
-            wildcard_variants_with_len=self._wildcard_variants_with_len,
+            wildcard_variant_analyses=self._wildcard_variant_analyses,
             wildcard_variant_groups=self._wildcard_variant_groups,
             candidate_slot_tokens=self._candidate_slot_tokens,
             slot_preferences=slot_preferences,

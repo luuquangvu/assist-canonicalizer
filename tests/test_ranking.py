@@ -27,6 +27,7 @@ from custom_components.assist_canonicalizer.ranking import (
     CharNGramIndex,
     RankedCandidate,
     ScoreBreakdown,
+    WildcardVariantGroup,
     _best_positional_score,
     _calculate_slot_penalty,
     _check_and_calculate_conflict_penalty,
@@ -56,6 +57,7 @@ from custom_components.assist_canonicalizer.ranking import (
     token_count_ratio,
 )
 from custom_components.assist_canonicalizer.rehydration import (
+    WildcardVariantAnalysis,
     _extract_original_span,
     _extract_wc_value,
     _find_rehydration_boundaries,
@@ -1287,11 +1289,31 @@ def test_intersection_prefilter_keys_match_dense_scores(
 def test_additional_wildcard_prefilter_is_bounded_by_literal_relevance() -> None:
     """Bound wildcard rescues while preferring stronger literal-token evidence."""
     query_tokens = frozenset({"add", "milk", "shopping", "list"})
-    variants: Any = {
-        0: ((frozenset({"add"}), 1, 1),),
-        1: ((frozenset({"add", "shopping", "list"}), 3, 3),),
-        2: ((frozenset({"shopping", "list"}), 2, 2),),
-        3: ((frozenset({"add", "list"}), 2, 2),),
+    variants: dict[int, tuple[WildcardVariantAnalysis, ...]] = {
+        0: (
+            WildcardVariantAnalysis(
+                literal_tokens=frozenset({"add"}),
+                required_match_count=1,
+            ),
+        ),
+        1: (
+            WildcardVariantAnalysis(
+                literal_tokens=frozenset({"add", "shopping", "list"}),
+                required_match_count=3,
+            ),
+        ),
+        2: (
+            WildcardVariantAnalysis(
+                literal_tokens=frozenset({"shopping", "list"}),
+                required_match_count=2,
+            ),
+        ),
+        3: (
+            WildcardVariantAnalysis(
+                literal_tokens=frozenset({"add", "list"}),
+                required_match_count=2,
+            ),
+        ),
     }
     prefilter_keys = [-0.9, -0.2, -0.8, -0.7]
 
@@ -1321,12 +1343,17 @@ def test_grouped_wildcard_prefilter_evaluates_shared_variants_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Expand indexes only after one coverage check for a shared wildcard group."""
-    variants = ((frozenset({"add", "to", "list"}), 3, 3),)
+    variants = (
+        WildcardVariantAnalysis(
+            literal_tokens=frozenset({"add", "to", "list"}),
+            required_match_count=3,
+        ),
+    )
     calls = 0
     original = ranking._wildcard_variants_match
 
     def counted(
-        values: tuple[tuple[frozenset[str], int, int], ...],
+        values: tuple[WildcardVariantAnalysis, ...],
         query_tokens: frozenset[str],
     ) -> bool:
         nonlocal calls
@@ -1343,7 +1370,14 @@ def test_grouped_wildcard_prefilter_evaluates_shared_variants_once(
         {},
         {},
         {},
-        ((variants, frozenset({"add", "to", "list"}), 3, (1, 2, 3)),),
+        (
+            WildcardVariantGroup(
+                variants=variants,
+                literal_tokens=frozenset({"add", "to", "list"}),
+                min_required_match_count=3,
+                candidate_indices=(1, 2, 3),
+            ),
+        ),
     )
 
     assert passed == {1, 2, 3, 4}
@@ -1539,6 +1573,85 @@ def test_positional_lookup_uses_bounded_fuzzy_literal_matches() -> None:
     assert lookup["close"] == frozenset({"clse"})
     assert lookup["tắt"] == frozenset({"tắ"})
     assert "turn" not in lookup
+
+
+def test_positional_intent_score_uses_one_to_one_query_token_alignment() -> None:
+    """Do not credit one fuzzy query token to multiple template literals."""
+    score = ranking._positional_intent_score_from_lookup(
+        "dem der",
+        frozenset({"den"}),
+        {
+            "dem": frozenset({"den"}),
+            "der": frozenset({"den"}),
+        },
+    )
+
+    assert score == 0.25
+
+
+def test_best_positional_score_finds_maximum_unique_alignment() -> None:
+    """Use maximum matching when fuzzy literal-token alternatives overlap."""
+    analysis = [
+        ranking._LiteralVariantAnalysis(
+            total_token_count=2,
+            exact_match_tokens=frozenset(),
+            positional_hits=(frozenset({"a", "b"}), frozenset({"a"})),
+            positional_query_tokens=frozenset({"a", "b"}),
+            positional_match_count=2,
+            requires_unique_alignment=True,
+        )
+    ]
+
+    assert _best_positional_score(analysis, frozenset()) == 0.5
+    assert _best_positional_score(analysis, frozenset({"b"})) == 0.25
+
+
+def test_best_positional_score_uses_maximum_across_variants() -> None:
+    """Select the highest positional score across all literal variants."""
+    analysis = [
+        ranking._LiteralVariantAnalysis(
+            total_token_count=2,
+            exact_match_tokens=frozenset(),
+            positional_hits=(),
+            positional_query_tokens=frozenset(),
+            positional_match_count=0,
+            requires_unique_alignment=False,
+        ),
+        ranking._LiteralVariantAnalysis(
+            total_token_count=2,
+            exact_match_tokens=frozenset(),
+            positional_hits=(frozenset({"a", "b"}), frozenset({"a"})),
+            positional_query_tokens=frozenset({"a", "b"}),
+            positional_match_count=2,
+            requires_unique_alignment=True,
+        ),
+        ranking._LiteralVariantAnalysis(
+            total_token_count=2,
+            exact_match_tokens=frozenset(),
+            positional_hits=(frozenset({"c"}),),
+            positional_query_tokens=frozenset({"c"}),
+            positional_match_count=1,
+            requires_unique_alignment=False,
+        ),
+    ]
+
+    assert _best_positional_score(analysis, frozenset()) == 0.5
+
+
+def test_best_positional_score_does_not_reuse_exact_query_tokens() -> None:
+    """Reserve exact query-token evidence before fuzzy literal alignment."""
+    analysis = [
+        ranking._LiteralVariantAnalysis(
+            total_token_count=2,
+            exact_match_tokens=frozenset({"turn"}),
+            positional_hits=(frozenset({"turn"}),),
+            positional_query_tokens=frozenset({"turn"}),
+            positional_match_count=0,
+            requires_unique_alignment=True,
+        )
+    ]
+
+    assert _best_positional_score(analysis, frozenset()) == 0.5
 
 
 def test_rank_candidates_uses_fuzzy_literal_action_typo() -> None:
@@ -2283,12 +2396,18 @@ def test_wildcard_variants_analysis_removes_wildcard_and_deduplicates() -> None:
         metadata={"literal_text": "message|messages|broadcast message"},
     )
 
-    variants_with_len, all_tokens = wildcard_variants_analysis(candidate)
+    variants, all_tokens = wildcard_variants_analysis(candidate)
 
-    assert variants_with_len == (
-        (frozenset(), 0, 0),
-        (frozenset({"messages"}), 1, 1),
-        (frozenset({"broadcast"}), 1, 1),
+    assert variants == (
+        WildcardVariantAnalysis(literal_tokens=frozenset(), required_match_count=0),
+        WildcardVariantAnalysis(
+            literal_tokens=frozenset({"messages"}),
+            required_match_count=1,
+        ),
+        WildcardVariantAnalysis(
+            literal_tokens=frozenset({"broadcast"}),
+            required_match_count=1,
+        ),
     )
     assert all_tokens == frozenset({"broadcast", "messages"})
 
@@ -2303,11 +2422,17 @@ def test_wildcard_variants_analysis_removes_embedded_structured_wildcard() -> No
         metadata={"literal_text": "spiel den search_querypodcast|spiel den podcast"},
     )
 
-    variants_with_len, all_tokens = wildcard_variants_analysis(candidate)
+    variants, all_tokens = wildcard_variants_analysis(candidate)
 
-    assert variants_with_len == (
-        (frozenset({"den", "spiel"}), 2, 2),
-        (frozenset({"den", "podcast", "spiel"}), 3, 3),
+    assert variants == (
+        WildcardVariantAnalysis(
+            literal_tokens=frozenset({"den", "spiel"}),
+            required_match_count=2,
+        ),
+        WildcardVariantAnalysis(
+            literal_tokens=frozenset({"den", "podcast", "spiel"}),
+            required_match_count=3,
+        ),
     )
     assert all_tokens == frozenset({"den", "podcast", "spiel"})
 
@@ -2322,9 +2447,14 @@ def test_wildcard_variants_analysis_removes_embedded_single_word_wildcard() -> N
         metadata={"literal_text": "broadcast urgentmessage|broadcast"},
     )
 
-    variants_with_len, all_tokens = wildcard_variants_analysis(candidate)
+    variants, all_tokens = wildcard_variants_analysis(candidate)
 
-    assert variants_with_len == ((frozenset({"broadcast"}), 1, 1),)
+    assert variants == (
+        WildcardVariantAnalysis(
+            literal_tokens=frozenset({"broadcast"}),
+            required_match_count=1,
+        ),
+    )
     assert all_tokens == frozenset({"broadcast"})
 
 
@@ -2338,11 +2468,17 @@ def test_wildcard_variants_analysis_keeps_multilingual_word_containing_wildcard(
         metadata={"literal_text": "messagerie|diffuser message"},
     )
 
-    variants_with_len, all_tokens = wildcard_variants_analysis(candidate)
+    variants, all_tokens = wildcard_variants_analysis(candidate)
 
-    assert variants_with_len == (
-        (frozenset({"messagerie"}), 1, 1),
-        (frozenset({"diffuser"}), 1, 1),
+    assert variants == (
+        WildcardVariantAnalysis(
+            literal_tokens=frozenset({"messagerie"}),
+            required_match_count=1,
+        ),
+        WildcardVariantAnalysis(
+            literal_tokens=frozenset({"diffuser"}),
+            required_match_count=1,
+        ),
     )
     assert all_tokens == frozenset({"diffuser", "messagerie"})
 
@@ -2350,24 +2486,70 @@ def test_wildcard_variants_analysis_keeps_multilingual_word_containing_wildcard(
 @pytest.mark.parametrize(
     ("variants", "query_tokens", "expected"),
     [
-        (((frozenset(), 0, 0),), frozenset(), True),
-        (((frozenset({"add", "list"}), 2, 2),), frozenset({"add", "list"}), True),
-        (((frozenset({"add", "list"}), 2, 2),), frozenset({"add"}), False),
-        (((frozenset({"play"}), 1, 1),), frozenset({"play"}), True),
         (
-            ((frozenset({"add", "item", "to", "list"}), 4, 3),),
+            (
+                WildcardVariantAnalysis(
+                    literal_tokens=frozenset(),
+                    required_match_count=0,
+                ),
+            ),
+            frozenset(),
+            True,
+        ),
+        (
+            (
+                WildcardVariantAnalysis(
+                    literal_tokens=frozenset({"add", "list"}),
+                    required_match_count=2,
+                ),
+            ),
+            frozenset({"add", "list"}),
+            True,
+        ),
+        (
+            (
+                WildcardVariantAnalysis(
+                    literal_tokens=frozenset({"add", "list"}),
+                    required_match_count=2,
+                ),
+            ),
+            frozenset({"add"}),
+            False,
+        ),
+        (
+            (
+                WildcardVariantAnalysis(
+                    literal_tokens=frozenset({"play"}),
+                    required_match_count=1,
+                ),
+            ),
+            frozenset({"play"}),
+            True,
+        ),
+        (
+            (
+                WildcardVariantAnalysis(
+                    literal_tokens=frozenset({"add", "item", "to", "list"}),
+                    required_match_count=3,
+                ),
+            ),
             frozenset({"add", "to", "list"}),
             True,
         ),
         (
-            ((frozenset({"add", "item", "to", "list"}), 4, 3),),
+            (
+                WildcardVariantAnalysis(
+                    literal_tokens=frozenset({"add", "item", "to", "list"}),
+                    required_match_count=3,
+                ),
+            ),
             frozenset({"add", "list"}),
             False,
         ),
     ],
 )
 def test_wildcard_variants_match_preserves_coverage_semantics(
-    variants: tuple[tuple[frozenset[str], int, int], ...],
+    variants: tuple[WildcardVariantAnalysis, ...],
     query_tokens: frozenset[str],
     expected: bool,
 ) -> None:
@@ -2409,7 +2591,7 @@ def test_rank_candidates_wildcard_bypasses_prefilter() -> None:
         rapidfuzz_prefilter_candidates=1,
         language="en",
         wildcard_always_passes=frozenset(),
-        wildcard_variants_with_len={},
+        wildcard_variant_analyses={},
         wildcard_token_to_indices={},
         wildcard_literal_tokens_by_index={},
         wildcard_min_required_by_index={},
@@ -3104,7 +3286,16 @@ def test_ranking_internal_helpers() -> None:
     assert combined_score < base_score
 
     # _best_positional_score
-    analysis = [(3, 1, [frozenset(["a", "b"])])]
+    analysis = [
+        ranking._LiteralVariantAnalysis(
+            total_token_count=3,
+            exact_match_tokens=frozenset({"exact"}),
+            positional_hits=(frozenset(["a", "b"]),),
+            positional_query_tokens=frozenset({"a", "b"}),
+            positional_match_count=1,
+            requires_unique_alignment=False,
+        )
+    ]
     assert _best_positional_score(analysis, frozenset(["a", "b"])) == 1.0 / 3.0
     assert _best_positional_score(analysis, frozenset(["a"])) > 1.0 / 3.0
     assert _best_positional_score([], frozenset()) == 0.0

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from functools import lru_cache, partial
 from heapq import nlargest, nsmallest
 from math import isclose
-from typing import Any
+from typing import Any, NamedTuple
 
 from rapidfuzz import fuzz
 
@@ -62,7 +62,11 @@ from .normalization import (
     normalize_text,
     normalize_text_no_diacritics,
 )
-from .rehydration import get_wildcard_rehydration, wildcard_variants_analysis
+from .rehydration import (
+    WildcardVariantAnalysis,
+    get_wildcard_rehydration,
+    wildcard_variants_analysis,
+)
 from .utils import (
     NormalizedIntentContext,
     normalize_intent_context,
@@ -71,27 +75,26 @@ from .utils import (
 )
 
 
-@lru_cache(maxsize=4096)
-def _raw_cached_fuzz_ratio(s1: str, s2: str) -> float:
-    """Return RapidFuzz's ratio with LRU caching."""
-    return fuzz.ratio(s1, s2)
+class _LiteralVariantAnalysis(NamedTuple):
+    """Precomputed positional evidence for one literal-token variant."""
+
+    total_token_count: int
+    exact_match_tokens: frozenset[str]
+    positional_hits: tuple[frozenset[str], ...]
+    positional_query_tokens: frozenset[str]
+    positional_match_count: int
+    requires_unique_alignment: bool
 
 
-def _cached_fuzz_ratio(s1: str, s2: str) -> float:
-    """Return RapidFuzz's ratio with LRU caching.
+class WildcardVariantGroup(NamedTuple):
+    """Candidates sharing the same wildcard literal-token coverage variants."""
 
-    The argument order is normalized to maximize cache hit rate.
-    """
-    return _raw_cached_fuzz_ratio(s1, s2) if s1 <= s2 else _raw_cached_fuzz_ratio(s2, s1)
+    variants: tuple[WildcardVariantAnalysis, ...]
+    literal_tokens: frozenset[str]
+    min_required_match_count: int
+    candidate_indices: tuple[int, ...]
 
 
-_LiteralVariantAnalysis = list[tuple[int, int, list[frozenset[str]]]]
-WildcardVariantGroup = tuple[
-    tuple[tuple[frozenset[str], int, int], ...],
-    frozenset[str],
-    int,
-    tuple[int, ...],
-]
 _KNOWN_OPPOSING_INTENT_TIE_PAIRS: tuple[tuple[str, str], ...] = (
     ("HassTurnOn", "HassTurnOff"),
     ("HassMediaUnpause", "HassMediaPause"),
@@ -201,6 +204,20 @@ class CharNGramIndex:
             for index in _postings_get(gram, _nothing):
                 intersections[index] += 1
         return intersections
+
+
+@lru_cache(maxsize=4096)
+def _raw_cached_fuzz_ratio(s1: str, s2: str) -> float:
+    """Return RapidFuzz's ratio with LRU caching."""
+    return fuzz.ratio(s1, s2)
+
+
+def _cached_fuzz_ratio(s1: str, s2: str) -> float:
+    """Return RapidFuzz's ratio with LRU caching.
+
+    The argument order is normalized to maximize cache hit rate.
+    """
+    return _raw_cached_fuzz_ratio(s1, s2) if s1 <= s2 else _raw_cached_fuzz_ratio(s2, s1)
 
 
 def _char_ngram_score_from_intersection(
@@ -458,17 +475,13 @@ def _precompute_literal_analysis(
     literal_text_or_variants: str | tuple[frozenset[str], ...],
     query_tokens: frozenset[str],
     positional_lookup: dict[str, frozenset[str]],
-) -> _LiteralVariantAnalysis:
+) -> list[_LiteralVariantAnalysis]:
     """Precompute positional match data for *literal_text* against *query_tokens*.
 
-    Returns a list with one entry per variant of *literal_text*::
-
-        (total_token_count, exact_match_count, positional_hit_frozensets)
-
-    *exact_match_count* counts how many literal tokens appear verbatim in
-    *query_tokens*.  *positional_hit_frozensets* lists the query-token
-    frozensets that positionally match each remaining literal token (only
-    entries where ``positional_lookup`` has a hit are stored).
+    Returns one :class:`_LiteralVariantAnalysis` per variant. ``exact_match_tokens``
+    contains literal tokens that appear verbatim in *query_tokens*, while
+    ``positional_hits`` contains the query-token sets that positionally match
+    each remaining literal token.
 
     This data is computed once per unique ``literal_text`` per
     ``rank_candidates`` invocation; the per-candidate scoring step then only
@@ -480,19 +493,92 @@ def _precompute_literal_analysis(
         variants = literal_token_variants(literal_text_or_variants)
     else:
         variants = literal_text_or_variants
-    result: _LiteralVariantAnalysis = []
+    result: list[_LiteralVariantAnalysis] = []
     for literal_tokens in variants:
-        exact_count = 0
+        exact_tokens: set[str] = set()
         positional_hits: list[frozenset[str]] = []
         for token in literal_tokens:
             if token in query_tokens:
-                exact_count += 1
+                exact_tokens.add(token)
             else:
                 matching = positional_lookup.get(token)
                 if matching is not None:
                     positional_hits.append(matching)
-        result.append((len(literal_tokens), exact_count, positional_hits))
+        seen_query_tokens = set(exact_tokens)
+        requires_unique_alignment = False
+        for matching in positional_hits:
+            if not seen_query_tokens.isdisjoint(matching):
+                requires_unique_alignment = True
+            seen_query_tokens.update(matching)
+        positional_query_tokens = frozenset(
+            query_token for matching in positional_hits for query_token in matching
+        )
+        exact_tokens_frozen = frozenset(exact_tokens)
+        positional_match_count = (
+            _maximum_unique_positional_matches(positional_hits, exact_tokens_frozen)
+            if requires_unique_alignment
+            else len(positional_hits)
+        )
+        result.append(
+            _LiteralVariantAnalysis(
+                total_token_count=len(literal_tokens),
+                exact_match_tokens=exact_tokens_frozen,
+                positional_hits=tuple(positional_hits),
+                positional_query_tokens=positional_query_tokens,
+                positional_match_count=positional_match_count,
+                requires_unique_alignment=requires_unique_alignment,
+            )
+        )
     return result
+
+
+def _maximum_unique_positional_matches(
+    positional_hits: Sequence[frozenset[str]],
+    unavailable_query_tokens: frozenset[str],
+) -> int:
+    """Return the maximum one-to-one alignment count for positional hits.
+
+    A query token is evidence for at most one literal token.  Maximum bipartite
+    matching avoids both duplicate credit and greedy-order artifacts when one
+    literal has several possible query-token matches.
+    """
+    available_hits: list[frozenset[str]] = []
+    seen_query_tokens: set[str] = set()
+    has_overlap = False
+    for hits in positional_hits:
+        available = (
+            hits if hits.isdisjoint(unavailable_query_tokens) else hits - unavailable_query_tokens
+        )
+        if not available:
+            continue
+        if not seen_query_tokens.isdisjoint(available):
+            has_overlap = True
+        seen_query_tokens.update(available)
+        available_hits.append(available)
+
+    if not has_overlap:
+        return len(available_hits)
+
+    query_token_owner: dict[str, int] = {}
+
+    def assign(literal_index: int, visited: set[str]) -> bool:
+        for query_token in available_hits[literal_index]:
+            if query_token in visited:
+                continue
+            visited.add(query_token)
+            previous_owner = query_token_owner.get(query_token)
+            if previous_owner is None or assign(previous_owner, visited):
+                query_token_owner[query_token] = literal_index
+                return True
+        return False
+
+    matched = 0
+    for literal_index in sorted(
+        range(len(available_hits)), key=lambda index: len(available_hits[index])
+    ):
+        if available_hits[literal_index] and assign(literal_index, set()):
+            matched += 1
+    return matched
 
 
 def _positional_intent_score_from_lookup(
@@ -516,16 +602,25 @@ def _positional_intent_score_from_lookup(
         return _exact_intent_score(variants, query_tokens)
     best_score = 0.0
     for literal_tokens in variants:
-        matched_weight = 0.0
+        exact_tokens: set[str] = set()
+        positional_hits: list[frozenset[str]] = []
         for token in literal_tokens:
             if token in query_tokens:
-                matched_weight += 1.0
+                exact_tokens.add(token)
                 continue
             matching = positional_lookup.get(token)
-            if matching is not None and (
-                candidate_entity is None or not matching.issubset(candidate_entity)
-            ):
-                matched_weight += POSITIONAL_SIMILARITY_PARTIAL_CREDIT
+            if matching is not None:
+                positional_hits.append(matching)
+        unavailable = frozenset(exact_tokens)
+        if candidate_entity is not None:
+            unavailable |= candidate_entity
+        positional_count = _maximum_unique_positional_matches(
+            positional_hits,
+            unavailable,
+        )
+        matched_weight = len(exact_tokens) + (
+            positional_count * POSITIONAL_SIMILARITY_PARTIAL_CREDIT
+        )
         score = matched_weight / len(literal_tokens)
         if score > best_score:
             best_score = score
@@ -570,26 +665,27 @@ def _rehydrated_bm25_score(
 
 
 def _wildcard_variants_match(
-    variants_with_len: tuple[tuple[frozenset[str], int, int], ...],
+    variants: tuple[WildcardVariantAnalysis, ...],
     query_tokens: frozenset[str],
 ) -> bool:
     """Return True if any wildcard variant has sufficient token overlap with the query."""
-    for variant, var_len, req in variants_with_len:
-        if var_len == 0:
+    for variant in variants:
+        literal_token_count = len(variant.literal_tokens)
+        if literal_token_count == 0:
             return True
-        if req == var_len:
-            if variant.issubset(query_tokens):
+        if variant.required_match_count == literal_token_count:
+            if variant.literal_tokens.issubset(query_tokens):
                 return True
             continue
-        if req == 1:
-            if not variant.isdisjoint(query_tokens):
+        if variant.required_match_count == 1:
+            if not variant.literal_tokens.isdisjoint(query_tokens):
                 return True
             continue
         matched = 0
-        for token in variant:
+        for token in variant.literal_tokens:
             if token in query_tokens:
                 matched += 1
-                if matched >= req:
+                if matched >= variant.required_match_count:
                     return True
     return False
 
@@ -598,15 +694,15 @@ def _check_precomputed_wildcard(
     i: int,
     query_tokens: frozenset[str],
     wildcard_always_passes: frozenset[int],
-    wildcard_variants_with_len: dict[int, tuple[tuple[frozenset[str], int, int], ...]] | None,
+    wildcard_variant_analyses: dict[int, tuple[WildcardVariantAnalysis, ...]] | None,
     wildcard_literal_tokens_by_index: dict[int, frozenset[str]] | None,
     wildcard_min_required_by_index: dict[int, int] | None,
 ) -> bool:
     """Return True if precomputed wildcard candidate i passes the token filter."""
     if i in wildcard_always_passes:
         return True
-    variants_with_len = wildcard_variants_with_len.get(i) if wildcard_variants_with_len else None
-    if not variants_with_len:
+    variants = wildcard_variant_analyses.get(i) if wildcard_variant_analyses else None
+    if not variants:
         return False
     if wildcard_literal_tokens_by_index is not None and wildcard_min_required_by_index is not None:
         literal_tokens = wildcard_literal_tokens_by_index.get(i)
@@ -618,27 +714,27 @@ def _check_precomputed_wildcard(
             and len(literal_tokens & query_tokens) < min_required
         ):
             return False
-    return _wildcard_variants_match(variants_with_len, query_tokens)
+    return _wildcard_variants_match(variants, query_tokens)
 
 
 def _check_onthefly_wildcard(cand: Candidate, query_tokens: frozenset[str]) -> bool:
     """Return True if an on-the-fly analyzed wildcard candidate passes the token filter."""
-    var_with_len, all_literal = wildcard_variants_analysis(cand)
-    always_passes = not cand.literal_variants or any(length == 0 for _, length, _ in var_with_len)
+    variants, all_literal = wildcard_variants_analysis(cand)
+    always_passes = not cand.literal_variants or any(
+        not variant.literal_tokens for variant in variants
+    )
     if always_passes:
         return True
     if all_literal.isdisjoint(query_tokens):
         return False
-    return _wildcard_variants_match(var_with_len, query_tokens)
+    return _wildcard_variants_match(variants, query_tokens)
 
 
 def _prefilter_wildcard_candidates(
     candidates: Sequence[Candidate],
     query_tokens: frozenset[str],
     wildcard_always_passes: frozenset[int] | None,
-    wildcard_variants_with_len: (
-        dict[int, tuple[tuple[frozenset[str], int, int], ...]] | None
-    ) = None,
+    wildcard_variant_analyses: dict[int, tuple[WildcardVariantAnalysis, ...]] | None = None,
     wildcard_token_to_indices: dict[str, tuple[int, ...]] | None = None,
     wildcard_literal_tokens_by_index: dict[int, frozenset[str]] | None = None,
     wildcard_min_required_by_index: dict[int, int] | None = None,
@@ -647,15 +743,17 @@ def _prefilter_wildcard_candidates(
     """Prefilter wildcard candidates using precomputed structures or on-the-fly coverage."""
     if wildcard_always_passes is not None and wildcard_variant_groups is not None:
         passed = set(wildcard_always_passes)
-        for variants, literal_tokens, min_required, indices in wildcard_variant_groups:
-            if min_required > 0 and len(literal_tokens & query_tokens) < min_required:
+        for group in wildcard_variant_groups:
+            if group.min_required_match_count > 0 and (
+                len(group.literal_tokens & query_tokens) < group.min_required_match_count
+            ):
                 continue
-            if _wildcard_variants_match(variants, query_tokens):
-                passed.update(indices)
+            if _wildcard_variants_match(group.variants, query_tokens):
+                passed.update(group.candidate_indices)
         return passed
     if (
         wildcard_always_passes is not None
-        and wildcard_variants_with_len is not None
+        and wildcard_variant_analyses is not None
         and wildcard_token_to_indices is not None
         and wildcard_literal_tokens_by_index is not None
         and wildcard_min_required_by_index is not None
@@ -671,7 +769,7 @@ def _prefilter_wildcard_candidates(
                 i,
                 query_tokens,
                 wildcard_always_passes,
-                wildcard_variants_with_len,
+                wildcard_variant_analyses,
                 wildcard_literal_tokens_by_index,
                 wildcard_min_required_by_index,
             )
@@ -686,7 +784,7 @@ def _prefilter_wildcard_candidates(
 def _top_additional_wildcard_indices(
     wildcard_indices: set[int],
     query_tokens: frozenset[str],
-    wildcard_variants_with_len: (dict[int, tuple[tuple[frozenset[str], int, int], ...]] | None),
+    wildcard_variant_analyses: dict[int, tuple[WildcardVariantAnalysis, ...]] | None,
     prefilter_keys: Sequence[float],
     limit: int,
 ) -> list[int]:
@@ -701,23 +799,24 @@ def _top_additional_wildcard_indices(
     if len(wildcard_indices) <= limit:
         return sorted(wildcard_indices)
 
-    variant_relevance: dict[tuple[tuple[frozenset[str], int, int], ...], tuple[float, int]] = {}
+    variant_relevance: dict[tuple[WildcardVariantAnalysis, ...], tuple[float, int]] = {}
 
     def relevance(index: int) -> tuple[float, int, float, int]:
         variants = (
-            wildcard_variants_with_len.get(index, ())
-            if wildcard_variants_with_len is not None
+            wildcard_variant_analyses.get(index, ())
+            if wildcard_variant_analyses is not None
             else ()
         )
         cached_relevance = variant_relevance.get(variants)
         if cached_relevance is None:
             best_coverage = 0.0
             best_matched = 0
-            for variant, variant_length, _ in variants:
-                if variant_length == 0:
+            for variant in variants:
+                literal_token_count = len(variant.literal_tokens)
+                if literal_token_count == 0:
                     continue
-                matched = len(variant & query_tokens)
-                coverage = matched / variant_length
+                matched = len(variant.literal_tokens & query_tokens)
+                coverage = matched / literal_token_count
                 if (coverage, matched) > (best_coverage, best_matched):
                     best_coverage = coverage
                     best_matched = matched
@@ -823,16 +922,15 @@ def _rank_prefilter_keys_from_intersections(
     bm25_inv_max: float,
 ) -> list[float]:
     """Build static prefilter keys without materializing dense character scores."""
-    keys = [0.0] * len(intersections)
-    for index, intersection_size in enumerate(intersections):
-        if intersection_size == 0:
-            continue
-        char_score = _char_ngram_score_from_intersection(
-            query_gram_count,
-            candidate_gram_counts[index],
-            intersection_size,
+    keys = [
+        -CHAR_NGRAM_WEIGHT
+        * (intersection_size / (query_gram_count + candidate_count - intersection_size))
+        if intersection_size
+        else 0.0
+        for intersection_size, candidate_count in zip(
+            intersections, candidate_gram_counts, strict=True
         )
-        keys[index] = -CHAR_NGRAM_WEIGHT * char_score
+    ]
     for index, raw_score in raw_bm25_scores.items():
         normalized_bm25 = raw_score * bm25_inv_max
         keys[index] = -(-keys[index] + BM25_WEIGHT * normalized_bm25)
@@ -1319,21 +1417,38 @@ class _ScoringContext:
     wildcard_passed_set: frozenset[int] | set[int]
     rehydrated_cache: dict[int, tuple[str, dict[str, str]]]
     intent_score_cache: dict[tuple[frozenset[str], ...], float]
-    literal_analysis_cache: dict[tuple[str, tuple[frozenset[str], ...]], _LiteralVariantAnalysis]
+    literal_analysis_cache: dict[
+        tuple[str, tuple[frozenset[str], ...]], list[_LiteralVariantAnalysis]
+    ]
 
 
 def _best_positional_score(
-    analysis: _LiteralVariantAnalysis,
+    analysis: Sequence[_LiteralVariantAnalysis],
     candidate_tokens: frozenset[str],
 ) -> float:
     """Calculate the best score from positional hits analysis."""
     best = 0.0
-    for total_len, exact_count, positional_hits in analysis:
-        matched = float(exact_count)
-        for hits in positional_hits:
-            if not hits.issubset(candidate_tokens):
-                matched += POSITIONAL_SIMILARITY_PARTIAL_CREDIT
-        score = matched / total_len if total_len else 0.0
+    for variant_analysis in analysis:
+        matched = float(len(variant_analysis.exact_match_tokens))
+        if variant_analysis.positional_query_tokens.isdisjoint(candidate_tokens):
+            matched += (
+                variant_analysis.positional_match_count * POSITIONAL_SIMILARITY_PARTIAL_CREDIT
+            )
+        elif variant_analysis.requires_unique_alignment:
+            positional_count = _maximum_unique_positional_matches(
+                variant_analysis.positional_hits,
+                candidate_tokens | variant_analysis.exact_match_tokens,
+            )
+            matched += positional_count * POSITIONAL_SIMILARITY_PARTIAL_CREDIT
+        else:
+            for hits in variant_analysis.positional_hits:
+                if not hits.issubset(candidate_tokens):
+                    matched += POSITIONAL_SIMILARITY_PARTIAL_CREDIT
+        score = (
+            matched / variant_analysis.total_token_count
+            if variant_analysis.total_token_count
+            else 0.0
+        )
         if score > best:
             best = score
     return best
@@ -1745,9 +1860,7 @@ def rank_candidates(
     exact_no_diacritics_lookup: dict[str, list[Candidate]] | None = None,
     language: str | None = None,
     wildcard_always_passes: frozenset[int] | None = None,
-    wildcard_variants_with_len: (
-        dict[int, tuple[tuple[frozenset[str], int, int], ...]] | None
-    ) = None,
+    wildcard_variant_analyses: dict[int, tuple[WildcardVariantAnalysis, ...]] | None = None,
     wildcard_token_to_indices: dict[str, tuple[int, ...]] | None = None,
     wildcard_literal_tokens_by_index: dict[int, frozenset[str]] | None = None,
     wildcard_min_required_by_index: dict[int, int] | None = None,
@@ -1858,7 +1971,7 @@ def rank_candidates(
         candidates,
         query_tokens,
         wildcard_always_passes,
-        wildcard_variants_with_len,
+        wildcard_variant_analyses,
         wildcard_token_to_indices,
         wildcard_literal_tokens_by_index,
         wildcard_min_required_by_index,
@@ -1871,7 +1984,7 @@ def rank_candidates(
             _top_additional_wildcard_indices(
                 additional_wildcards,
                 query_tokens,
-                wildcard_variants_with_len,
+                wildcard_variant_analyses,
                 prefilter_keys,
                 prefilter_limit,
             )
@@ -1899,7 +2012,7 @@ def rank_candidates(
         )
 
     literal_analysis_cache: dict[
-        tuple[str, tuple[frozenset[str], ...]], _LiteralVariantAnalysis
+        tuple[str, tuple[frozenset[str], ...]], list[_LiteralVariantAnalysis]
     ] = {}
     ranked_tuples: list[_RankedItem] = []
     context = _ScoringContext(

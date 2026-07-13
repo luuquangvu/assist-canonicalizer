@@ -34,7 +34,8 @@ import hassil.errors
 import orjson
 
 if TYPE_CHECKING:
-    from custom_components.assist_canonicalizer.ranking import RankedCandidate
+    from custom_components.assist_canonicalizer.ranking import RankedCandidate, WildcardVariantGroup
+    from custom_components.assist_canonicalizer.rehydration import WildcardVariantAnalysis
 
 _REPO_ROOT = str(Path(__file__).resolve().parent.parent)
 
@@ -3828,8 +3829,8 @@ class RankStageContext:
     exact_normalized_lookup: Mapping[str, Sequence[Any]]
     exact_no_diacritics_lookup: Mapping[str, Sequence[Any]]
     wildcard_always_passes: frozenset[int]
-    wildcard_variants_with_len: Mapping[int, tuple[tuple[frozenset[str], int, int], ...]]
-    wildcard_variant_groups: tuple[Any, ...]
+    wildcard_variant_analyses: Mapping[int, tuple[WildcardVariantAnalysis, ...]]
+    wildcard_variant_groups: tuple[WildcardVariantGroup, ...]
     candidate_slot_tokens: tuple[frozenset[str], ...]
     prefilter_limit: int
     cases: tuple[RankStageCase, ...]
@@ -3931,7 +3932,7 @@ def _build_rank_stage_context(
         exact_normalized_lookup=index._exact_normalized_lookup,
         exact_no_diacritics_lookup=index._exact_no_diacritics_lookup,
         wildcard_always_passes=index._wildcard_always_passes,
-        wildcard_variants_with_len=index._wildcard_variants_with_len,
+        wildcard_variant_analyses=index._wildcard_variant_analyses,
         wildcard_variant_groups=index._wildcard_variant_groups,
         candidate_slot_tokens=index._candidate_slot_tokens,
         prefilter_limit=_rank_prefilter_limit(len(candidates)),
@@ -3948,7 +3949,7 @@ def _build_rank_stage_context(
         exact_normalized_lookup=context.exact_normalized_lookup,
         exact_no_diacritics_lookup=context.exact_no_diacritics_lookup,
         wildcard_always_passes=context.wildcard_always_passes,
-        wildcard_variants_with_len=context.wildcard_variants_with_len,
+        wildcard_variant_analyses=context.wildcard_variant_analyses,
         wildcard_variant_groups=context.wildcard_variant_groups,
         candidate_slot_tokens=context.candidate_slot_tokens,
         prefilter_limit=context.prefilter_limit,
