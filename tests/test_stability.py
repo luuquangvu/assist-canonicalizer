@@ -30,6 +30,7 @@ from custom_components.assist_canonicalizer.ranking import (
     token_count_ratio,
 )
 from custom_components.assist_canonicalizer.rehydration import (
+    WildcardVariantAnalysis,
     _align_prefix_boundary,
     _align_suffix_boundary,
     _extract_original_span,
@@ -299,13 +300,13 @@ def test_ranking_stability() -> None:
 
 def test_prefilter_wildcard_candidates_stability() -> None:
     """Verify prefiltering candidate selector defaults cleanly on empty lookups."""
-    # variants_with_len is None when wildcard_always_passes is active
+    # wildcard_variant_analyses is None when wildcard_always_passes is active
     cands = [Candidate(text="add shopping_list_item", intent_name="dummy", language="en")]
     res = _prefilter_wildcard_candidates(
         candidates=cands,
         query_tokens=frozenset({"add"}),
         wildcard_always_passes=frozenset({0}),
-        wildcard_variants_with_len=None,
+        wildcard_variant_analyses=None,
         wildcard_token_to_indices=None,
     )
     assert res == {0}
@@ -316,7 +317,7 @@ def test_prefilter_wildcard_candidates_stability() -> None:
         candidates=cands_no_wc,
         query_tokens=frozenset({"turn"}),
         wildcard_always_passes=None,
-        wildcard_variants_with_len=None,
+        wildcard_variant_analyses=None,
         wildcard_token_to_indices=None,
     )
     assert res_no_wc == set()
@@ -332,7 +333,7 @@ def test_prefilter_wildcard_candidates_stability() -> None:
         candidates=[cand_wc],
         query_tokens=frozenset({"abc", "def"}),
         wildcard_always_passes=None,
-        wildcard_variants_with_len=None,
+        wildcard_variant_analyses=None,
         wildcard_token_to_indices=None,
     )
     assert res_disjoint == set()
@@ -341,10 +342,16 @@ def test_prefilter_wildcard_candidates_stability() -> None:
 def test_prefilter_wildcard_candidates_skips_impossible_precomputed_match() -> None:
     """Skip wildcard variant scans when query overlap cannot meet the required hits."""
     cands = [Candidate(text="add item", intent_name="dummy", language="en")]
-    variants: dict[int, tuple[tuple[frozenset[str], int, int], ...]] = {
+    variants: dict[int, tuple[WildcardVariantAnalysis, ...]] = {
         0: (
-            (frozenset({"add", "to", "list"}), 3, 3),
-            (frozenset({"put", "on", "list"}), 3, 3),
+            WildcardVariantAnalysis(
+                literal_tokens=frozenset({"add", "to", "list"}),
+                required_match_count=3,
+            ),
+            WildcardVariantAnalysis(
+                literal_tokens=frozenset({"put", "on", "list"}),
+                required_match_count=3,
+            ),
         )
     }
 
@@ -352,7 +359,7 @@ def test_prefilter_wildcard_candidates_skips_impossible_precomputed_match() -> N
         candidates=cands,
         query_tokens=frozenset({"add"}),
         wildcard_always_passes=frozenset(),
-        wildcard_variants_with_len=variants,
+        wildcard_variant_analyses=variants,
         wildcard_token_to_indices={"add": (0,)},
         wildcard_literal_tokens_by_index={0: frozenset({"add", "to", "list", "put", "on"})},
         wildcard_min_required_by_index={0: 3},
@@ -363,7 +370,7 @@ def test_prefilter_wildcard_candidates_skips_impossible_precomputed_match() -> N
         candidates=cands,
         query_tokens=frozenset({"add", "to", "list"}),
         wildcard_always_passes=frozenset(),
-        wildcard_variants_with_len=variants,
+        wildcard_variant_analyses=variants,
         wildcard_token_to_indices={"add": (0,), "to": (0,), "list": (0,)},
         wildcard_literal_tokens_by_index={0: frozenset({"add", "to", "list", "put", "on"})},
         wildcard_min_required_by_index={0: 3},
@@ -384,7 +391,7 @@ def test_prefilter_wildcard_candidates_fallback_when_reverse_index_missing() -> 
             candidates=cands,
             query_tokens=frozenset({"add"}),
             wildcard_always_passes=frozenset(),
-            wildcard_variants_with_len=None,
+            wildcard_variant_analyses=None,
             wildcard_token_to_indices=None,
         )
         assert res == {0}
@@ -408,7 +415,14 @@ def test_prefilter_wildcard_candidates_fallback_when_precompute_bundle_incomplet
             candidates=cands,
             query_tokens=frozenset({"add"}),
             wildcard_always_passes=frozenset(),
-            wildcard_variants_with_len={0: ((frozenset({"other"}), 1, 1),)},
+            wildcard_variant_analyses={
+                0: (
+                    WildcardVariantAnalysis(
+                        literal_tokens=frozenset({"other"}),
+                        required_match_count=1,
+                    ),
+                )
+            },
             wildcard_token_to_indices={"add": (0,)},
             wildcard_literal_tokens_by_index=None,
             wildcard_min_required_by_index={0: 1},

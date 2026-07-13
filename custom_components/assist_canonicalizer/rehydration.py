@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from functools import lru_cache
 from math import ceil
-from typing import Any
+from typing import Any, NamedTuple
 
 from rapidfuzz import fuzz
 
@@ -17,6 +17,13 @@ from .const import (
 )
 from .normalization import normalize_text
 from .utils import wildcard_slot_names
+
+
+class WildcardVariantAnalysis(NamedTuple):
+    """Literal-token coverage requirements for one wildcard variant."""
+
+    literal_tokens: frozenset[str]
+    required_match_count: int
 
 
 @lru_cache(maxsize=512)
@@ -497,8 +504,8 @@ def _replace_wildcard_in_original(
 
 def wildcard_variants_analysis(
     candidate: Candidate,
-) -> tuple[tuple[tuple[frozenset[str], int, int], ...], frozenset[str]]:
-    """Compute wildcard variants with length/requirement checks and return a set of all tokens."""
+) -> tuple[tuple[WildcardVariantAnalysis, ...], frozenset[str]]:
+    """Compute wildcard literal-coverage requirements and return all literal tokens."""
     variants = candidate.literal_variants
     wc_names = tuple(name for _, name in candidate.wildcard_infos)
     return _wildcard_variants_analysis_cached(variants, wc_names)
@@ -508,9 +515,9 @@ def wildcard_variants_analysis(
 def _wildcard_variants_analysis_cached(
     variants: tuple[frozenset[str], ...],
     wc_names: tuple[str, ...],
-) -> tuple[tuple[tuple[frozenset[str], int, int], ...], frozenset[str]]:
+) -> tuple[tuple[WildcardVariantAnalysis, ...], frozenset[str]]:
     """Return wildcard literal coverage data for a literal variant/wildcard pair."""
-    var_with_len = []
+    variant_analyses: list[WildcardVariantAnalysis] = []
     seen_variants: set[tuple[frozenset[str], int]] = set()
     all_tokens_set = set()
     all_variant_tokens = {tok for var in variants for tok in var} if wc_names else set()
@@ -540,9 +547,14 @@ def _wildcard_variants_analysis_cached(
         if variant_key in seen_variants:
             continue
         seen_variants.add(variant_key)
-        var_with_len.append((clean_var, length, req))
+        variant_analyses.append(
+            WildcardVariantAnalysis(
+                literal_tokens=clean_var,
+                required_match_count=req,
+            )
+        )
         all_tokens_set.update(clean_var)
-    return tuple(var_with_len), frozenset(all_tokens_set)
+    return tuple(variant_analyses), frozenset(all_tokens_set)
 
 
 def _is_wildcard_literal_token(
