@@ -11,6 +11,7 @@ from custom_components.assist_canonicalizer.bm25 import BM25Index
 from custom_components.assist_canonicalizer.candidate import (
     Candidate,
     CandidateSource,
+    candidate_source_priority,
     slot_alias_values_by_key,
 )
 from custom_components.assist_canonicalizer.const import (
@@ -108,6 +109,28 @@ def test_index_deduplicates_by_normalized_text_with_source_priority() -> None:
     index = build_index("en", [generated, custom])
     assert index.candidate_count == 1
     assert index.candidates[0].source == CandidateSource.CUSTOM_SENTENCE
+
+
+def test_candidate_source_priority_policy_is_exhaustive() -> None:
+    """Require every candidate source to have an intentional trust priority."""
+    expected_priorities = {
+        CandidateSource.CUSTOM_SENTENCE: 0,
+        CandidateSource.BUILT_IN: 1,
+        CandidateSource.GENERATED_SAMPLE: 2,
+    }
+
+    assert set(expected_priorities) == set(CandidateSource)
+    assert {
+        source: candidate_source_priority(source) for source in CandidateSource
+    } == expected_priorities
+
+
+def test_candidate_source_priority_rejects_unconfigured_source() -> None:
+    """Explain incomplete source-priority policies instead of leaking a KeyError."""
+    unsupported_source = cast(CandidateSource, "future_source")
+
+    with pytest.raises(ValueError, match=r"No priority configured.*future_source"):
+        candidate_source_priority(unsupported_source)
 
 
 def test_index_deduplicates_with_hassil_domain_area_preference() -> None:
@@ -3057,6 +3080,21 @@ def test_wildcard_infos_multiple_wildcards_extraction() -> None:
     # Verify that wildcard_infos captures both wildcards.
     assert cand.has_wildcard is True
     assert cand.wildcard_infos == ((0, "wildcard_one"), (1, "wildcard_two"))
+
+
+def test_wildcard_infos_uses_persisted_candidate_metadata() -> None:
+    """Restore local wildcard ownership without relying on global registration."""
+    candidate = Candidate(
+        text="say local_free_text",
+        intent_name="TestIntent",
+        language="unregistered-language",
+        metadata={
+            "sentence_template": "say {local_free_text}",
+            "wildcard_slots": "local_free_text",
+        },
+    )
+
+    assert candidate.wildcard_infos == ((1, "local_free_text"),)
 
 
 def test_multi_wildcard_rehydration() -> None:

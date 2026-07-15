@@ -62,7 +62,7 @@ with contextlib.suppress(Exception):
     sig = inspect.signature(storage.Store.__init__)
     _STORE_HAS_SERIALIZE_IN_EVENT_LOOP = "serialize_in_event_loop" in sig.parameters
 _INDEX_STORE_VERSION = 1
-_INDEX_BUILD_VERSION = 3
+_INDEX_BUILD_VERSION = 4
 _INDEX_STORE_PREFIX = f"{DOMAIN}.index_"
 _INDEX_MANIFEST_KEY = f"{DOMAIN}.index_manifest"
 _INDEX_MANIFEST_VERSION = 1

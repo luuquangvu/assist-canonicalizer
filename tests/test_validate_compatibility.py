@@ -330,6 +330,18 @@ def test_matrix_pinned_dependency_list_supports_future_packages() -> None:
     )
 
 
+def test_matrix_specific_dependency_packages_do_not_mutate_required_state() -> None:
+    """Keep future package discovery isolated to the matrix row that requested it."""
+    required_before = validate_compatibility._REQUIRED_TEST_DEPS
+
+    with_extra = validate_compatibility._test_dep_packages({"example-dependency": "1.2.3"})
+    without_extra = validate_compatibility._test_dep_packages({})
+
+    assert with_extra == (*required_before, "example-dependency")
+    assert without_extra == required_before
+    assert validate_compatibility._REQUIRED_TEST_DEPS is required_before
+
+
 def test_matrix_pinned_dependency_list_rejects_homeassistant() -> None:
     """Home Assistant must be constrained only by the matrix ha_version field."""
     with pytest.raises(ValueError, match="must not pin package 'homeassistant'"):

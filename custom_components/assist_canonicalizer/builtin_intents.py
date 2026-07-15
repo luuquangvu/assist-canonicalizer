@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 import orjson
 import yaml
+from hassil.util import merge_dict
 from homeassistant.util import language as language_module
 
 
@@ -21,12 +23,20 @@ def load_language_intent_sources(
     if language_variant is None:
         return {}
 
-    sources: dict[str, Mapping[str, Any]] = {}
-    if built_in := _load_built_in_intents(language_variant):
-        sources["built_in"] = built_in
+    built_in = _load_built_in_intents(language_variant)
+    custom = _load_custom_sentences(language_variant, config_path)
 
-    if custom := _load_custom_sentences(language_variant, config_path):
-        sources["custom_sentence"] = custom
+    sources: dict[str, Mapping[str, Any]] = {}
+    if built_in and custom:
+        effective = deepcopy(dict(built_in))
+        merge_dict(effective, custom)
+        sources["built_in"] = _project_intent_source(effective, built_in)
+        sources["custom_sentence"] = _project_intent_source(effective, custom)
+    else:
+        if built_in:
+            sources["built_in"] = built_in
+        if custom:
+            sources["custom_sentence"] = custom
 
     return sources
 
@@ -78,7 +88,7 @@ def _load_custom_sentences(
         with sentence_file.open(encoding="utf-8") as file_handle:
             loaded = yaml.safe_load(file_handle)
         if isinstance(loaded, Mapping):
-            _merge_dict(merged, loaded)
+            merge_dict(merged, loaded)
     return merged
 
 
@@ -88,10 +98,29 @@ def _json_load(file_handle: Any) -> dict[str, Any]:
     return loaded if isinstance(loaded, dict) else {}
 
 
-def _merge_dict(target: dict[str, Any], source: Mapping[str, Any]) -> None:
-    """Recursively merge a mapping into a target dictionary."""
-    for key, value in source.items():
-        if key in target and isinstance(target[key], dict) and isinstance(value, Mapping):
-            _merge_dict(target[key], value)
+def _project_intent_source(
+    effective: Mapping[str, Any],
+    source: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return effective grammar context with only one source's intent data."""
+    projected = deepcopy(dict(effective))
+    effective_intents = effective.get("intents", {})
+    source_intents = source.get("intents", {})
+    if not isinstance(effective_intents, Mapping) or not isinstance(source_intents, Mapping):
+        projected["intents"] = deepcopy(source_intents)
+        return projected
+
+    projected_intents: dict[str, Any] = {}
+    for intent_name, source_intent in source_intents.items():
+        effective_intent = effective_intents.get(intent_name, source_intent)
+        if not isinstance(source_intent, Mapping) or not isinstance(effective_intent, Mapping):
+            projected_intents[intent_name] = deepcopy(source_intent)
+            continue
+        projected_intent = deepcopy(dict(effective_intent))
+        if "data" in source_intent:
+            projected_intent["data"] = deepcopy(source_intent["data"])
         else:
-            target[key] = value
+            projected_intent.pop("data", None)
+        projected_intents[intent_name] = projected_intent
+    projected["intents"] = projected_intents
+    return projected

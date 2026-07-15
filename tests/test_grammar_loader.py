@@ -547,6 +547,24 @@ def test_build_candidates_from_intent_sources_stops_at_total_cap() -> None:
     assert [candidate.text for candidate in candidates] == ["first one", "first two"]
 
 
+def test_build_candidates_reserves_global_cap_for_higher_priority_sources() -> None:
+    """Build custom sentences before built-ins can consume the language cap."""
+    candidates = build_candidates_from_intent_sources(
+        "en",
+        {
+            "built_in": {"intents": {"BuiltInIntent": {"data": [{"sentences": ["built in"]}]}}},
+            "custom_sentence": {
+                "intents": {"CustomIntent": {"data": [{"sentences": ["custom phrase"]}]}}
+            },
+        },
+        max_candidates=1,
+    )
+
+    assert [(candidate.text, candidate.source) for candidate in candidates] == [
+        ("custom phrase", CandidateSource.CUSTOM_SENTENCE)
+    ]
+
+
 def test_build_candidates_uses_multi_domain_context_scoped_registry_names() -> None:
     """Expand entity slots from all domains listed in HassIL context."""
     candidates = build_candidates_from_intent_sources(
@@ -783,6 +801,337 @@ def test_build_candidates_extracts_only_slots_referenced_by_template_rules() -> 
     assert slots == {"minutes": "1"}
 
 
+def test_build_candidates_preserve_distinct_equal_list_slot_bindings() -> None:
+    """Bind each rendered slot occurrence even when two lists have equal values."""
+    candidates = build_candidates_from_intent_sources(
+        "en",
+        {
+            "custom_sentence": {
+                "intents": {
+                    "SyntheticIntent": {
+                        "data": [
+                            {
+                                "sentences": ["{first:left} then {second:right}"],
+                                "lists": {
+                                    "first": {"values": ["alpha", "beta"]},
+                                    "second": {"values": ["alpha", "beta"]},
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+    )
+
+    candidate = next(item for item in candidates if item.text == "alpha then beta")
+    assert orjson.loads(candidate.metadata["slots"]) == {
+        "left": "alpha",
+        "right": "beta",
+    }
+
+
+def test_build_candidates_discard_conflicting_repeated_slot_bindings() -> None:
+    """Discard repeated output slots whose rendered values disagree."""
+    candidates = build_candidates_from_intent_sources(
+        "en",
+        {
+            "custom_sentence": {
+                "intents": {
+                    "SyntheticIntent": {
+                        "data": [
+                            {
+                                "sentences": ["{choice} then {choice}"],
+                                "lists": {"choice": {"values": ["alpha", "beta"]}},
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+    )
+
+    candidates_by_text = {candidate.text: candidate for candidate in candidates}
+    assert set(candidates_by_text) == {"alpha then alpha", "beta then beta"}
+    for value in ("alpha", "beta"):
+        candidate = candidates_by_text[f"{value} then {value}"]
+        assert orjson.loads(candidate.metadata["slots"]) == {"choice": value}
+        assert orjson.loads(candidate.metadata["slots_raw"]) == {"choice": value}
+
+
+def test_repeated_slot_conflicts_do_not_consume_template_expansion_cap() -> None:
+    """Collect capped valid repeats without counting conflicting combinations."""
+    cap = gl.DEFAULT_MAX_CANDIDATES_PER_TEMPLATE
+    values = [f"value_{index:03d}" for index in range(cap + 1)]
+    candidates = build_candidates_from_intent_sources(
+        "en",
+        {
+            "custom_sentence": {
+                "intents": {
+                    "SyntheticIntent": {
+                        "data": [
+                            {
+                                "sentences": ["{choice} then {choice}"],
+                                "lists": {"choice": {"values": values}},
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+    )
+
+    candidates_by_text = {candidate.text: candidate for candidate in candidates}
+    expected_values = values[:cap]
+    assert set(candidates_by_text) == {f"{value} then {value}" for value in expected_values}
+    for value in expected_values:
+        candidate = candidates_by_text[f"{value} then {value}"]
+        assert orjson.loads(candidate.metadata["slots"]) == {"choice": value}
+
+
+@pytest.mark.parametrize(
+    ("sentence", "expansion_rules", "expected"),
+    [
+        ("say {choice}", {}, frozenset()),
+        ("{choice} then {choice}", {}, frozenset({"choice"})),
+        ("({first:value}|{second:value})", {}, frozenset()),
+        ("({first:value};{second:value})", {}, frozenset({"value"})),
+        ("<pick> then <pick>", {"pick": "{choice}"}, frozenset({"choice"})),
+        ("[{choice}] {choice}", {}, frozenset({"choice"})),
+    ],
+)
+def test_template_repeated_output_names_follow_expansion_paths(
+    sentence: str,
+    expansion_rules: dict[str, str],
+    expected: frozenset[str],
+) -> None:
+    """Detect only output slots that can coexist on one expansion path."""
+    assert gl._template_repeated_output_names(sentence, expansion_rules) == expected
+
+
+def test_candidate_expansion_skips_conflict_filter_for_unique_outputs() -> None:
+    """Do not scan intermediate expansions when output slots are unique."""
+    with patch.object(
+        gl,
+        "_binding_tags_are_consistent",
+        side_effect=AssertionError("unique outputs must bypass the binding filter"),
+    ):
+        candidates = build_candidates_from_intent_sources(
+            "en",
+            {
+                "custom_sentence": {
+                    "intents": {
+                        "SyntheticIntent": {
+                            "data": [
+                                {
+                                    "sentences": ["{first:left} then {second:right}"],
+                                    "lists": {
+                                        "first": {"values": ["alpha"]},
+                                        "second": {"values": ["beta"]},
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                }
+            },
+        )
+
+    assert [candidate.text for candidate in candidates] == ["alpha then beta"]
+
+
+def test_candidate_expansion_skips_binding_tags_without_slots() -> None:
+    """Expand literal template syntax without allocating binding tags."""
+    with patch.object(
+        gl,
+        "_expansion_tag_context",
+        side_effect=AssertionError("slot-free templates must bypass binding tags"),
+    ):
+        candidates = build_candidates_from_intent_sources(
+            "en",
+            {
+                "custom_sentence": {
+                    "intents": {"SyntheticIntent": {"data": [{"sentences": ["turn (on|off)"]}]}}
+                }
+            },
+        )
+
+    assert {candidate.text for candidate in candidates} == {"turn on", "turn off"}
+
+
+def test_build_candidates_do_not_infer_slot_values_from_literal_text() -> None:
+    """Record the emitted slot value when another value occurs in template literals."""
+    candidates = build_candidates_from_intent_sources(
+        "en",
+        {
+            "custom_sentence": {
+                "intents": {
+                    "SyntheticIntent": {
+                        "data": [
+                            {
+                                "sentences": ["alpha {choice}"],
+                                "lists": {"choice": {"values": ["alpha", "beta"]}},
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+    )
+
+    candidate = next(item for item in candidates if item.text == "alpha beta")
+    assert orjson.loads(candidate.metadata["slots"]) == {"choice": "beta"}
+
+
+def test_slot_binding_tags_do_not_let_duplicate_values_consume_expansion_cap() -> None:
+    """Deduplicate equal slot inputs before adding internal binding tags."""
+    candidates = build_candidates_from_intent_sources(
+        "en",
+        {
+            "custom_sentence": {
+                "intents": {
+                    "SyntheticIntent": {
+                        "data": [
+                            {
+                                "sentences": ["choose {choice}"],
+                                "lists": {
+                                    "choice": {
+                                        "values": [
+                                            *(["alpha"] * gl.DEFAULT_MAX_CANDIDATES_PER_TEMPLATE),
+                                            "beta",
+                                        ]
+                                    }
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+    )
+
+    assert len(candidates) == 2
+    assert {candidate.text for candidate in candidates} == {"choose alpha", "choose beta"}
+
+
+def test_decode_candidate_expansion_strips_owned_tags_in_reference_order() -> None:
+    """Decode collision-free tags once and retain reference order."""
+    tag_context = gl._expansion_tag_context("alpha then beta __sb_9_9__", {}, {})
+    marker = tag_context.marker
+    first = gl._SlotBinding("first", "left", "alpha")
+    second = gl._SlotBinding("second", "right", "beta")
+    first_tag = f"{marker}b:0:0{marker}"
+    second_tag = f"{marker}b:1:0{marker}"
+    bindings = {
+        first_tag: first,
+        second_tag: second,
+    }
+
+    expansion = gl._decode_candidate_expansion(
+        f"{second_tag}beta then {first_tag}alpha and {second_tag}beta __sb_9_9__",
+        bindings,
+        tag_context,
+    )
+
+    assert expansion.text == "beta then alpha and beta __sb_9_9__"
+    assert expansion.slot_bindings == (first, second)
+
+
+def test_expansion_marker_avoids_all_rendered_source_inputs() -> None:
+    """Choose a marker absent from sentence, rule, and slot-value text."""
+    tag_context = gl._expansion_tag_context(
+        "say \ue000 <rule> {choice}",
+        {"choice": ("alpha \ue001",)},
+        {"rule": "value \ue002"},
+    )
+
+    assert tag_context.marker == "\ue003"
+
+
+def test_expansion_tag_context_reuses_cached_marker_patterns() -> None:
+    """Reuse compiled tag patterns when expansions select the same marker."""
+    gl._cached_expansion_tag_context.cache_clear()
+
+    first = gl._expansion_tag_context("say alpha", {}, {})
+    second = gl._expansion_tag_context("say beta", {}, {})
+
+    assert second is first
+    assert gl._cached_expansion_tag_context.cache_info().hits == 1
+
+
+def test_decode_candidate_expansion_rejects_missing_owned_binding() -> None:
+    """Fail explicitly when an injected marker has no binding-map entry."""
+    tag_context = gl._expansion_tag_context("say alpha", {}, {})
+    unknown_tag = f"{tag_context.marker}b:0:0{tag_context.marker}"
+
+    with pytest.raises(RuntimeError, match="Missing binding for injected slot tag"):
+        gl._decode_candidate_expansion(
+            f"say {unknown_tag}alpha",
+            {},
+            tag_context,
+        )
+
+
+def test_build_candidates_preserve_tag_shaped_sentence_literals() -> None:
+    """Preserve a literal that exactly matches the former first binding tag."""
+    candidates = build_candidates_from_intent_sources(
+        "en",
+        {
+            "custom_sentence": {
+                "intents": {
+                    "SyntheticIntent": {
+                        "data": [
+                            {
+                                "sentences": ["say __sb_0_0__ {choice}"],
+                                "lists": {"choice": {"values": ["alpha"]}},
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+    )
+
+    assert [candidate.text for candidate in candidates] == ["say __sb_0_0__ alpha"]
+    assert orjson.loads(candidates[0].metadata["slots"]) == {"choice": "alpha"}
+
+
+def test_build_candidates_preserve_wildcard_tag_shaped_sentence_literals() -> None:
+    """Decode only owned wildcard tags and preserve equivalent literal text."""
+    sources = {
+        "custom_sentence": {
+            "intents": {
+                "SyntheticIntent": {
+                    "data": [
+                        {
+                            "sentences": ["say __wc_choice__ {choice}"],
+                            "lists": {"choice": {"wildcard": True}},
+                        }
+                    ]
+                }
+            }
+        }
+    }
+    candidates = build_candidates_from_intent_sources("en", sources)
+
+    assert [candidate.text for candidate in candidates] == ["say __wc_choice__ choice"]
+    candidate = candidates[0]
+    assert len(candidate.wildcard_infos) == 1
+    wildcard_index, wildcard_name = candidate.wildcard_infos[0]
+    assert wildcard_name == "choice"
+    assert candidate.normalized_tokens[wildcard_index] == "choice"
+    assert orjson.loads(candidate.metadata["slots_raw"]) == {"choice": "choice"}
+
+    query_candidates = build_query_registry_candidates(
+        "en",
+        sources,
+        {},
+        "say __wc_choice__ choice",
+    )
+    assert [item.text for item in query_candidates] == ["say __wc_choice__ choice"]
+    assert len(query_candidates[0].wildcard_infos) == 1
+
+
 class TestRehydrateWildcardText:
     """Tests for rehydrate_wildcard_text wildcard placeholder rehydration."""
 
@@ -877,15 +1226,15 @@ class TestRehydrateWildcardText:
             patch("home_assistant_intents.get_languages", return_value=["en"]),
             patch("home_assistant_intents.get_intents", return_value=mock_data),
         ):
-            gl.wildcard_slot_names.cache_clear()
+            wildcard_slot_names.cache_clear()
             try:
                 self._test_wildcard_slot_names_populated()
             finally:
-                gl.wildcard_slot_names.cache_clear()
+                wildcard_slot_names.cache_clear()
 
     def _test_wildcard_slot_names_populated(self) -> None:
         """Test that wildcard_slot_names() returns only wildcards, not entities."""
-        names = gl.wildcard_slot_names()
+        names = wildcard_slot_names()
         assert "shopping_list_item" in names
         assert "todo_list_item" in names
         assert "timer_name" in names
