@@ -17,6 +17,10 @@ from custom_components.assist_canonicalizer.builtin_intents import (
     language_variant_for,
     load_language_intent_sources,
 )
+from custom_components.assist_canonicalizer.candidate import CandidateSource
+from custom_components.assist_canonicalizer.grammar_loader import (
+    build_candidates_from_intent_sources,
+)
 from custom_components.assist_canonicalizer.runtime import CanonicalizerRuntime
 
 
@@ -127,6 +131,10 @@ def test_load_custom_sentences_yaml_types_and_recursive_merge() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         # File 1: valid dict sentence config
         yaml_content_1 = """
+        lists:
+          modes:
+            values:
+              - "day"
         intents:
           HassTurnOn:
             data:
@@ -135,8 +143,15 @@ def test_load_custom_sentences_yaml_types_and_recursive_merge() -> None:
         """
         # File 2: valid dict sentence config to merge recursively
         yaml_content_2 = """
+        lists:
+          modes:
+            values:
+              - "night"
         intents:
           HassTurnOn:
+            data:
+              - sentences:
+                  - "mở {name}"
             other_data: 123
         """
         # File 3: YAML containing a list (not a Mapping) to test non-mapping skip
@@ -156,5 +171,107 @@ def test_load_custom_sentences_yaml_types_and_recursive_merge() -> None:
 
         res = _load_custom_sentences("vi", partial(_config_path_in_tmpdir, tmpdir))
         assert "intents" in res
-        assert res["intents"]["HassTurnOn"]["data"][0]["sentences"] == ["bật {name}"]
+        assert [item["sentences"] for item in res["intents"]["HassTurnOn"]["data"]] == [
+            ["bật {name}"],
+            ["mở {name}"],
+        ]
+        assert res["lists"]["modes"]["values"] == ["day", "night"]
         assert res["intents"]["HassTurnOn"]["other_data"] == 123
+
+
+def test_load_language_sources_inherit_effective_grammar_without_mixing_provenance() -> None:
+    """Give each source merged grammar context but retain only its own sentence data."""
+    built_in = {
+        "language": "en",
+        "expansion_rules": {"turn": "(turn|switch)"},
+        "lists": {"mode": {"values": ["day"]}},
+        "intents": {
+            "Demo": {
+                "data": [{"sentences": ["<turn> {mode}"]}],
+            }
+        },
+    }
+    custom = {
+        "language": "en",
+        "intents": {
+            "Demo": {
+                "data": [{"sentences": ["custom <turn> {mode}"]}],
+            }
+        },
+    }
+
+    with (
+        patch(
+            "custom_components.assist_canonicalizer.builtin_intents._load_built_in_intents",
+            return_value=built_in,
+        ),
+        patch(
+            "custom_components.assist_canonicalizer.builtin_intents._load_custom_sentences",
+            return_value=custom,
+        ),
+    ):
+        sources = load_language_intent_sources("en")
+
+    assert sources["built_in"]["intents"]["Demo"]["data"] == built_in["intents"]["Demo"]["data"]
+    assert (
+        sources["custom_sentence"]["intents"]["Demo"]["data"] == custom["intents"]["Demo"]["data"]
+    )
+    candidates = build_candidates_from_intent_sources("en", sources)
+    custom_texts = {
+        candidate.text for candidate in candidates if candidate.source.value == "custom_sentence"
+    }
+    assert custom_texts == {"custom turn day", "custom switch day"}
+
+
+def test_load_language_sources_isolate_missing_data_and_preserve_top_level_context() -> None:
+    """Do not borrow intent data while retaining the effective top-level context."""
+    built_in = {
+        "language": "en",
+        "integration_context": {"built_in": True},
+        "intents": {
+            "BuiltInData": {
+                "data": [{"sentences": ["built-in sentence"]}],
+            },
+            "CustomData": {
+                "expansion_rules": {"built_in_rule": "built-in"},
+            },
+        },
+    }
+    custom = {
+        "integration_context": {"custom": True},
+        "custom_top_level_key": {"enabled": True},
+        "intents": {
+            "BuiltInData": {
+                "expansion_rules": {"custom_rule": "custom"},
+            },
+            "CustomData": {
+                "data": [{"sentences": ["custom sentence"]}],
+            },
+        },
+    }
+
+    with (
+        patch(
+            "custom_components.assist_canonicalizer.builtin_intents._load_built_in_intents",
+            return_value=built_in,
+        ),
+        patch(
+            "custom_components.assist_canonicalizer.builtin_intents._load_custom_sentences",
+            return_value=custom,
+        ),
+    ):
+        sources = load_language_intent_sources("en")
+
+    expected_context = {"built_in": True, "custom": True}
+    for source in sources.values():
+        assert source["integration_context"] == expected_context
+        assert source["custom_top_level_key"] == {"enabled": True}
+
+    assert "data" not in sources["built_in"]["intents"]["CustomData"]
+    assert "data" not in sources["custom_sentence"]["intents"]["BuiltInData"]
+
+    candidates = build_candidates_from_intent_sources("en", sources)
+    assert {(candidate.text, candidate.source) for candidate in candidates} == {
+        ("built-in sentence", CandidateSource.BUILT_IN),
+        ("custom sentence", CandidateSource.CUSTOM_SENTENCE),
+    }

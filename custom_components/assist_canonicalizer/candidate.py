@@ -35,6 +35,14 @@ _SOURCE_PRIORITY = {
 }
 
 
+def candidate_source_priority(source: CandidateSource) -> int:
+    """Return lower priority values for more trusted candidate sources."""
+    try:
+        return _SOURCE_PRIORITY[source]
+    except KeyError:
+        raise ValueError(f"No priority configured for candidate source: {source!r}") from None
+
+
 @dataclass(frozen=True, slots=True)
 class Candidate:
     """Canonical utterance candidate."""
@@ -194,39 +202,35 @@ class Candidate:
     @property
     def source_priority(self) -> int:
         """Return lower priority values for more trusted candidate sources."""
-        return _SOURCE_PRIORITY[self.source]
+        return candidate_source_priority(self.source)
 
     @property
     def wildcard_infos(self) -> tuple[tuple[int, str], ...]:
         """Return all (index, wildcard_name) pairs of wildcard tokens."""
         infos = self._wildcard_infos
         if infos is None:
-            wildcards = wildcard_slot_names_sorted(self.language)
+            sentence_template = self.metadata.get("sentence_template")
+            wildcard_slots_meta = self.metadata.get("wildcard_slots")
+            if sentence_template is not None:
+                wildcards = (
+                    tuple(slot for slot in wildcard_slots_meta.split(",") if slot)
+                    if wildcard_slots_meta
+                    else ()
+                )
+            else:
+                wildcards = wildcard_slot_names_sorted(self.language)
             infos_list: list[tuple[int, str]] = []
             if wildcards:
                 text = self.text
                 if any(wc in text for wc in wildcards):
-                    sentence_template = self.metadata.get("sentence_template")
-                    wildcard_slots_meta = self.metadata.get("wildcard_slots")
-                    if sentence_template is not None:
-                        wildcard_slots = (
-                            frozenset(wildcard_slots_meta.split(","))
-                            if wildcard_slots_meta
-                            else frozenset()
-                        )
-                        active_wildcards = [wc for wc in wildcards if wc in wildcard_slots]
-                    else:
-                        active_wildcards = list(wildcards)
-
-                    if active_wildcards:
-                        for idx, token in enumerate(self.normalized_tokens):
-                            for wc in active_wildcards:
-                                if token == wc or (
-                                    wc in token
-                                    and ("_" in wc or token.startswith(wc) or token.endswith(wc))
-                                ):
-                                    infos_list.append((idx, wc))
-                                    break
+                    for idx, token in enumerate(self.normalized_tokens):
+                        for wc in wildcards:
+                            if token == wc or (
+                                wc in token
+                                and ("_" in wc or token.startswith(wc) or token.endswith(wc))
+                            ):
+                                infos_list.append((idx, wc))
+                                break
             infos = tuple(infos_list)
             object.__setattr__(self, "_wildcard_infos", infos)
         return infos

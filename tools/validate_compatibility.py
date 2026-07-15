@@ -34,13 +34,13 @@ _VENV_DEPENDENCY_MARKER = ".assist_canonicalizer_test_dependencies.json"
 
 _INTENTS_PACKAGE = "home-assistant-intents"
 
-_REQUIRED_TEST_DEPS = [
+_REQUIRED_TEST_DEPS = (
     "hassil",
     _INTENTS_PACKAGE,
     "pytest",
     "pytest-homeassistant-custom-component",
     "rapidfuzz",
-]
+)
 
 _COMPATIBILITY_PYTEST_ARGS = ["--no-cov", "-m", "not current_intents"]
 _COMPATIBILITY_METADATA_PROBE_TIMEOUT_SECONDS = 60
@@ -232,11 +232,7 @@ def _resolve_pinned_test_dependency_versions(
 
 def _test_dep_packages(pinned_test_dependency_versions: dict[str, str]) -> tuple[str, ...]:
     """Return base and matrix-pinned dependency package names."""
-    packages = _REQUIRED_TEST_DEPS
-    for package in pinned_test_dependency_versions:
-        if package not in packages:
-            packages.append(package)
-    return tuple(packages)
+    return tuple(dict.fromkeys((*_REQUIRED_TEST_DEPS, *pinned_test_dependency_versions)))
 
 
 def _venv_required_test_dep_versions(

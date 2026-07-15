@@ -14,7 +14,12 @@ from typing import Any
 
 import orjson
 
-from .candidate import Candidate, CandidateSource, candidate_dedupe_preference_key
+from .candidate import (
+    Candidate,
+    CandidateSource,
+    candidate_dedupe_preference_key,
+    candidate_source_priority,
+)
 from .const import (
     DEFAULT_MAX_CANDIDATES_PER_INTENT,
     DEFAULT_MAX_CANDIDATES_PER_TEMPLATE,
@@ -34,7 +39,6 @@ from .utils import (
     parse_float,
     register_custom_wildcards_from_sources,
     to_output_value,
-    wildcard_slot_names,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -51,8 +55,7 @@ _TEMPLATE_RELEVANCE_EXPANSION_LIMIT = 200
 _TEXT_RUN_STOP_CHARS = frozenset("[]()|{<;")
 _CONTEXT_ANCHOR_WINDOW = 3
 _MAX_TEMPLATE_NESTING_DEPTH = 25
-_WILDCARD_TAG_PREFIX = "__wc_"
-_WILDCARD_TAG_SUFFIX = "__"
+_EXPANSION_MARKER_CODEPOINTS = range(0xE000, 0xF900)
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +76,62 @@ class TemplateSlotReference:
 
     list_name: str
     output_name: str
+    raw_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class _SlotBinding:
+    """One exact slot value selected while expanding a template."""
+
+    list_name: str
+    output_name: str
+    raw_value: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ExpansionTagContext:
+    """Collision-free marker and decoders for one template expansion."""
+
+    marker: str
+    binding_pattern: re.Pattern[str]
+    wildcard_pattern: re.Pattern[str]
+
+
+@dataclass(frozen=True, slots=True)
+class _CandidateExpansion:
+    """Rendered candidate text and the slot bindings that produced it."""
+
+    text: str
+    slot_bindings: tuple[_SlotBinding, ...] = ()
+    wildcard_infos: tuple[tuple[int, str], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _DataItemCandidateState:
+    """Shared state for candidates generated from one intent data item."""
+
+    language: str
+    source_key: str
+    source: CandidateSource
+    intent_name: str
+    expansion_rules: Mapping[str, str]
+    base_slot_values: Mapping[str, tuple[str, ...]]
+    output_value_maps: Mapping[str, Mapping[str, Any]]
+    wildcard_slots: frozenset[str]
+    context_slots: frozenset[str]
+    static_slots: dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedCandidateSentence:
+    """Resolved expansion inputs and metadata for one sentence template."""
+
+    sentence: str
+    slot_references: tuple[TemplateSlotReference, ...]
+    slot_values: Mapping[str, tuple[str, ...]]
+    wildcard_slots: frozenset[str]
+    metadata: Mapping[str, str]
+    literal_variants: tuple[frozenset[str], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +142,7 @@ class _TemplateCompilationState:
     expansion_rules: Mapping[str, str]
     base_data_slot_values: Mapping[str, tuple[str, ...]]
     slot_output_value_maps: Mapping[str, Mapping[str, Any]]
+    wildcard_slots: frozenset[str]
     static_slots: Mapping[str, str]
     context_slots: frozenset[str]
     domains: tuple[str, ...]
@@ -151,7 +211,7 @@ class DynamicRegistryTemplate:
     sentence: str
     slot_references: tuple[TemplateSlotReference, ...]
     sentence_slots: frozenset[str]
-    slot_output_names: Mapping[str, tuple[str, ...]]
+    wildcard_slots: frozenset[str]
     slot_output_values: Mapping[str, Mapping[str, Any]]
     entity_slots: tuple[str, ...]
     query_slots: tuple[str, ...]
@@ -192,7 +252,11 @@ def build_candidates_from_intent_sources(
     if max_candidates is not None and max_candidates < 1:
         raise ValueError("max_candidates must be positive")
     candidates: list[Candidate] = []
-    for source_key, source_config in intent_sources.items():
+    ordered_sources = sorted(
+        intent_sources.items(),
+        key=lambda item: candidate_source_priority(_candidate_source_from_key(item[0])),
+    )
+    for source_key, source_config in ordered_sources:
         candidate_source = _candidate_source_from_key(source_key)
         intents = source_config.get("intents", {})
         if not isinstance(intents, Mapping):
@@ -264,7 +328,6 @@ def _compile_template_from_sentence(
     """Compile a single sentence into a DynamicRegistryTemplate, or None to skip."""
     slot_references = _template_slot_references(sentence, state.expansion_rules)
     sentence_slots = frozenset(ref.list_name for ref in slot_references)
-    slot_output_names = _slot_output_names(slot_references)
     literal_text, variants = _template_literals(sentence, state.expansion_rules)
     resolved_slots = set(state.base_data_slot_values) | set(state.static_slots)
     unresolved_slots = sentence_slots - resolved_slots
@@ -298,8 +361,8 @@ def _compile_template_from_sentence(
         base_metadata["context_slots"] = ",".join(sorted(state.context_slots))
     if query_slots:
         base_metadata["query_slots"] = ",".join(query_slots)
-    wildcards = wildcard_slot_names(state.language)
-    if sentence_wildcards := sentence_slots & wildcards:
+    sentence_wildcards = sentence_slots & state.wildcard_slots
+    if sentence_wildcards:
         base_metadata["wildcard_slots"] = ",".join(sorted(sentence_wildcards))
     range_slots = {
         slot_name: state.range_slots[slot_name]
@@ -310,7 +373,7 @@ def _compile_template_from_sentence(
         sentence=sentence,
         slot_references=slot_references,
         sentence_slots=sentence_slots,
-        slot_output_names=slot_output_names,
+        wildcard_slots=sentence_wildcards,
         slot_output_values={
             slot_name: state.slot_output_value_maps[slot_name]
             for slot_name in sentence_slots
@@ -358,6 +421,7 @@ def _compile_templates_from_data_item(
         source_config, intent_config, data_item
     )
     output_value_maps = _slot_output_value_maps(source_config, intent_config, data_item)
+    wildcard_slots = _wildcard_slots(source_config, intent_config, data_item)
     static_slots = _static_slot_values(data_item)
     context_slots = _context_slot_names(data_item)
     domains = _context_domains(data_item)
@@ -366,6 +430,7 @@ def _compile_templates_from_data_item(
         expansion_rules=expansion_rules,
         base_data_slot_values=base_data_slot_values,
         slot_output_value_maps=output_value_maps,
+        wildcard_slots=wildcard_slots,
         static_slots=static_slots,
         context_slots=context_slots,
         domains=domains,
@@ -588,6 +653,7 @@ def expand_sentence_template(
     *,
     max_expansions: int = DEFAULT_MAX_CANDIDATES_PER_TEMPLATE,
     fair: bool = False,
+    expansion_filter: Callable[[str], bool] | None = None,
 ) -> tuple[str, ...]:
     """Expand a bounded subset of HassIL sentence template syntax."""
     if max_expansions < 1:
@@ -599,81 +665,46 @@ def expand_sentence_template(
         frozenset(),
         max_expansions,
         fair=fair,
+        expansion_filter=expansion_filter,
     )
     return tuple(_deduplicate_texts(expansions, max_expansions))
 
 
 def _clean_wildcard_tokens(
     expanded_sentence: str,
+    tag_pattern: re.Pattern[str],
 ) -> tuple[str, list[tuple[int, str]]]:
-    """Split tokens, clean wildcards, and return clean sentence and wildcard infos."""
-    wc_pattern = re.compile(
-        f"{re.escape(_WILDCARD_TAG_PREFIX)}(.+?){re.escape(_WILDCARD_TAG_SUFFIX)}"
-    )
-    wc_names = wc_pattern.findall(expanded_sentence)
-
-    clean_sentence = wc_pattern.sub(r"\1", expanded_sentence)
-    clean_sentence = " ".join(clean_sentence.split())
-
-    norm_with_tags = normalize_text(expanded_sentence)
-    norm_tokens = norm_with_tags.split()
-
+    """Strip owned wildcard tags and return their normalized token positions."""
+    clean_parts: list[str] = []
     wildcard_infos: list[tuple[int, str]] = []
-    wc_idx = 0
-    for idx, token in enumerate(norm_tokens):
-        if _WILDCARD_TAG_PREFIX in token and wc_idx < len(wc_names):
-            wildcard_infos.append((idx, wc_names[wc_idx]))
-            wc_idx += 1
-
-    return clean_sentence, wildcard_infos
-
-
-def _parse_and_clean_wildcards(
-    expanded_sentence: str,
-    raw_slots: dict[str, Any],
-) -> tuple[str, tuple[tuple[int, str], ...]]:
-    """Parse wildcard tags, clean them from sentence and raw slots, and return wildcard infos."""
-    wildcard_infos: list[tuple[int, str]] = []
-    clean_sentence = expanded_sentence
-
-    if _WILDCARD_TAG_PREFIX in expanded_sentence:
-        clean_sentence, wildcard_infos = _clean_wildcard_tokens(expanded_sentence)
-
-        prefix_len = len(_WILDCARD_TAG_PREFIX)
-        suffix_len = len(_WILDCARD_TAG_SUFFIX)
-        for k, v in list(raw_slots.items()):
-            if (
-                isinstance(v, str)
-                and v.startswith(_WILDCARD_TAG_PREFIX)
-                and v.endswith(_WILDCARD_TAG_SUFFIX)
-            ):
-                raw_slots[k] = v[prefix_len:-suffix_len]
-
-    return clean_sentence, tuple(wildcard_infos)
+    cursor = 0
+    for match in tag_pattern.finditer(expanded_sentence):
+        clean_parts.append(expanded_sentence[cursor : match.start()])
+        wildcard_name = match.group(1)
+        clean_parts.append(wildcard_name)
+        if normalized_prefix := normalize_text("".join(clean_parts)):
+            wildcard_infos.append((len(normalized_prefix.split()) - 1, wildcard_name))
+        cursor = match.end()
+    clean_parts.append(expanded_sentence[cursor:])
+    return _clean_expanded_text("".join(clean_parts)), wildcard_infos
 
 
 def _build_candidate(
-    expanded_sentence: str,
+    expansion: _CandidateExpansion,
     intent_name: str,
     source: CandidateSource,
     language: str,
     base_metadata: Mapping[str, str],
-    presorted_values: dict[str, list[str]],
-    slot_output_names: Mapping[str, tuple[str, ...]] | None = None,
     slot_output_values: Mapping[str, Mapping[str, Any]] | None = None,
     static_slots_dict: dict[str, str] | None = None,
     literal_variants: tuple[frozenset[str], ...] | None = None,
     normalized_expanded_sentence: str | None = None,
-) -> Candidate:
-    """Construct a Candidate with extracted slot metadata."""
-    slots, raw_slots = _extract_slots_from_expanded_text(
-        expanded_sentence,
-        presorted_values,
-        slot_output_names,
-        slot_output_values,
-    )
-
-    clean_sentence, wildcard_infos = _parse_and_clean_wildcards(expanded_sentence, raw_slots)
+) -> Candidate | None:
+    """Construct a Candidate with exact slot metadata from template expansion."""
+    slot_mappings = _slots_from_bindings(expansion.slot_bindings, slot_output_values)
+    if slot_mappings is None:
+        return None
+    slots, raw_slots = slot_mappings
 
     if static_slots_dict:
         slots = {**static_slots_dict, **slots}
@@ -683,27 +714,160 @@ def _build_candidate(
         metadata["slots"] = orjson.dumps(slots).decode("utf-8")
         metadata["slots_raw"] = orjson.dumps(raw_slots).decode("utf-8")
     candidate = Candidate(
-        text=clean_sentence,
+        text=expansion.text,
         intent_name=intent_name,
         source=source,
         language=language,
         metadata=metadata,
         slot_values=tuple(str(value) for value in slots.values() if value is not None),
         normalized_text=(
-            normalized_expanded_sentence
-            if normalized_expanded_sentence is not None and clean_sentence == expanded_sentence
-            else ""
+            normalized_expanded_sentence if normalized_expanded_sentence is not None else ""
         ),
     )
     if literal_variants is not None:
         object.__setattr__(candidate, "_literal_variants", literal_variants)
-    object.__setattr__(candidate, "_wildcard_infos", tuple(wildcard_infos))
+    object.__setattr__(candidate, "_wildcard_infos", expansion.wildcard_infos)
     return candidate
 
 
 def _expanded_text_length_key(text: str) -> tuple[int, int]:
     """Return the candidate length sort key without allocating token lists."""
     return ((text.count(" ") + 1) if text else 0, len(text))
+
+
+def _data_item_candidate_state(
+    language: str,
+    source_key: str,
+    source_config: Mapping[str, Any],
+    source: CandidateSource,
+    intent_name: str,
+    intent_config: Mapping[str, Any],
+    data_item: Mapping[str, Any],
+) -> _DataItemCandidateState:
+    """Build data-item state shared by all of its sentence templates."""
+    return _DataItemCandidateState(
+        language=language,
+        source_key=source_key,
+        source=source,
+        intent_name=intent_name,
+        expansion_rules=_expansion_rules(source_config, intent_config, data_item),
+        base_slot_values=_slot_values(source_config, intent_config, data_item),
+        output_value_maps=_slot_output_value_maps(source_config, intent_config, data_item),
+        wildcard_slots=_wildcard_slots(source_config, intent_config, data_item),
+        context_slots=_context_slot_names(data_item),
+        static_slots=_static_slot_values(data_item),
+    )
+
+
+def _resolve_candidate_sentence_slots(
+    sentence: str,
+    data_item: Mapping[str, Any],
+    state: _DataItemCandidateState,
+    registry_slot_values: Mapping[str, tuple[str, ...]],
+) -> (
+    tuple[
+        tuple[TemplateSlotReference, ...],
+        dict[str, tuple[str, ...]],
+        frozenset[str],
+    ]
+    | None
+):
+    """Resolve slot references and values, or return None for an incomplete sentence."""
+    slot_references = _template_slot_references(sentence, state.expansion_rules)
+    sentence_slots = frozenset(ref.list_name for ref in slot_references)
+    slot_values = merge_slot_values(
+        state.base_slot_values,
+        _registry_slot_values_for_template(
+            data_item,
+            sentence_slots=sentence_slots,
+            base_data_slot_values=state.base_slot_values,
+            registry_slot_values=registry_slot_values,
+        ),
+    )
+    if any(not slot_values.get(slot) for slot in _required_slots(sentence, state.expansion_rules)):
+        return None
+    return slot_references, slot_values, sentence_slots & state.wildcard_slots
+
+
+def _candidate_sentence_metadata(
+    sentence: str,
+    wildcard_slots: frozenset[str],
+    state: _DataItemCandidateState,
+) -> tuple[dict[str, str], tuple[frozenset[str], ...]]:
+    """Build candidate metadata shared by every expansion of one sentence."""
+    literal_text, variants = _template_literals(sentence, state.expansion_rules)
+    metadata = _candidate_metadata(
+        state.source_key,
+        sentence,
+        state.expansion_rules,
+        literal_text=literal_text,
+        literal_variants=variants,
+    )
+    if state.static_slots:
+        metadata["static_slots"] = ",".join(sorted(state.static_slots))
+    if state.context_slots:
+        metadata["context_slots"] = ",".join(sorted(state.context_slots))
+    if wildcard_slots:
+        metadata["wildcard_slots"] = ",".join(sorted(wildcard_slots))
+    return metadata, variants
+
+
+def _prepare_candidate_sentence(
+    sentence: str,
+    data_item: Mapping[str, Any],
+    state: _DataItemCandidateState,
+    registry_slot_values: Mapping[str, tuple[str, ...]],
+) -> _PreparedCandidateSentence | None:
+    """Prepare one sentence for bounded candidate expansion."""
+    resolved_slots = _resolve_candidate_sentence_slots(
+        sentence,
+        data_item,
+        state,
+        registry_slot_values,
+    )
+    if resolved_slots is None:
+        return None
+    slot_references, slot_values, wildcard_slots = resolved_slots
+    metadata, variants = _candidate_sentence_metadata(sentence, wildcard_slots, state)
+    return _PreparedCandidateSentence(
+        sentence=sentence,
+        slot_references=slot_references,
+        slot_values=slot_values,
+        wildcard_slots=wildcard_slots,
+        metadata=metadata,
+        literal_variants=variants,
+    )
+
+
+def _prepared_sentence_candidates(
+    prepared: _PreparedCandidateSentence,
+    state: _DataItemCandidateState,
+) -> Iterable[Candidate]:
+    """Yield candidates for one fully prepared sentence template."""
+    expansions = _candidate_expansions(
+        prepared.sentence,
+        prepared.slot_values,
+        state.expansion_rules,
+        prepared.slot_references,
+        prepared.wildcard_slots,
+        slot_output_values=state.output_value_maps,
+    )
+    for expansion in sorted(
+        expansions,
+        key=lambda item: _expanded_text_length_key(item.text),
+    ):
+        candidate = _build_candidate(
+            expansion,
+            state.intent_name,
+            state.source,
+            state.language,
+            prepared.metadata,
+            state.output_value_maps,
+            state.static_slots,
+            literal_variants=prepared.literal_variants,
+        )
+        if candidate is not None:
+            yield candidate
 
 
 def _data_item_candidates_generator(
@@ -720,73 +884,28 @@ def _data_item_candidates_generator(
     sentences = data_item.get("sentences", [])
     if not isinstance(sentences, list):
         return
-    expansion_rules = _expansion_rules(source_config, intent_config, data_item)
-    base_data_slot_values = _slot_values(source_config, intent_config, data_item)
-    output_value_maps = _slot_output_value_maps(source_config, intent_config, data_item)
-    context_slots = _context_slot_names(data_item)
+    state = _data_item_candidate_state(
+        language,
+        source_key,
+        source_config,
+        source,
+        intent_name,
+        intent_config,
+        data_item,
+    )
 
     for sentence in sentences:
         if not isinstance(sentence, str):
             continue
-        slot_references = _template_slot_references(sentence, expansion_rules)
-        sentence_slots = frozenset(ref.list_name for ref in slot_references)
-        slot_output_names = _slot_output_names(slot_references)
-        slot_values = merge_slot_values(
-            base_data_slot_values,
-            _registry_slot_values_for_template(
-                data_item,
-                sentence_slots=sentence_slots,
-                base_data_slot_values=base_data_slot_values,
-                registry_slot_values=registry_slot_values,
-            ),
-        )
-        required = _required_slots(sentence, expansion_rules)
-        if any(not slot_values.get(slot) for slot in required):
-            continue
-
-        static_slots_dict = _static_slot_values(data_item)
-
-        literal_text, variants = _template_literals(sentence, expansion_rules)
-        base_metadata = _candidate_metadata(
-            source_key,
+        prepared = _prepare_candidate_sentence(
             sentence,
-            expansion_rules,
-            literal_text=literal_text,
-            literal_variants=variants,
+            data_item,
+            state,
+            registry_slot_values,
         )
-        if static_slots_dict:
-            base_metadata = dict(base_metadata)
-            base_metadata["static_slots"] = ",".join(sorted(static_slots_dict.keys()))
-        if context_slots:
-            if not isinstance(base_metadata, dict):
-                base_metadata = dict(base_metadata)
-            base_metadata["context_slots"] = ",".join(sorted(context_slots))
-
-        wildcards = wildcard_slot_names(language)
-        if sentence_wildcards := sentence_slots & wildcards:
-            if not isinstance(base_metadata, dict):
-                base_metadata = dict(base_metadata)
-            base_metadata["wildcard_slots"] = ",".join(sorted(sentence_wildcards))
-
-        presorted_values = _presort_slot_values(
-            _referenced_slot_values(slot_values, slot_references)
-        )
-        expanded_sentences = _candidate_texts(sentence, slot_values, expansion_rules)
-        # Sort each sentence's candidates by length (word count, then character length)
-        sorted_sentences = sorted(expanded_sentences, key=_expanded_text_length_key)
-        for expanded_sentence in sorted_sentences:
-            yield _build_candidate(
-                expanded_sentence,
-                intent_name,
-                source,
-                language,
-                base_metadata,
-                presorted_values,
-                slot_output_names,
-                output_value_maps,
-                static_slots_dict,
-                literal_variants=variants,
-            )
+        if prepared is None:
+            continue
+        yield from _prepared_sentence_candidates(prepared, state)
 
 
 def _candidates_from_intent_config(
@@ -1211,23 +1330,23 @@ def _append_query_template_candidates(
     limit: int,
 ) -> None:
     """Append query-expanded template candidates until the template limit is reached."""
-    presorted_values = _presort_slot_values(
-        _referenced_slot_values(slot_values, template.slot_references)
-    )
     slot_output_values = _build_slot_output_values(template, slot_values)
     static_slots_dict = dict(template.static_slots)
 
     base_metadata = dict(template.metadata)
 
-    for expanded_sentence, expanded_normalized in _query_candidate_texts(
+    for expansion, expanded_normalized in _query_candidate_expansions(
         template.sentence,
         slot_values,
         template.expansion_rules,
+        template.slot_references,
+        template.wildcard_slots,
         query_normalized,
         query_tokens,
+        slot_output_values=slot_output_values,
     ):
         if domain_area_exact_rescue and not _is_exact_query_rescue_candidate(
-            expanded_sentence,
+            expansion.text,
             query_normalized,
             query_no_diac,
             language,
@@ -1237,22 +1356,21 @@ def _append_query_template_candidates(
         key = (expanded_normalized, intent_name)
         if key in seen:
             continue
-        seen.add(key)
-        candidates.append(
-            _build_candidate(
-                expanded_sentence,
-                intent_name,
-                source,
-                language,
-                base_metadata,
-                presorted_values,
-                template.slot_output_names,
-                slot_output_values,
-                static_slots_dict,
-                literal_variants=template.literal_token_variants,
-                normalized_expanded_sentence=expanded_normalized,
-            )
+        candidate = _build_candidate(
+            expansion,
+            intent_name,
+            source,
+            language,
+            base_metadata,
+            slot_output_values,
+            static_slots_dict,
+            literal_variants=template.literal_token_variants,
+            normalized_expanded_sentence=expanded_normalized,
         )
+        if candidate is None:
+            continue
+        seen.add(key)
+        candidates.append(candidate)
         if len(candidates) >= limit:
             return
 
@@ -1817,111 +1935,294 @@ def _candidate_metadata(
     return metadata
 
 
-def _presort_slot_values(
-    slot_values: Mapping[str, tuple[str, ...]],
-) -> dict[str, list[str]]:
-    """Return slot values pre-sorted longest-first for substring extraction."""
-    shared: dict[tuple[str, ...], list[str]] = {}
-    presorted: dict[str, list[str]] = {}
-    for slot_name, values in slot_values.items():
-        sorted_values = shared.get(values)
-        if sorted_values is None:
-            sorted_values = sorted(values, key=len, reverse=True)
-            shared[values] = sorted_values
-        presorted[slot_name] = sorted_values
-    return presorted
-
-
-def _extract_slots_from_expanded_text(
-    text: str,
-    slot_values: Mapping[str, Sequence[str]],
-    slot_output_names: Mapping[str, tuple[str, ...]] | None = None,
-    slot_output_values: Mapping[str, Mapping[str, Any]] | None = None,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Extract slot values present in the expanded text.
-
-    Values must be pre-sorted longest-first (see :func:`_presort_slot_values`).
-    """
-    slots = {}
-    raw_slots = {}
-    previous_values: Sequence[str] | None = None
-    previous_match: str | None = None
-    for slot_name, values in slot_values.items():
-        if values is previous_values:
-            matched = previous_match
-        else:
-            matched = next((val for val in values if val in text), None)
-            previous_values = values
-            previous_match = matched
-        if matched is not None:
-            output_value = (
-                slot_output_values.get(slot_name, {}).get(matched, matched)
-                if slot_output_values is not None
-                else matched
-            )
-            output_names = (
-                slot_output_names.get(slot_name, (slot_name,))
-                if slot_output_names is not None
-                else (slot_name,)
-            )
-            for output_name in output_names:
-                slots.setdefault(output_name, output_value)
-                raw_slots.setdefault(output_name, matched)
-    return slots, raw_slots
-
-
-def _referenced_slot_values(
-    slot_values: Mapping[str, tuple[str, ...]],
-    slot_references: Iterable[TemplateSlotReference],
-) -> dict[str, tuple[str, ...]]:
-    """Return only slot values referenced by the current template."""
-    selected = {}
-    for reference in slot_references:
-        if reference.list_name in selected:
-            continue
-        if values := slot_values.get(reference.list_name):
-            selected[reference.list_name] = values
-    return selected
-
-
-def _candidate_texts(
-    sentence: str,
-    slot_values: Mapping[str, tuple[str, ...]],
-    expansion_rules: Mapping[str, str],
-) -> tuple[str, ...]:
-    """Return candidate texts for a sentence template."""
-    if is_fixed_sentence(sentence):
-        return (_clean_expanded_text(sentence),)
-    return expand_sentence_template(
-        sentence,
-        slot_values,
-        expansion_rules,
-        max_expansions=DEFAULT_MAX_CANDIDATES_PER_TEMPLATE,
+def _slot_binding_output_value(
+    binding: _SlotBinding,
+    slot_output_values: Mapping[str, Mapping[str, Any]] | None,
+) -> Any:
+    """Return the resolved output value for one slot binding."""
+    if slot_output_values is None:
+        return binding.raw_value
+    return slot_output_values.get(binding.list_name, {}).get(
+        binding.raw_value,
+        binding.raw_value,
     )
 
 
-def _query_candidate_texts(
+def _slots_from_bindings(
+    slot_bindings: Sequence[_SlotBinding],
+    slot_output_values: Mapping[str, Mapping[str, Any]] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Return slot mappings, or reject bindings that conflict by output name."""
+    slots: dict[str, Any] = {}
+    raw_slots: dict[str, Any] = {}
+    for binding in slot_bindings:
+        output_value = _slot_binding_output_value(binding, slot_output_values)
+        if binding.output_name in slots:
+            if (
+                slots[binding.output_name] != output_value
+                or raw_slots[binding.output_name] != binding.raw_value
+            ):
+                return None
+            continue
+        slots[binding.output_name] = output_value
+        raw_slots[binding.output_name] = binding.raw_value
+    return slots, raw_slots
+
+
+def _expansion_tag_context(
     sentence: str,
     slot_values: Mapping[str, tuple[str, ...]],
     expansion_rules: Mapping[str, str],
-    query_normalized: str,
-    query_tokens: frozenset[str],
-) -> tuple[tuple[str, str], ...]:
-    """Return query-relevant candidate texts for a dynamic template."""
+) -> _ExpansionTagContext:
+    """Return compact tag decoders with a marker absent from rendered inputs."""
+    used_chars = set(sentence)
+    for rule in expansion_rules.values():
+        used_chars.update(rule)
+    for slot_name, values in slot_values.items():
+        used_chars.update(slot_name)
+        for value in values:
+            used_chars.update(value)
+    for codepoint in _EXPANSION_MARKER_CODEPOINTS:
+        marker = chr(codepoint)
+        if marker not in used_chars:
+            return _cached_expansion_tag_context(marker)
+    raise ValueError("No collision-free expansion marker is available")
+
+
+@lru_cache(maxsize=128)
+def _cached_expansion_tag_context(marker: str) -> _ExpansionTagContext:
+    """Return cached binding and wildcard decoders for one marker."""
+    escaped_marker = re.escape(marker)
+    return _ExpansionTagContext(
+        marker=marker,
+        binding_pattern=re.compile(rf"{escaped_marker}b:(\d+):(\d+){escaped_marker}"),
+        wildcard_pattern=re.compile(
+            rf"{escaped_marker}w:(.+?){escaped_marker}",
+            re.DOTALL,
+        ),
+    )
+
+
+def _tagged_slot_values(
+    slot_values: Mapping[str, tuple[str, ...]],
+    slot_references: Sequence[TemplateSlotReference],
+    wildcard_slots: frozenset[str],
+    tag_context: _ExpansionTagContext,
+) -> tuple[dict[str, tuple[str, ...]], dict[str, _SlotBinding]]:
+    """Tag each slot choice so rendered text retains its exact binding."""
+    tagged_values = dict(slot_values)
+    bindings_by_tag: dict[str, _SlotBinding] = {}
+    tagged_reference_names: set[str] = set()
+    for reference_index, reference in enumerate(slot_references):
+        if reference.raw_name in tagged_reference_names:
+            continue
+        tagged_reference_names.add(reference.raw_name)
+        values = slot_values.get(reference.list_name)
+        if not values:
+            continue
+        is_wildcard = reference.list_name in wildcard_slots
+        tagged_reference_values: list[str] = []
+        for value_index, raw_value in enumerate(dict.fromkeys(values)):
+            binding_tag = (
+                f"{tag_context.marker}b:{reference_index}:{value_index}{tag_context.marker}"
+            )
+            binding_value = reference.list_name if is_wildcard else raw_value
+            bindings_by_tag[binding_tag] = _SlotBinding(
+                list_name=reference.list_name,
+                output_name=reference.output_name,
+                raw_value=binding_value,
+            )
+            rendered_value = (
+                f"{tag_context.marker}w:{reference.list_name}{tag_context.marker}"
+                if is_wildcard
+                else raw_value
+            )
+            tagged_reference_values.append(f"{binding_tag}{rendered_value}")
+        tagged_values[reference.raw_name] = tuple(tagged_reference_values)
+    return tagged_values, bindings_by_tag
+
+
+def _decode_candidate_expansion(
+    tagged_text: str,
+    bindings_by_tag: Mapping[str, _SlotBinding],
+    tag_context: _ExpansionTagContext,
+) -> _CandidateExpansion:
+    """Strip this expansion's collision-free tags and return its bindings."""
+    selected_by_tag: dict[str, tuple[int, int, _SlotBinding]] = {}
+
+    def _strip_known_tag(match: re.Match[str]) -> str:
+        tag = match.group(0)
+        binding = bindings_by_tag.get(tag)
+        if binding is None:
+            raise RuntimeError(f"Missing binding for injected slot tag: {tag!r}")
+        selected_by_tag.setdefault(
+            tag,
+            (int(match.group(1)), int(match.group(2)), binding),
+        )
+        return ""
+
+    text_without_bindings = tag_context.binding_pattern.sub(_strip_known_tag, tagged_text)
+    selected_bindings = sorted(
+        selected_by_tag.values(),
+        key=lambda selected: (selected[0], selected[1]),
+    )
+    clean_text, wildcard_infos = _clean_wildcard_tokens(
+        text_without_bindings,
+        tag_context.wildcard_pattern,
+    )
+    return _CandidateExpansion(
+        text=clean_text,
+        slot_bindings=tuple(selected[2] for selected in selected_bindings),
+        wildcard_infos=tuple(wildcard_infos),
+    )
+
+
+def _binding_tags_are_consistent(
+    tagged_text: str,
+    bindings_by_tag: Mapping[str, _SlotBinding],
+    tag_context: _ExpansionTagContext,
+    slot_output_values: Mapping[str, Mapping[str, Any]] | None,
+    repeated_output_names: frozenset[str],
+) -> bool:
+    """Return whether repeated output slots select the same values."""
+    output_values_by_output: dict[str, Any] = {}
+    raw_values_by_output: dict[str, str] = {}
+    for match in tag_context.binding_pattern.finditer(tagged_text):
+        tag = match.group(0)
+        binding = bindings_by_tag.get(tag)
+        if binding is None:
+            raise RuntimeError(f"Missing binding for injected slot tag: {tag!r}")
+        if binding.output_name not in repeated_output_names:
+            continue
+        output_value = _slot_binding_output_value(binding, slot_output_values)
+        if binding.output_name in raw_values_by_output:
+            if (
+                output_values_by_output[binding.output_name] != output_value
+                or raw_values_by_output[binding.output_name] != binding.raw_value
+            ):
+                return False
+            continue
+        output_values_by_output[binding.output_name] = output_value
+        raw_values_by_output[binding.output_name] = binding.raw_value
+    return True
+
+
+def _expand_candidate_template(
+    sentence: str,
+    slot_values: Mapping[str, tuple[str, ...]],
+    expansion_rules: Mapping[str, str],
+    slot_references: Sequence[TemplateSlotReference],
+    wildcard_slots: frozenset[str],
+    *,
+    max_expansions: int,
+    fair: bool = False,
+    slot_output_values: Mapping[str, Mapping[str, Any]] | None = None,
+) -> tuple[_CandidateExpansion, ...]:
+    """Expand a template while preserving exact slot bindings."""
     if is_fixed_sentence(sentence):
-        cleaned = _clean_expanded_text(sentence)
-        return ((cleaned, normalize_text(cleaned)),)
-    expanded = expand_sentence_template(
+        return (_CandidateExpansion(_clean_expanded_text(sentence)),)
+    if not slot_references:
+        return tuple(
+            _CandidateExpansion(text)
+            for text in expand_sentence_template(
+                sentence,
+                slot_values,
+                expansion_rules,
+                max_expansions=max_expansions,
+                fair=fair,
+            )
+        )
+    tag_context = _expansion_tag_context(sentence, slot_values, expansion_rules)
+    tagged_values, bindings_by_tag = _tagged_slot_values(
+        slot_values,
+        slot_references,
+        wildcard_slots,
+        tag_context,
+    )
+    repeated_output_names = _template_repeated_output_names(sentence, expansion_rules)
+    expansion_filter: Callable[[str], bool] | None = None
+    if repeated_output_names:
+
+        def _filter_binding_tags(tagged_text: str) -> bool:
+            return _binding_tags_are_consistent(
+                tagged_text,
+                bindings_by_tag,
+                tag_context,
+                slot_output_values,
+                repeated_output_names,
+            )
+
+        expansion_filter = _filter_binding_tags
+    tagged_expansions = expand_sentence_template(
+        sentence,
+        tagged_values,
+        expansion_rules,
+        max_expansions=max_expansions,
+        fair=fair,
+        expansion_filter=expansion_filter,
+    )
+    unique: dict[
+        tuple[str, tuple[_SlotBinding, ...], tuple[tuple[int, str], ...]],
+        _CandidateExpansion,
+    ] = {}
+    for tagged_text in tagged_expansions:
+        expansion = _decode_candidate_expansion(tagged_text, bindings_by_tag, tag_context)
+        unique.setdefault(
+            (expansion.text, expansion.slot_bindings, expansion.wildcard_infos),
+            expansion,
+        )
+    return tuple(unique.values())
+
+
+def _candidate_expansions(
+    sentence: str,
+    slot_values: Mapping[str, tuple[str, ...]],
+    expansion_rules: Mapping[str, str],
+    slot_references: Sequence[TemplateSlotReference],
+    wildcard_slots: frozenset[str],
+    *,
+    slot_output_values: Mapping[str, Mapping[str, Any]] | None = None,
+) -> tuple[_CandidateExpansion, ...]:
+    """Return bounded candidate expansions for a sentence template."""
+    return _expand_candidate_template(
         sentence,
         slot_values,
         expansion_rules,
+        slot_references,
+        wildcard_slots,
+        max_expansions=DEFAULT_MAX_CANDIDATES_PER_TEMPLATE,
+        slot_output_values=slot_output_values,
+    )
+
+
+def _query_candidate_expansions(
+    sentence: str,
+    slot_values: Mapping[str, tuple[str, ...]],
+    expansion_rules: Mapping[str, str],
+    slot_references: Sequence[TemplateSlotReference],
+    wildcard_slots: frozenset[str],
+    query_normalized: str,
+    query_tokens: frozenset[str],
+    *,
+    slot_output_values: Mapping[str, Mapping[str, Any]] | None = None,
+) -> tuple[tuple[_CandidateExpansion, str], ...]:
+    """Return query-relevant candidate expansions for a dynamic template."""
+    expanded = _expand_candidate_template(
+        sentence,
+        slot_values,
+        expansion_rules,
+        slot_references,
+        wildcard_slots,
         max_expansions=max(
             DEFAULT_MAX_CANDIDATES_PER_TEMPLATE,
             _TEMPLATE_RELEVANCE_EXPANSION_LIMIT,
         ),
         fair=True,
+        slot_output_values=slot_output_values,
     )
-    normalized_expanded = tuple((text, normalize_text(text)) for text in expanded)
+    normalized_expanded = tuple(
+        (expansion, normalize_text(expansion.text)) for expansion in expanded
+    )
     return tuple(
         sorted(
             normalized_expanded,
@@ -2226,6 +2527,7 @@ class _HassilNode:
         limit: int,
         *,
         fair: bool = False,
+        expansion_filter: Callable[[str], bool] | None = None,
     ) -> tuple[str, ...]:
         """Expand node into all spoken text variants using slots and rules."""
         raise NotImplementedError()
@@ -2259,6 +2561,7 @@ class _HassilTextNode(_HassilNode):
         limit: int,
         *,
         fair: bool = False,
+        expansion_filter: Callable[[str], bool] | None = None,
     ) -> tuple[str, ...]:
         """Expand node into all spoken text variants using slots and rules."""
         return (self.text,)
@@ -2292,6 +2595,7 @@ class _HassilSlotNode(_HassilNode):
         limit: int,
         *,
         fair: bool = False,
+        expansion_filter: Callable[[str], bool] | None = None,
     ) -> tuple[str, ...]:
         """Expand node into all spoken text variants using slots and rules."""
         base_name = self.name.split(":")[0]
@@ -2339,6 +2643,7 @@ class _HassilRuleNode(_HassilNode):
         limit: int,
         *,
         fair: bool = False,
+        expansion_filter: Callable[[str], bool] | None = None,
     ) -> tuple[str, ...]:
         """Expand node into all spoken text variants using slots and rules."""
         if self.name in seen:
@@ -2347,7 +2652,14 @@ class _HassilRuleNode(_HassilNode):
         if rule_text is None:
             return ()
         node = _parse_hassil(rule_text)
-        return node.expand(slot_values, rules, seen | {self.name}, limit, fair=fair)
+        return node.expand(
+            slot_values,
+            rules,
+            seen | {self.name},
+            limit,
+            fair=fair,
+            expansion_filter=expansion_filter,
+        )
 
 
 class _HassilOptionalNode(_HassilNode):
@@ -2378,10 +2690,18 @@ class _HassilOptionalNode(_HassilNode):
         limit: int,
         *,
         fair: bool = False,
+        expansion_filter: Callable[[str], bool] | None = None,
     ) -> tuple[str, ...]:
         """Expand node into all spoken text variants using slots and rules."""
         return _unique_capped_with_empty(
-            self.child.expand(slot_values, rules, seen, limit, fair=fair),
+            self.child.expand(
+                slot_values,
+                rules,
+                seen,
+                limit,
+                fair=fair,
+                expansion_filter=expansion_filter,
+            ),
             limit,
         )
 
@@ -2418,11 +2738,19 @@ class _HassilAlternativeNode(_HassilNode):
         limit: int,
         *,
         fair: bool = False,
+        expansion_filter: Callable[[str], bool] | None = None,
     ) -> tuple[str, ...]:
         """Expand node into all spoken text variants using slots and rules."""
         if fair:
             branch_expansions = [
-                branch.expand(slot_values, rules, seen, limit, fair=True)
+                branch.expand(
+                    slot_values,
+                    rules,
+                    seen,
+                    limit,
+                    fair=True,
+                    expansion_filter=expansion_filter,
+                )
                 for branch in self.branches
             ]
             return _interleave_unique_capped(branch_expansions, limit)
@@ -2431,7 +2759,14 @@ class _HassilAlternativeNode(_HassilNode):
             remaining = limit - len(unique_expansions)
             if remaining < 1:
                 break
-            for val in branch.expand(slot_values, rules, seen, remaining, fair=False):
+            for val in branch.expand(
+                slot_values,
+                rules,
+                seen,
+                remaining,
+                fair=False,
+                expansion_filter=expansion_filter,
+            ):
                 if val not in unique_expansions:
                     unique_expansions[val] = None
                     if len(unique_expansions) >= limit:
@@ -2473,15 +2808,32 @@ class _HassilPermutationNode(_HassilNode):
         limit: int,
         *,
         fair: bool = False,
+        expansion_filter: Callable[[str], bool] | None = None,
     ) -> tuple[str, ...]:
         """Expand node into all spoken text variants using slots and rules."""
         return self._permuted_texts(
-            [branch.expand(slot_values, rules, seen, limit, fair=fair) for branch in self.branches],
+            [
+                branch.expand(
+                    slot_values,
+                    rules,
+                    seen,
+                    limit,
+                    fair=fair,
+                    expansion_filter=expansion_filter,
+                )
+                for branch in self.branches
+            ],
             limit,
+            expansion_filter=expansion_filter,
         )
 
     @staticmethod
-    def _permuted_texts(branch_fragments: list[tuple[str, ...]], limit: int) -> tuple[str, ...]:
+    def _permuted_texts(
+        branch_fragments: list[tuple[str, ...]],
+        limit: int,
+        *,
+        expansion_filter: Callable[[str], bool] | None = None,
+    ) -> tuple[str, ...]:
         """Return capped text variants for every branch order."""
         if not branch_fragments:
             return ("",)
@@ -2489,6 +2841,8 @@ class _HassilPermutationNode(_HassilNode):
         for ordered_fragments in permutations(branch_fragments):
             for fragments in product(*ordered_fragments):
                 text = " ".join(fragment.strip() for fragment in fragments if fragment.strip())
+                if expansion_filter is not None and not expansion_filter(text):
+                    continue
                 if text not in unique:
                     unique[text] = None
                     if len(unique) >= limit:
@@ -2516,6 +2870,7 @@ class _HassilSequenceNode(_HassilNode):
         limit: int,
         *,
         fair: bool,
+        expansion_filter: Callable[[str], bool] | None = None,
     ) -> tuple[str, ...]:
         """Cartesian-product accumulation of child fragments with deduplication."""
         if not child_fragments:
@@ -2528,6 +2883,8 @@ class _HassilSequenceNode(_HassilNode):
                 for inner in inner_values:
                     prefix, fragment = (inner, outer) if fair else (outer, inner)
                     combined = f"{prefix}{fragment}"
+                    if expansion_filter is not None and not expansion_filter(combined):
+                        continue
                     if combined not in next_results:
                         next_results[combined] = None
                         if len(next_results) >= limit:
@@ -2559,14 +2916,89 @@ class _HassilSequenceNode(_HassilNode):
         limit: int,
         *,
         fair: bool = False,
+        expansion_filter: Callable[[str], bool] | None = None,
     ) -> tuple[str, ...]:
         """Expand node into all spoken text variants using slots and rules."""
         if not self.children:
             return ("",)
         child_fragments = [
-            child.expand(slot_values, rules, seen, limit, fair=fair) for child in self.children
+            child.expand(
+                slot_values,
+                rules,
+                seen,
+                limit,
+                fair=fair,
+                expansion_filter=expansion_filter,
+            )
+            for child in self.children
         ]
-        return self._accumulate(child_fragments, limit, fair=fair)
+        return self._accumulate(
+            child_fragments,
+            limit,
+            fair=fair,
+            expansion_filter=expansion_filter,
+        )
+
+
+def _merge_slot_output_occurrences(
+    nodes: Iterable[_HassilNode],
+    rules: Mapping[str, str],
+    seen_rules: frozenset[str],
+    *,
+    alternatives: bool,
+) -> dict[str, int]:
+    """Merge maximum output-slot occurrences across child nodes."""
+    merged: dict[str, int] = {}
+    for node in nodes:
+        for output_name, count in _slot_output_occurrences(node, rules, seen_rules).items():
+            if alternatives:
+                merged[output_name] = max(merged.get(output_name, 0), count)
+            else:
+                merged[output_name] = min(2, merged.get(output_name, 0) + count)
+    return merged
+
+
+def _slot_output_occurrences(
+    node: _HassilNode,
+    rules: Mapping[str, str],
+    seen_rules: frozenset[str],
+) -> dict[str, int]:
+    """Return maximum output-slot occurrences on any path through one node."""
+    if isinstance(node, _HassilSlotNode):
+        output_name = _slot_reference(node.name).output_name
+        return {output_name: 1} if output_name else {}
+    if isinstance(node, _HassilRuleNode):
+        if node.name in seen_rules or (rule_text := rules.get(node.name)) is None:
+            return {}
+        return _slot_output_occurrences(
+            _parse_hassil(rule_text),
+            rules,
+            seen_rules | {node.name},
+        )
+    if isinstance(node, _HassilOptionalNode):
+        return _slot_output_occurrences(node.child, rules, seen_rules)
+    if isinstance(node, _HassilAlternativeNode):
+        return _merge_slot_output_occurrences(
+            node.branches,
+            rules,
+            seen_rules,
+            alternatives=True,
+        )
+    if isinstance(node, _HassilPermutationNode):
+        return _merge_slot_output_occurrences(
+            node.branches,
+            rules,
+            seen_rules,
+            alternatives=False,
+        )
+    if isinstance(node, _HassilSequenceNode):
+        return _merge_slot_output_occurrences(
+            node.children,
+            rules,
+            seen_rules,
+            alternatives=False,
+        )
+    return {}
 
 
 def _make_branch_node(branch: list[_HassilNode]) -> _HassilNode:
@@ -2689,6 +3121,31 @@ def _required_slots(
     )
 
 
+def _template_repeated_output_names(
+    text: str,
+    expansion_rules: Mapping[str, str],
+) -> frozenset[str]:
+    """Return cached output names that can occur repeatedly in one expansion."""
+    return _cached_repeated_output_names(
+        text,
+        _expansion_rules_cache_key(expansion_rules),
+    )
+
+
+@lru_cache(maxsize=4096)
+def _cached_repeated_output_names(
+    text: str,
+    expansion_rules_key: tuple[tuple[str, str], ...],
+) -> frozenset[str]:
+    """Return output names whose maximum path occurrence exceeds one."""
+    occurrences = _slot_output_occurrences(
+        _parse_hassil(text),
+        dict(expansion_rules_key),
+        frozenset(),
+    )
+    return frozenset(name for name, count in occurrences.items() if count > 1)
+
+
 @lru_cache(maxsize=4096)
 def _cached_required_slots(
     text: str,
@@ -2764,22 +3221,15 @@ def _cached_template_slot_references(
 
 def _slot_reference(raw: str) -> TemplateSlotReference:
     """Parse a HassIL slot reference into expansion list and output slot names."""
-    list_name, separator, output_name = raw.partition(":")
+    raw_name = raw.strip()
+    list_name, separator, output_name = raw_name.partition(":")
     list_name = list_name.strip()
     output_name = output_name.strip() if separator else list_name
-    return TemplateSlotReference(list_name=list_name, output_name=output_name or list_name)
-
-
-def _slot_output_names(
-    slot_references: Iterable[TemplateSlotReference],
-) -> dict[str, tuple[str, ...]]:
-    """Return output slot names keyed by expansion list name."""
-    output_names: dict[str, list[str]] = {}
-    for reference in slot_references:
-        names = output_names.setdefault(reference.list_name, [])
-        if reference.output_name not in names:
-            names.append(reference.output_name)
-    return {list_name: tuple(names) for list_name, names in output_names.items()}
+    return TemplateSlotReference(
+        list_name=list_name,
+        output_name=output_name or list_name,
+        raw_name=raw_name,
+    )
 
 
 def _context_domains(data_item: Mapping[str, Any]) -> tuple[str, ...]:
@@ -2851,6 +3301,23 @@ def _effective_list_configs(
             if isinstance(list_name, str):
                 list_configs[list_name] = list_config
     return list_configs
+
+
+def _wildcard_slots(
+    source_config: Mapping[str, Any],
+    intent_config: Mapping[str, Any],
+    data_item: Mapping[str, Any],
+) -> frozenset[str]:
+    """Return list names configured as wildcards in the effective grammar."""
+    return frozenset(
+        list_name
+        for list_name, list_config in _effective_list_configs(
+            source_config,
+            intent_config,
+            data_item,
+        ).items()
+        if isinstance(list_config, Mapping) and list_config.get("wildcard")
+    )
 
 
 def _compile_range_data(
@@ -3018,7 +3485,7 @@ def _values_from_list_config(list_config: Any, list_name: str | None = None) -> 
             return
 
         if list_config.get("wildcard"):
-            yield f"{_WILDCARD_TAG_PREFIX}{list_name or 'wildcard'}{_WILDCARD_TAG_SUFFIX}"
+            yield list_name or "wildcard"
             return
 
     if isinstance(list_config, list):
@@ -3055,7 +3522,7 @@ def _value_outputs_from_list_config(
 
         if list_config.get("wildcard"):
             wildcard = list_name or "wildcard"
-            yield f"{_WILDCARD_TAG_PREFIX}{wildcard}{_WILDCARD_TAG_SUFFIX}", wildcard
+            yield wildcard, wildcard
             return
 
     if isinstance(list_config, list):
@@ -3136,7 +3603,9 @@ def clear_grammar_loader_caches() -> None:
     _compact_script_phrase_fallback_enabled.cache_clear()
     _uses_compact_non_latin_script.cache_clear()
     _cached_normalize_no_diac.cache_clear()
+    _cached_expansion_tag_context.cache_clear()
     _cached_template_literals.cache_clear()
+    _cached_repeated_output_names.cache_clear()
     _cached_required_slots.cache_clear()
     _cached_template_slot_references.cache_clear()
     _parse_hassil.cache_clear()
