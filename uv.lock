@@ -247,7 +247,7 @@ wheels = [
 
 [[package]]
 name = "assist-canonicalizer"
-version = "1.8.0"
+version = "1.8.1"
 source = { virtual = "." }
 dependencies = [
     { name = "rapidfuzz" },
