@@ -8,7 +8,9 @@ from collections.abc import Mapping
 from functools import lru_cache
 from math import isclose
 from string import whitespace
+from threading import Lock
 from time import monotonic
+from types import MappingProxyType
 from typing import Any
 
 from .builtin_intents import language_variant_for
@@ -39,7 +41,11 @@ _TENTHS_FRACTIONS = (
 _STRIPPED_CHARS = "".join(PRESERVED_UNIT_SUFFIXES) + whitespace
 _HAS_DIGIT_RE = re.compile(r"\d")
 
-_CUSTOM_WILDCARD_SLOTS: dict[str, set[str]] = {}
+# Readers retain immutable snapshots while writers publish a replacement under the lock.
+_EMPTY_WILDCARD_NAMES: frozenset[str] = frozenset()
+_EMPTY_WILDCARD_REGISTRY: Mapping[str, frozenset[str]] = MappingProxyType({})
+_CUSTOM_WILDCARD_SLOTS: Mapping[str, frozenset[str]] = _EMPTY_WILDCARD_REGISTRY
+_CUSTOM_WILDCARD_SLOTS_LOCK = Lock()
 NormalizedIntentContext = Mapping[str, frozenset[str]]
 
 
@@ -75,6 +81,15 @@ def normalize_language(language: str) -> str:
     if language_variant is not None:
         return language_variant
     return requested.replace("_", "-").lower()
+
+
+def _wildcard_language_key(language: str) -> str:
+    """Return a memory-only wildcard registry key with unknown-language fallback."""
+    if not isinstance(language, str):
+        raise ValueError("Language must be a non-empty string")
+    if requested := language.strip():
+        return requested.replace("_", "-").lower()
+    raise ValueError("Language must not be empty")
 
 
 def intent_context_from_area_name(area_name: str | None) -> dict[str, dict[str, str]] | None:
@@ -119,9 +134,7 @@ def normalize_intent_context(
 def register_custom_wildcards_from_sources(
     language: str | None, intent_sources: Mapping[str, Mapping[str, Any]]
 ) -> None:
-    """Extract wildcard slot names from intent sources and register them."""
-    if not intent_sources:
-        return
+    """Replace one language's in-memory wildcard names from loaded intent sources."""
     wildcards: set[str] = set()
     for source_config in intent_sources.values():
         lists = source_config.get("lists", {})
@@ -129,21 +142,43 @@ def register_custom_wildcards_from_sources(
             for name, list_config in lists.items():
                 if isinstance(list_config, Mapping) and list_config.get("wildcard"):
                     wildcards.add(name)
-    if wildcards:
-        try:
-            norm_lang = normalize_language(language) if language else ""
-        except ValueError:
-            norm_lang = ""
-        if norm_lang not in _CUSTOM_WILDCARD_SLOTS:
-            _CUSTOM_WILDCARD_SLOTS[norm_lang] = set()
-        _CUSTOM_WILDCARD_SLOTS[norm_lang].update(wildcards)
-        _wildcard_slot_names.cache_clear()
-        wildcard_slot_names_sorted.cache_clear()
+    try:
+        canonical_language = normalize_language(language) if language else ""
+        norm_lang = _wildcard_language_key(canonical_language) if canonical_language else ""
+    except ValueError:
+        norm_lang = ""
+    registered = frozenset(wildcards) if wildcards else _EMPTY_WILDCARD_NAMES
+    _publish_registered_wildcards(norm_lang, registered)
 
 
-@lru_cache(maxsize=128)
+def _publish_registered_wildcards(norm_lang: str | None, registered: frozenset[str]) -> None:
+    """Publish an immutable wildcard registry snapshot under the writer lock.
+
+    A ``None`` language clears the complete registry. An empty set removes one
+    language. The published mapping and its values must remain immutable so
+    readers can safely retain a lock-free snapshot.
+    """
+    global _CUSTOM_WILDCARD_SLOTS
+    with _CUSTOM_WILDCARD_SLOTS_LOCK:
+        current = _CUSTOM_WILDCARD_SLOTS
+        if norm_lang is None:
+            if not current:
+                return
+            _CUSTOM_WILDCARD_SLOTS = _EMPTY_WILDCARD_REGISTRY
+            return
+        existing = current.get(norm_lang)
+        if existing == registered or (existing is None and not registered):
+            return
+        updated = dict(current)
+        if registered:
+            updated[norm_lang] = registered
+        else:
+            updated.pop(norm_lang, None)
+        _CUSTOM_WILDCARD_SLOTS = MappingProxyType(updated) if updated else _EMPTY_WILDCARD_REGISTRY
+
+
 def _wildcard_slot_names(language: str | None = None) -> frozenset[str]:
-    """Return all known wildcard slot names for the given language from home_assistant_intents.
+    """Return registered wildcard names without performing I/O.
 
     Wildcard slots (``"wildcard": true`` in HassIL lists) capture free-form
     user text, they have no predefined values.  Candidate templates expand
@@ -151,45 +186,26 @@ def _wildcard_slot_names(language: str | None = None) -> frozenset[str]:
     and the placeholder must be rehydrated from the original query before
     delegation.
 
-    The result is computed once and cached.
+    Intent sources and canonical language variants are resolved by the runtime's
+    executor build path. Keeping this query-time accessor memory-only guarantees
+    that it never consults the external intents corpus on Home Assistant's event
+    loop.
     """
-    names: set[str] = set()
+    registered_by_language = _CUSTOM_WILDCARD_SLOTS
     if language:
         try:
-            norm_lang = normalize_language(language)
+            norm_lang = _wildcard_language_key(language)
         except ValueError:
             norm_lang = ""
-        if norm_lang in _CUSTOM_WILDCARD_SLOTS:
-            names.update(_CUSTOM_WILDCARD_SLOTS[norm_lang])
-    else:
-        for custom_set in _CUSTOM_WILDCARD_SLOTS.values():
-            names.update(custom_set)
-
-    with contextlib.suppress(Exception):
-        import home_assistant_intents
-
-        languages = [language] if language else home_assistant_intents.get_languages()
-        for lang in languages:
-            try:
-                data = home_assistant_intents.get_intents(lang)
-            except Exception:
-                continue
-            if not isinstance(data, dict):
-                continue
-            lists = data.get("lists", {})
-            if not isinstance(lists, dict):
-                continue
-            for name, config in lists.items():
-                if isinstance(config, dict) and config.get("wildcard"):
-                    names.add(name)
-    return frozenset(names)
+        return registered_by_language.get(norm_lang, _EMPTY_WILDCARD_NAMES)
+    return frozenset(name for registered in registered_by_language.values() for name in registered)
 
 
 class _WildcardSlotNamesWrapper:
-    """Wrapper for wildcard_slot_names to support dynamic cache clearing."""
+    """Wrapper for wildcard_slot_names to support scoped registry clearing."""
 
     def __init__(self, func: Any) -> None:
-        """Initialize the wrapper with the cached function."""
+        """Initialize the wrapper with the registry accessor function."""
         self._func = func
 
     def __call__(self, language: str | None = None) -> frozenset[str]:
@@ -197,31 +213,34 @@ class _WildcardSlotNamesWrapper:
         return self._func(language)
 
     def cache_clear(self, language: str | None = None) -> None:
-        """Clear custom wildcards and delegation caches.
+        """Clear registered wildcards and the derived sorting cache.
 
         Passing a language removes only that language's custom wildcard
-        registrations while still clearing the shared LRU caches.
+        registrations.
         """
         if language is None:
-            _CUSTOM_WILDCARD_SLOTS.clear()
+            norm_lang = None
         else:
             try:
-                norm_lang = normalize_language(language)
+                norm_lang = _wildcard_language_key(language)
             except ValueError:
                 norm_lang = ""
-            _CUSTOM_WILDCARD_SLOTS.pop(norm_lang, None)
-        self._func.cache_clear()
-        wildcard_slot_names_sorted.cache_clear()
+        _publish_registered_wildcards(norm_lang, _EMPTY_WILDCARD_NAMES)
+        _sorted_wildcard_slot_names.cache_clear()
 
 
 wildcard_slot_names = _WildcardSlotNamesWrapper(_wildcard_slot_names)
 
 
 @lru_cache(maxsize=128)
-def wildcard_slot_names_sorted(language: str | None = None) -> tuple[str, ...]:
-    """Return all known wildcard slot names sorted by length descending (cached)."""
-    names = wildcard_slot_names(language)
+def _sorted_wildcard_slot_names(names: frozenset[str]) -> tuple[str, ...]:
+    """Return one immutable wildcard name set sorted by length descending."""
     return tuple(sorted(names, key=len, reverse=True))
+
+
+def wildcard_slot_names_sorted(language: str | None = None) -> tuple[str, ...]:
+    """Return all known wildcard slot names sorted by length descending."""
+    return _sorted_wildcard_slot_names(wildcard_slot_names(language))
 
 
 @lru_cache(maxsize=1024)
@@ -291,7 +310,5 @@ def to_output_value(val_float: float) -> int | float:
 def clear_utils_caches() -> None:
     """Clear all global LRU caches in utils module."""
     normalize_language.cache_clear()
-    _wildcard_slot_names.cache_clear()
-    wildcard_slot_names_sorted.cache_clear()
+    wildcard_slot_names.cache_clear()
     parse_float.cache_clear()
-    _CUSTOM_WILDCARD_SLOTS.clear()

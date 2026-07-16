@@ -6,7 +6,7 @@ atypical input conditions, missing dependencies, and external errors.
 
 from __future__ import annotations
 
-import sys
+from threading import Event, Thread, current_thread
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import custom_components.assist_canonicalizer.config_flow as cf
+import custom_components.assist_canonicalizer.utils as utils
 from custom_components.assist_canonicalizer.bm25 import BM25Index
 from custom_components.assist_canonicalizer.candidate import (
     Candidate,
@@ -61,14 +62,26 @@ def test_normalize_language_stability() -> None:
         normalize_language("   ")
 
 
-def test_wildcard_slot_names_import_error_stability() -> None:
-    """Verify that wildcard_slot_names handles missing home_assistant_intents dependency."""
-    with patch.dict(sys.modules, {"home_assistant_intents": None}):
-        wildcard_slot_names.cache_clear()
-        try:
+def test_wildcard_slot_names_is_memory_only() -> None:
+    """Never load the external intents corpus from the synchronous accessor."""
+    wildcard_slot_names.cache_clear()
+    try:
+        register_custom_wildcards_from_sources(
+            "en",
+            {"built_in": {"lists": {"message": {"wildcard": True}}}},
+        )
+        normalize_language.cache_clear()
+        with (
+            patch("home_assistant_intents.get_languages") as get_languages,
+            patch("home_assistant_intents.get_intents") as get_intents,
+        ):
+            assert wildcard_slot_names("en") == frozenset({"message"})
+            wildcard_slot_names.cache_clear("en")
             assert wildcard_slot_names("en") == frozenset()
-        finally:
-            wildcard_slot_names.cache_clear()
+        get_languages.assert_not_called()
+        get_intents.assert_not_called()
+    finally:
+        wildcard_slot_names.cache_clear()
 
 
 def test_wildcard_slot_names_cache_clear_can_scope_custom_language() -> None:
@@ -76,7 +89,7 @@ def test_wildcard_slot_names_cache_clear_can_scope_custom_language() -> None:
     wildcard_slot_names.cache_clear()
     try:
         register_custom_wildcards_from_sources(
-            "xx-one",
+            "XX_one",
             {"custom": {"lists": {"one_custom_wildcard": {"wildcard": True}}}},
         )
         register_custom_wildcards_from_sources(
@@ -84,10 +97,10 @@ def test_wildcard_slot_names_cache_clear_can_scope_custom_language() -> None:
             {"custom": {"lists": {"two_custom_wildcard": {"wildcard": True}}}},
         )
 
-        assert "one_custom_wildcard" in wildcard_slot_names("xx-one")
+        assert "one_custom_wildcard" in wildcard_slot_names("xx_one")
         assert "two_custom_wildcard" in wildcard_slot_names("xx-two")
 
-        wildcard_slot_names.cache_clear("xx-one")
+        wildcard_slot_names.cache_clear("XX-ONE")
 
         assert "one_custom_wildcard" not in wildcard_slot_names("xx-one")
         assert "two_custom_wildcard" in wildcard_slot_names("xx-two")
@@ -95,51 +108,80 @@ def test_wildcard_slot_names_cache_clear_can_scope_custom_language() -> None:
         wildcard_slot_names.cache_clear()
 
 
-def test_wildcard_slot_names_exceptions_and_types_stability() -> None:
-    """Verify that wildcard_slot_names isolates external intents parsing errors."""
-    pytest.importorskip("home_assistant_intents")
-    import home_assistant_intents as intents_module
-
-    # Exception raised during intents parsing
+def test_wildcard_slot_names_replaces_stale_and_malformed_sources() -> None:
+    """Keep the in-memory registry aligned with the latest loaded sources."""
     wildcard_slot_names.cache_clear()
-    with patch.object(intents_module, "get_intents", side_effect=Exception("mock error")):
-        try:
-            assert wildcard_slot_names("en") == frozenset()
-        finally:
-            wildcard_slot_names.cache_clear()
+    try:
+        register_custom_wildcards_from_sources(
+            "en",
+            {"custom": {"lists": {"old_wildcard": {"wildcard": True}}}},
+        )
+        assert wildcard_slot_names_sorted("en") == ("old_wildcard",)
 
-    # Returned intents data is not a dict
+        register_custom_wildcards_from_sources(
+            "en",
+            {"custom": {"lists": []}},
+        )
+        assert wildcard_slot_names("en") == frozenset()
+        assert wildcard_slot_names_sorted("en") == ()
+
+        register_custom_wildcards_from_sources("en", {})
+        assert wildcard_slot_names("en") == frozenset()
+    finally:
+        wildcard_slot_names.cache_clear()
+
+
+def test_wildcard_slot_names_concurrent_registration_cannot_cache_stale_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep subsequent reads current when registration overlaps an in-flight read."""
     wildcard_slot_names.cache_clear()
-    with patch.object(intents_module, "get_intents", return_value="not-a-dict"):
-        try:
-            assert wildcard_slot_names("en") == frozenset()
-        finally:
-            wildcard_slot_names.cache_clear()
+    reader_entered = Event()
+    release_reader = Event()
+    observed: list[frozenset[str]] = []
+    reader_name = "wildcard-registry-reader"
+    original_wildcard_language_key = utils._wildcard_language_key
+    reader: Thread | None = None
 
-    # Returned lists structure is not a dict
-    wildcard_slot_names.cache_clear()
-    with patch.object(intents_module, "get_intents", return_value={"lists": []}):
-        try:
-            assert wildcard_slot_names("en") == frozenset()
-        finally:
-            wildcard_slot_names.cache_clear()
+    def controlled_wildcard_language_key(language: str) -> str:
+        """Pause only the reader after it has entered the registry accessor."""
+        if current_thread().name == reader_name:
+            reader_entered.set()
+            if not release_reader.wait(timeout=5):
+                raise TimeoutError("Wildcard registry reader was not released")
+        return original_wildcard_language_key(language)
 
-    # Exception in outer try block
-    wildcard_slot_names.cache_clear()
-    with patch.object(intents_module, "get_languages", side_effect=ValueError("bad")):
-        try:
-            assert wildcard_slot_names(None) == frozenset()
-        finally:
-            wildcard_slot_names.cache_clear()
+    try:
+        register_custom_wildcards_from_sources(
+            "en",
+            {"custom": {"lists": {"old_wildcard": {"wildcard": True}}}},
+        )
+        monkeypatch.setattr(utils, "_wildcard_language_key", controlled_wildcard_language_key)
+        reader = Thread(
+            target=lambda: observed.append(wildcard_slot_names("en")),
+            name=reader_name,
+        )
+        reader.start()
+        assert reader_entered.wait(timeout=5)
 
-    # Test sorted wrapper handles outer exceptions
-    wildcard_slot_names_sorted.cache_clear()
-    with patch.object(intents_module, "get_languages", side_effect=ValueError("bad")):
-        try:
-            assert wildcard_slot_names_sorted(None) == ()
-        finally:
-            wildcard_slot_names.cache_clear()
-            wildcard_slot_names_sorted.cache_clear()
+        register_custom_wildcards_from_sources(
+            "en",
+            {"custom": {"lists": {"new_wildcard": {"wildcard": True}}}},
+        )
+        release_reader.set()
+        reader.join(timeout=5)
+
+        assert not reader.is_alive()
+        assert observed in (
+            [frozenset({"old_wildcard"})],
+            [frozenset({"new_wildcard"})],
+        )
+        assert wildcard_slot_names("en") == frozenset({"new_wildcard"})
+    finally:
+        release_reader.set()
+        if reader is not None:
+            reader.join(timeout=5)
+        wildcard_slot_names.cache_clear()
 
 
 def test_candidate_literal_variants_recovers_from_corrupt_metadata() -> None:
@@ -301,7 +343,17 @@ def test_ranking_stability() -> None:
 def test_prefilter_wildcard_candidates_stability() -> None:
     """Verify prefiltering candidate selector defaults cleanly on empty lookups."""
     # wildcard_variant_analyses is None when wildcard_always_passes is active
-    cands = [Candidate(text="add shopping_list_item", intent_name="dummy", language="en")]
+    cands = [
+        Candidate(
+            text="add shopping_list_item",
+            intent_name="dummy",
+            language="en",
+            metadata={
+                "sentence_template": "add {shopping_list_item}",
+                "wildcard_slots": "shopping_list_item",
+            },
+        )
+    ]
     res = _prefilter_wildcard_candidates(
         candidates=cands,
         query_tokens=frozenset({"add"}),
@@ -327,7 +379,11 @@ def test_prefilter_wildcard_candidates_stability() -> None:
         text="spiel den search_querypodcast",
         intent_name="dummy",
         language="de",
-        metadata={"literal_text": "spiel|den"},
+        metadata={
+            "sentence_template": "spiel den {search_query}podcast",
+            "wildcard_slots": "search_query",
+            "literal_text": "spiel|den",
+        },
     )
     res_disjoint = _prefilter_wildcard_candidates(
         candidates=[cand_wc],

@@ -34,8 +34,8 @@ from .const import (
     NAME,
     FallbackReason,
 )
-from .grammar_loader import rehydrate_wildcard_text
 from .ranking import RankedCandidate, evaluate_confidence_gates
+from .rehydration import get_wildcard_rehydration
 from .runtime import CanonicalizerRuntime
 from .utils import (
     elapsed_ms,
@@ -386,7 +386,7 @@ class AssistCanonicalizerConversationEntity(
 
         candidate = ranked_candidate.candidate
         candidate_text = candidate.text
-        rehydrated = rehydrate_wildcard_text(candidate_text, user_input.text, user_input.language)
+        rehydrated, _replacements = get_wildcard_rehydration(candidate, user_input.text)
         if candidate.has_wildcard and rehydrated == candidate_text:
             return None
 

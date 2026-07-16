@@ -50,8 +50,6 @@ from .utils import (
     clear_utils_caches,
     normalize_language,
     register_custom_wildcards_from_sources,
-    wildcard_slot_names,
-    wildcard_slot_names_sorted,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -870,20 +868,10 @@ def _create_build_snapshot_and_register_wildcards(
     subscribed_sources: dict[str, Mapping[str, Any]],
     registry_slot_values: dict[str, tuple[str, ...]],
 ) -> IndexBuildSnapshot:
-    """Load candidate sources, register custom wildcards, and fingerprint build inputs.
-
-    Side Effects:
-    - Registers custom wildcard slots for the target language to global state.
-    - Pre-warms the wildcard slot name caches (``wildcard_slot_names`` and
-      ``wildcard_slot_names_sorted``) so that subsequent event-loop calls to
-      ``rehydration`` and ``grammar_loader`` always hit a warm cache and never
-      trigger the blocking ``open()`` call inside ``home_assistant_intents.get_intents``.
-    """
+    """Load sources, register in-memory wildcards, and fingerprint build inputs."""
     sources = load_language_intent_sources(language, config_path=config_path)
     sources.update(subscribed_sources)
     register_custom_wildcards_from_sources(language, sources)
-    wildcard_slot_names(language)
-    wildcard_slot_names_sorted(language)
     dynamic_registry_intents = compile_dynamic_registry_intents(
         sources,
         language,
