@@ -36,10 +36,10 @@ from .const import (
     SERVICE_REBUILD_INDEX,
     SERVICE_TEST_MATCH,
 )
-from .grammar_loader import rehydrate_wildcard_text
 from .indexer import CanonicalIndex
 from .normalization import normalize_text
 from .ranking import RankedCandidate, accepted_candidate
+from .rehydration import get_wildcard_rehydration
 from .runtime import CanonicalizerRuntime
 from .utils import elapsed_ms, normalize_language, resolve_entry_thresholds
 
@@ -380,7 +380,7 @@ def _ranked_candidate_response(ranked: RankedCandidate, query: str | None = None
     text = candidate.text
     normalized_text = candidate.normalized_text
     if query is not None:
-        text = rehydrate_wildcard_text(text, query, candidate.language)
+        text, _replacements = get_wildcard_rehydration(candidate, query)
         normalized_text = normalize_text(text)
     return {
         ATTR_TEXT: text,

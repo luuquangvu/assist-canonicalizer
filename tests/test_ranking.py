@@ -2246,7 +2246,11 @@ def test_rank_candidates_rehydrates_wildcard() -> None:
         text="broadcast message",
         intent_name="HassBroadcast",
         language="en",
-        metadata={"literal_text": "broadcast message"},
+        metadata={
+            "sentence_template": "broadcast {message}",
+            "wildcard_slots": "message",
+            "literal_text": "broadcast message",
+        },
     )
     assert candidate.has_wildcard
 
@@ -2416,7 +2420,11 @@ def test_wildcard_variants_analysis_removes_wildcard_and_deduplicates() -> None:
         text="message",
         intent_name="HassBroadcast",
         language="en",
-        metadata={"literal_text": "message|messages|broadcast message"},
+        metadata={
+            "sentence_template": "{message}",
+            "wildcard_slots": "message",
+            "literal_text": "message|messages|broadcast message",
+        },
     )
 
     variants, all_tokens = wildcard_variants_analysis(candidate)
@@ -2442,7 +2450,11 @@ def test_wildcard_variants_analysis_removes_embedded_structured_wildcard() -> No
         text="search_querypodcast",
         intent_name="HassMediaSearchAndPlay",
         language="de",
-        metadata={"literal_text": "spiel den search_querypodcast|spiel den podcast"},
+        metadata={
+            "sentence_template": "{search_query}podcast",
+            "wildcard_slots": "search_query",
+            "literal_text": "spiel den search_querypodcast|spiel den podcast",
+        },
     )
 
     variants, all_tokens = wildcard_variants_analysis(candidate)
@@ -2467,7 +2479,11 @@ def test_wildcard_variants_analysis_removes_embedded_single_word_wildcard() -> N
         text="urgentmessage",
         intent_name="HassBroadcast",
         language="en",
-        metadata={"literal_text": "broadcast urgentmessage|broadcast"},
+        metadata={
+            "sentence_template": "urgent{message}",
+            "wildcard_slots": "message",
+            "literal_text": "broadcast urgentmessage|broadcast",
+        },
     )
 
     variants, all_tokens = wildcard_variants_analysis(candidate)
@@ -2488,7 +2504,11 @@ def test_wildcard_variants_analysis_keeps_multilingual_word_containing_wildcard(
         text="messagerie",
         intent_name="HassBroadcast",
         language="fr",
-        metadata={"literal_text": "messagerie|diffuser message"},
+        metadata={
+            "sentence_template": "{message}",
+            "wildcard_slots": "message",
+            "literal_text": "messagerie|diffuser message",
+        },
     )
 
     variants, all_tokens = wildcard_variants_analysis(candidate)
@@ -2590,7 +2610,11 @@ def test_rank_candidates_wildcard_bypasses_prefilter() -> None:
         text="broadcast message",
         intent_name="HassBroadcast",
         language="en",
-        metadata={"literal_text": "broadcast message"},
+        metadata={
+            "sentence_template": "broadcast {message}",
+            "wildcard_slots": "message",
+            "literal_text": "broadcast message",
+        },
     )
     cand_1 = Candidate(
         text="turn on light",
@@ -2642,13 +2666,21 @@ def test_rank_candidates_applies_slot_preferences_tiebreaker() -> None:
         text="add shopping_list_item",
         intent_name="HassShoppingListAddItem",
         language="en",
-        metadata={"literal_text": "add"},
+        metadata={
+            "sentence_template": "add {shopping_list_item}",
+            "wildcard_slots": "shopping_list_item",
+            "literal_text": "add",
+        },
     )
     cand_todo = Candidate(
         text="add todo_list_item",
         intent_name="HassListAddItem",
         language="en",
-        metadata={"literal_text": "add"},
+        metadata={
+            "sentence_template": "add {todo_list_item}",
+            "wildcard_slots": "todo_list_item",
+            "literal_text": "add",
+        },
     )
 
     assert cand_shopping.has_wildcard
@@ -2682,19 +2714,31 @@ def test_wildcard_lookups_coverage() -> None:
         text="message",
         intent_name="HassBroadcast",
         language="en",
-        metadata={"literal_text": ""},
+        metadata={
+            "sentence_template": "{message}",
+            "wildcard_slots": "message",
+            "literal_text": "",
+        },
     )
     cand_var_len_0 = Candidate(
         text="broadcast message",
         intent_name="HassBroadcastVar0",
         language="en",
-        metadata={"literal_text": "|broadcast"},
+        metadata={
+            "sentence_template": "broadcast {message}",
+            "wildcard_slots": "message",
+            "literal_text": "|broadcast",
+        },
     )
     cand_normal = Candidate(
         text="broadcast message",
         intent_name="HassBroadcastNormal",
         language="en",
-        metadata={"literal_text": "broadcast"},
+        metadata={
+            "sentence_template": "broadcast {message}",
+            "wildcard_slots": "message",
+            "literal_text": "broadcast",
+        },
     )
 
     # 1. Exercise indexer post-init (with wildcard indices)

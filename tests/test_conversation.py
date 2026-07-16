@@ -31,6 +31,7 @@ from custom_components.assist_canonicalizer.conversation import (
 from custom_components.assist_canonicalizer.indexer import CanonicalIndex, build_index
 from custom_components.assist_canonicalizer.ranking import RankedCandidate, ScoreBreakdown
 from custom_components.assist_canonicalizer.runtime import CanonicalizerRuntime
+from custom_components.assist_canonicalizer.utils import wildcard_slot_names
 
 
 class MockConversationInput(ConversationInput):
@@ -1193,6 +1194,53 @@ async def test_async_validate_ranked_candidate_restores_chat_log(
 
         # Verify that mock_chat_log.content was restored (keeping only the original user message)
         assert mock_chat_log.content == [mock_user_message]
+
+
+@pytest.mark.asyncio
+async def test_async_validate_rehydrates_from_candidate_metadata_with_cold_cache() -> None:
+    """Rehydrate validation text without loading intents on the event loop."""
+    entry = MagicMock()
+    runtime = CanonicalizerRuntime()
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    entity.hass = MagicMock()
+    user_input = MockConversationInput("add milk to shopping list", "en")
+    candidate = Candidate(
+        text="add shopping_list_item to shopping list",
+        intent_name="HassShoppingListAddItem",
+        language="en",
+        metadata={
+            "sentence_template": "add {shopping_list_item} to shopping list",
+            "wildcard_slots": "shopping_list_item",
+        },
+    )
+    ranked = RankedCandidate(
+        candidate=candidate,
+        scores=ScoreBreakdown(1.0, 1.0, 1.0, 1.0, 1.0),
+    )
+    validation_result = MagicMock()
+    validation_result.response.error_code = None
+
+    wildcard_slot_names.cache_clear("en")
+    try:
+        with (
+            patch.object(
+                entity,
+                "_delegate_text",
+                AsyncMock(return_value=validation_result),
+            ) as delegate,
+            patch("home_assistant_intents.get_intents") as get_intents,
+        ):
+            result = await entity._async_validate_ranked_candidate(ranked, user_input)
+
+        assert result is validation_result
+        delegate.assert_awaited_once_with(
+            "add milk to shopping list",
+            user_input,
+            primary=True,
+        )
+        get_intents.assert_not_called()
+    finally:
+        wildcard_slot_names.cache_clear("en")
 
 
 class DummyChatLog:

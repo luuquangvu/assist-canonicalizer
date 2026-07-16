@@ -1,7 +1,7 @@
 """Tests for automatic conversation intent candidate loading."""
 
 import re
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from typing import Any
 from unittest.mock import patch
 
@@ -1135,6 +1135,28 @@ def test_build_candidates_preserve_wildcard_tag_shaped_sentence_literals() -> No
 class TestRehydrateWildcardText:
     """Tests for rehydrate_wildcard_text wildcard placeholder rehydration."""
 
+    @pytest.fixture(autouse=True)
+    def registered_wildcards(self) -> Iterator[None]:
+        """Register the wildcard corpus used by raw-text compatibility helpers."""
+        sources = {
+            "built_in": {
+                "lists": {
+                    "shopping_list_item": {"wildcard": True},
+                    "todo_list_item": {"wildcard": True},
+                    "timer_name": {"wildcard": True},
+                    "message": {"wildcard": True},
+                    "search_query": {"wildcard": True},
+                }
+            }
+        }
+        wildcard_slot_names.cache_clear()
+        for language in ("de", "en", "it", "nl", "vi"):
+            register_custom_wildcards_from_sources(language, sources)
+        try:
+            yield
+        finally:
+            wildcard_slot_names.cache_clear()
+
     def test_italian_shopping_list(self) -> None:
         """Rehydrate shopping_list_item from Italian query."""
         result = gl.rehydrate_wildcard_text(
@@ -1212,7 +1234,7 @@ class TestRehydrateWildcardText:
         assert result == "aggiungi tovaglioli alla Lista della Spesa"
 
     def test_wildcard_slot_names_populated(self) -> None:
-        """Verify wildcard_slot_names() returns known wildcard slots."""
+        """Verify wildcard_slot_names() returns registered wildcard slots."""
         mock_data = {
             "lists": {
                 "shopping_list_item": {"wildcard": True},
@@ -1222,15 +1244,9 @@ class TestRehydrateWildcardText:
                 "color": {"values": ["red", "blue"]},
             }
         }
-        with (
-            patch("home_assistant_intents.get_languages", return_value=["en"]),
-            patch("home_assistant_intents.get_intents", return_value=mock_data),
-        ):
-            wildcard_slot_names.cache_clear()
-            try:
-                self._test_wildcard_slot_names_populated()
-            finally:
-                wildcard_slot_names.cache_clear()
+        wildcard_slot_names.cache_clear()
+        register_custom_wildcards_from_sources("en", {"built_in": mock_data})
+        self._test_wildcard_slot_names_populated()
 
     def _test_wildcard_slot_names_populated(self) -> None:
         """Test that wildcard_slot_names() returns only wildcards, not entities."""

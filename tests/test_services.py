@@ -23,6 +23,7 @@ from custom_components.assist_canonicalizer.const import (
     SERVICE_TEST_MATCH,
 )
 from custom_components.assist_canonicalizer.indexer import build_index
+from custom_components.assist_canonicalizer.ranking import RankedCandidate, ScoreBreakdown
 from custom_components.assist_canonicalizer.runtime import CanonicalizerRuntime
 from custom_components.assist_canonicalizer.services import (
     CLEAR_INDEX_SCHEMA,
@@ -41,6 +42,7 @@ from custom_components.assist_canonicalizer.services import (
     async_unload_services,
     validate_supported_language,
 )
+from custom_components.assist_canonicalizer.utils import wildcard_slot_names
 
 _EXPECTED_SERVICE_SCHEMAS = {
     SERVICE_TEST_MATCH: TEST_MATCH_SCHEMA,
@@ -167,6 +169,44 @@ async def test_handle_test_match_entry_none_and_data_fallback() -> None:
     hass_data = MockHass(runtime, entry=entry_data)
     result_data = await _handle_test_match(hass_data, cast(ServiceCall, call))
     assert result_data["accepted"] is True
+
+
+@pytest.mark.asyncio
+async def test_handle_test_match_rehydrates_from_candidate_metadata_with_cold_cache() -> None:
+    """Rehydrate service results without loading intents on the event loop."""
+    runtime = CanonicalizerRuntime()
+    candidate = Candidate(
+        text="add shopping_list_item to shopping list",
+        intent_name="HassShoppingListAddItem",
+        language="en",
+        metadata={
+            "sentence_template": "add {shopping_list_item} to shopping list",
+            "wildcard_slots": "shopping_list_item",
+        },
+    )
+    runtime.set_index(build_index("en", [candidate]))
+    ranked = RankedCandidate(
+        candidate=candidate,
+        scores=ScoreBreakdown(1.0, 1.0, 1.0, 1.0, 1.0),
+    )
+    hass = MockHass(runtime)
+    call = MockServiceCall({"text": "add milk to shopping list", "language": "en"})
+
+    wildcard_slot_names.cache_clear("en")
+    with (
+        patch.object(
+            CanonicalizerRuntime,
+            "rank_with_dynamic_candidates",
+            return_value=(ranked,),
+        ),
+        patch("home_assistant_intents.get_intents") as get_intents,
+    ):
+        result = await _handle_test_match(hass, cast(ServiceCall, call))
+
+    assert result["selected_candidate"]["text"] == "add milk to shopping list"
+    assert result["top_candidates"][0]["text"] == "add milk to shopping list"
+    get_intents.assert_not_called()
+    wildcard_slot_names.cache_clear("en")
 
 
 @pytest.mark.asyncio
