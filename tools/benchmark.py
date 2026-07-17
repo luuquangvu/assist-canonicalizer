@@ -1037,6 +1037,96 @@ ABLATION_COMPONENTS = (
     "intent_action",
     "final",
 )
+ABLATION_REPORT_TITLE = "Production-Flow Component Top-1"
+ABLATION_METRIC_NOTE = (
+    "Exact Canonical = selected command text exactly matches the expected canonical text; "
+    "Intent/Slot = selected intent and slots match the expected semantics."
+)
+
+
+@dataclass(slots=True)
+class AblationStats:
+    """Lossless correctness counters for one ablation component and cohort."""
+
+    canonical_correct: int = 0
+    intent_correct: int = 0
+    slots_correct: int = 0
+    intent_slots_correct: int = 0
+
+    def merge(self, other: AblationStats) -> None:
+        """Merge another component's correctness counters."""
+        self.canonical_correct += other.canonical_correct
+        self.intent_correct += other.intent_correct
+        self.slots_correct += other.slots_correct
+        self.intent_slots_correct += other.intent_slots_correct
+
+    def as_dict(self) -> dict[str, int]:
+        """Return only raw counters needed for optimization and rendering."""
+        return {
+            "canonical_correct": self.canonical_correct,
+            "intent_correct": self.intent_correct,
+            "slots_correct": self.slots_correct,
+            "intent_slots_correct": self.intent_slots_correct,
+        }
+
+
+@dataclass(slots=True)
+class AblationCohort:
+    """Production-flow cases used to compare component-only selection."""
+
+    dataset_cases: int = 0
+    evaluated: int = 0
+    production_fallbacks: int = 0
+    excluded_drift: int = 0
+
+    def merge(self, other: AblationCohort) -> None:
+        """Merge another cohort's counts."""
+        self.dataset_cases += other.dataset_cases
+        self.evaluated += other.evaluated
+        self.production_fallbacks += other.production_fallbacks
+        self.excluded_drift += other.excluded_drift
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return cohort size and explicit exclusion reasons."""
+        return {
+            "dataset_cases": self.dataset_cases,
+            "evaluated": self.evaluated,
+            "production_fallbacks": self.production_fallbacks,
+            "excluded": {
+                "drift": self.excluded_drift,
+            },
+        }
+
+
+@dataclass(slots=True)
+class AblationResults:
+    """Component correctness and shared cohort counts grouped by category."""
+
+    components: dict[str, dict[str, AblationStats]] = field(
+        default_factory=lambda: {component: {} for component in ABLATION_COMPONENTS}
+    )
+    cohorts: dict[str, AblationCohort] = field(default_factory=dict)
+
+    def stats_for(self, component: str, category: str) -> AblationStats:
+        """Return mutable correctness counters for one component/category."""
+        component_stats = self.components[component]
+        if category not in component_stats:
+            component_stats[category] = AblationStats()
+        return component_stats[category]
+
+    def cohort_for(self, category: str) -> AblationCohort:
+        """Return the mutable shared cohort for one category."""
+        if category not in self.cohorts:
+            self.cohorts[category] = AblationCohort()
+        return self.cohorts[category]
+
+    def merge(self, other: AblationResults) -> None:
+        """Merge language-level ablation results into an aggregate."""
+        for category, cohort in other.cohorts.items():
+            self.cohort_for(category).merge(cohort)
+        for component, categories in other.components.items():
+            for category, stats in categories.items():
+                self.stats_for(component, category).merge(stats)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1083,9 +1173,9 @@ def _new_results() -> dict[str, dict[str, CategoryStats]]:
     return {"hassil": {}, "lexical": {}}
 
 
-def _new_ablation_results() -> dict[str, dict[str, CategoryStats]]:
+def _new_ablation_results() -> AblationResults:
     """Return an empty metrics container for ablation components."""
-    return {component: {} for component in ABLATION_COMPONENTS}
+    return AblationResults()
 
 
 def _stats_for(
@@ -1121,7 +1211,14 @@ def _intent_names_from_sources(sources: Mapping[str, Mapping[str, Any]]) -> set[
 
 
 def _component_score(item: RankedCandidate, component: str) -> float | None:
-    """Return a score for one ablation component."""
+    """Return a score for one ablation component.
+
+    The ``final`` component is intentionally not handled here: when
+    ``component == "final"``, :func:`_select_ablation_candidate` bypasses
+    this helper and uses the overall ranking (``ranked[0]``) instead.
+    This keeps the ablation for ``final`` aligned with the real, combined
+    scoring logic rather than any individual score component.
+    """
     if component == "rapidfuzz":
         return item.scores.rapidfuzz_score
     if component == "char_ngram":
@@ -1175,50 +1272,24 @@ def _select_accepted_with_gate(
 def _select_ablation_candidate(
     ranked: tuple[RankedCandidate, ...],
     component: str,
-) -> RankedCandidate | None:
+) -> RankedCandidate:
     """Return the top candidate when ranking only by one score component."""
-    scored = [
-        (score, item) for item in ranked if (score := _component_score(item, component)) is not None
-    ]
-    if not scored:
-        return None
-    return max(
-        scored,
-        key=lambda pair: (
-            pair[0],
-            pair[1].scores.final_score,
-            -pair[1].candidate.source_priority,
-        ),
-    )[1]
-
-
-def _resolve_tie_breaker(
-    selected: RankedCandidate,
-    ranked: tuple[RankedCandidate, ...],
-    expected_canonical: str,
-    expected_intent: str,
-    query: str | None,
-    is_canonical_ok: bool,
-    is_intent_ok: bool,
-) -> tuple[RankedCandidate, bool, bool]:
-    """Resolve tie-breaker peers if the selected candidate is not a match."""
-    for tied_cand in ranked:
-        if tied_cand is selected:
-            continue
-        if tied_cand.scores.final_score == selected.scores.final_score:
-            tied_text = tied_cand.candidate.text
-            if query is not None:
-                tied_text = rehydrate_wildcard_text(tied_text, query, tied_cand.candidate.language)
-            if tied_text == expected_canonical and _intents_match(
-                tied_cand.candidate.intent_name, expected_intent
-            ):
-                is_canonical_ok = True
-                is_intent_ok = True
-                selected = tied_cand
-                break
-        elif tied_cand.scores.final_score < selected.scores.final_score:
-            break
-    return selected, is_canonical_ok, is_intent_ok
+    if not ranked:
+        raise ValueError("ablation candidate selection requires a non-empty shortlist")
+    if component == "final":
+        return ranked[0]
+    if valid_candidates := [
+        item for item in ranked if _component_score(item, component) is not None
+    ]:
+        return max(
+            valid_candidates,
+            key=lambda item: (
+                _component_score(item, component),
+                item.scores.final_score,
+                -item.candidate.source_priority,
+            ),
+        )
+    return ranked[0]
 
 
 def _get_actual_slots(
@@ -1337,7 +1408,6 @@ def _record_case_result(
     latency_ms: float | None = None,
     query: str | None = None,
     language: str | None = None,
-    ranked: tuple[RankedCandidate, ...] | None = None,
     is_drift: bool = False,
     hassil_intents: Any | None = None,
     hassil_slot_lists: dict[str, Any] | None = None,
@@ -1364,28 +1434,9 @@ def _record_case_result(
         stats.fallback += 1
         return False, "fallback", actual_slots, selected
 
-    original_selected = selected
     is_canonical_ok, is_intent_ok = _candidate_match_flags(
         selected, expected_canonical, expected_intent, query
     )
-    if not (is_canonical_ok and is_intent_ok) and ranked:
-        selected, is_canonical_ok, is_intent_ok = _resolve_tie_breaker(
-            selected,
-            ranked,
-            expected_canonical,
-            expected_intent,
-            query,
-            is_canonical_ok,
-            is_intent_ok,
-        )
-        if selected is not original_selected:
-            actual_slots = _case_actual_slots(
-                selected,
-                query,
-                hassil_intents,
-                hassil_slot_lists,
-                intent_context,
-            )
 
     lang = language or (selected.candidate.language if selected else None)
     is_slots_ok = _slots_match_any(actual_slots, expected_slots, language=lang)
@@ -1616,6 +1667,90 @@ def _summary_payload(results: dict[str, dict[str, CategoryStats]]) -> dict[str, 
     return payload
 
 
+def _aggregate_ablation_cohort(ablations: AblationResults) -> AblationCohort:
+    """Return the shared ablation cohort aggregated across categories."""
+    total = AblationCohort()
+    for cohort in ablations.cohorts.values():
+        total.merge(cohort)
+    return total
+
+
+def _aggregate_ablation_stats(ablations: AblationResults, component: str) -> AblationStats:
+    """Return one component's correctness counters across categories."""
+    total = AblationStats()
+    for stats in ablations.components[component].values():
+        total.merge(stats)
+    return total
+
+
+def _ablation_payload(ablations: AblationResults) -> dict[str, Any]:
+    """Return normalized, lossless ablation counts grouped by category."""
+    categories: dict[str, Any] = {
+        category: {
+            "cohort": cohort.as_dict(),
+            "components": {
+                component: ablations.components[component][category].as_dict()
+                for component in ABLATION_COMPONENTS
+                if category in ablations.components[component]
+            },
+        }
+        for category, cohort in sorted(ablations.cohorts.items())
+    }
+    return {
+        "cohort": _aggregate_ablation_cohort(ablations).as_dict(),
+        "categories": categories,
+    }
+
+
+def _ablation_results_from_payloads(payloads: Sequence[Mapping[str, Any]]) -> AblationResults:
+    """Rebuild aggregate ablation counters from normalized language payloads."""
+    combined = AblationResults()
+    for payload in payloads:
+        categories = payload.get("categories", {})
+        if not isinstance(categories, Mapping):
+            continue
+        for category, category_payload in categories.items():
+            if not isinstance(category, str) or not isinstance(category_payload, Mapping):
+                continue
+            cohort_payload = category_payload.get("cohort", {})
+            if isinstance(cohort_payload, Mapping):
+                excluded = cohort_payload.get("excluded", {})
+                excluded_values = excluded if isinstance(excluded, Mapping) else {}
+                combined.cohort_for(category).merge(
+                    AblationCohort(
+                        dataset_cases=int(cohort_payload.get("dataset_cases", 0)),
+                        evaluated=int(cohort_payload.get("evaluated", 0)),
+                        production_fallbacks=int(cohort_payload.get("production_fallbacks", 0)),
+                        excluded_drift=int(excluded_values.get("drift", 0)),
+                    )
+                )
+            components = category_payload.get("components", {})
+            if not isinstance(components, Mapping):
+                continue
+            for component in ABLATION_COMPONENTS:
+                stats_payload = components.get(component)
+                if not isinstance(stats_payload, Mapping):
+                    continue
+                combined.stats_for(component, category).merge(
+                    AblationStats(
+                        canonical_correct=int(stats_payload.get("canonical_correct", 0)),
+                        intent_correct=int(stats_payload.get("intent_correct", 0)),
+                        slots_correct=int(stats_payload.get("slots_correct", 0)),
+                        intent_slots_correct=int(stats_payload.get("intent_slots_correct", 0)),
+                    )
+                )
+    return combined
+
+
+def _ablation_cohort_line(cohort: AblationCohort) -> str:
+    """Return a compact explanation of the evaluated ablation cohort."""
+    return (
+        f"Cohort: {cohort.evaluated}/{cohort.dataset_cases} evaluated | "
+        f"production_fallbacks={cohort.production_fallbacks} | "
+        f"excluded drift={cohort.excluded_drift}"
+    )
+
+
 def _print_summary_table(title: str, results: dict[str, dict[str, CategoryStats]]) -> None:
     """Print aggregate metrics for one language or the global run."""
     print(f"\n{title}")
@@ -1667,27 +1802,39 @@ def _print_summary_table(title: str, results: dict[str, dict[str, CategoryStats]
     print("-" * 166)
 
 
-def _print_ablation_table(title: str, ablations: dict[str, dict[str, CategoryStats]]) -> None:
+def _print_ablation_table(
+    title: str,
+    ablations: AblationResults,
+    *,
+    show_metric_note: bool = False,
+) -> None:
     """Print top-1 ablation metrics by scoring component."""
-    print(f"\n{title}")
-    print("-" * 96)
-    print(
-        f"{'Component':<16} | {'Total':<5} | {'Canonical':<16} | "
-        f"{'Intent/Slot':<19} | {'Fallback':<14}"
-    )
-    print("-" * 96)
+    cohort = _aggregate_ablation_cohort(ablations)
+    headers = ("Component", "Evaluated", "Exact Canonical", "Intent/Slot")
+    rows: list[tuple[str, ...]] = []
     for component in ABLATION_COMPONENTS:
-        stats = _aggregate_mode_stats(ablations, component)
-        if stats.total == 0:
+        stats = _aggregate_ablation_stats(ablations, component)
+        if cohort.evaluated == 0:
             continue
-        den = stats.total - stats.drift
-        print(
-            f"{component:<16} | {stats.total:<5} | "
-            f"{_metric_str(stats.correct, den):<16} | "
-            f"{_metric_str(stats.intent_slots_correct, den):<19} | "
-            f"{_metric_str(stats.fallback, den):<14}"
+        rows.append(
+            (
+                component,
+                str(cohort.evaluated),
+                _metric_str(stats.canonical_correct, cohort.evaluated),
+                _metric_str(stats.intent_slots_correct, cohort.evaluated),
+            )
         )
-    print("-" * 96)
+    header, separator, data = align_table(headers, rows, alignments="<")
+
+    print(f"\n{title}")
+    print(_ablation_cohort_line(cohort))
+    if show_metric_note:
+        print(ABLATION_METRIC_NOTE)
+    print(separator)
+    print(header)
+    print(separator)
+    print("\n".join(data))
+    print(separator)
 
 
 def _print_failure_details(failures: list[dict[str, Any]], failure_limit: int) -> None:
@@ -1714,8 +1861,9 @@ def _print_failure_details(failures: list[dict[str, Any]], failure_limit: int) -
 
 
 def _record_ablations(
-    ablations: dict[str, dict[str, CategoryStats]],
+    ablations: AblationResults,
     ranked: tuple[RankedCandidate, ...],
+    gate_accepted: bool,
     case: Mapping[str, Any],
     expected_slots: Sequence[Mapping[str, Any]],
     language: str | None = None,
@@ -1723,30 +1871,48 @@ def _record_ablations(
     hassil_slot_lists: dict[str, Any] | None = None,
     intent_context: Mapping[str, Any] | None = None,
 ) -> None:
-    """Record component-only top-1 metrics for one ranked candidate set."""
+    """Record component top-1 metrics after the normal production confidence gate."""
+    category = case["category"]
+    cohort = ablations.cohort_for(category)
+    cohort.dataset_cases += 1
+    if bool(case.get("drift", False)):
+        cohort.excluded_drift += 1
+        return
+
+    cohort.evaluated += 1
+    if not gate_accepted or not ranked:
+        cohort.production_fallbacks += 1
+        return
+
     for component in ABLATION_COMPONENTS:
         selected = _select_ablation_candidate(ranked, component)
-        _record_case_result(
-            _stats_for(ablations, component, case["category"]),
+        canonical_ok, intent_ok = _candidate_match_flags(
             selected,
             case["expected_canonical"],
             case["expected_intent"],
-            expected_slots,
-            latency_ms=None,
-            query=case["query"],
-            language=language,
-            hassil_intents=hassil_intents,
-            hassil_slot_lists=hassil_slot_lists,
-            intent_context=intent_context,
-            expected_fallback=bool(case.get("expected_fallback", False)),
+            case["query"],
         )
+        actual_slots = _case_actual_slots(
+            selected,
+            case["query"],
+            hassil_intents,
+            hassil_slot_lists,
+            intent_context,
+        )
+        selected_language = language or selected.candidate.language
+        slots_ok = _slots_match_any(actual_slots, expected_slots, language=selected_language)
+        stats = ablations.stats_for(component, category)
+        stats.canonical_correct += int(canonical_ok)
+        stats.intent_correct += int(intent_ok)
+        stats.slots_correct += int(slots_ok)
+        stats.intent_slots_correct += int(intent_ok and slots_ok)
 
 
 def _markdown_metric(stats: Mapping[str, Any]) -> str:
     """Return a compact Markdown metric string."""
     return (
         f"{stats['intent_slot_accuracy']:.1f}% intent/slot, "
-        f"{stats['canonical_accuracy']:.1f}% canonical, "
+        f"{stats['canonical_accuracy']:.1f}% exact canonical, "
         f"{stats['mismatch_rate']:.1f}% mismatch, "
         f"{stats['fallback_rate']:.1f}% fallback"
     )
@@ -1799,18 +1965,69 @@ def _markdown_header_line(headers: tuple[str, ...], col_widths: list[int]) -> st
     return "|" + "|".join(parts) + "|"
 
 
+def _markdown_cells_line(
+    cells: tuple[str, ...],
+    col_widths: list[int],
+    col_aligns: tuple[str, ...],
+) -> str:
+    """Return one dynamically aligned Markdown table data line."""
+    parts = [
+        f" {cell:{alignment}{width}} "
+        for cell, width, alignment in zip(cells, col_widths, col_aligns, strict=True)
+    ]
+    return "|" + "|".join(parts) + "|"
+
+
 def _markdown_data_row(row: _MarkdownReportRow, col_widths: list[int]) -> str:
     """Return a Markdown table data line."""
-    cols = (
-        f" {row.backticked_mode:<{col_widths[0]}} ",
-        f" {row.total_s:>{col_widths[1]}} ",
-        f" {row.intent_slot_s:>{col_widths[2]}} ",
-        f" {row.canonical_s:>{col_widths[3]}} ",
-        f" {row.mismatch_s:>{col_widths[4]}} ",
-        f" {row.fallback_s:>{col_widths[5]}} ",
-        f" {row.avg_ms_s:>{col_widths[6]}} ",
+    return _markdown_cells_line(
+        (
+            row.backticked_mode,
+            row.total_s,
+            row.intent_slot_s,
+            row.canonical_s,
+            row.mismatch_s,
+            row.fallback_s,
+            row.avg_ms_s,
+        ),
+        col_widths,
+        ("<", ">", ">", ">", ">", ">", ">"),
     )
-    return "|" + "|".join(cols) + "|"
+
+
+def _markdown_ablation_lines(payload: Mapping[str, Any]) -> list[str]:
+    """Return an overall Markdown table for normalized ablation counts."""
+    ablations = _ablation_results_from_payloads((payload,))
+    cohort = _aggregate_ablation_cohort(ablations)
+    headers = ("Component", "Evaluated", "Exact Canonical", "Intent/Slot")
+    alignments = ("<", ">", ">", ">")
+    rows: list[tuple[str, ...]] = []
+    for component in ABLATION_COMPONENTS:
+        stats = _aggregate_ablation_stats(ablations, component)
+        rows.append(
+            (
+                f"`{component}`",
+                str(cohort.evaluated),
+                _metric_str(stats.canonical_correct, cohort.evaluated),
+                _metric_str(stats.intent_slots_correct, cohort.evaluated),
+            )
+        )
+    col_widths = [
+        max(len(header), *(len(row[index]) for row in rows), 3)
+        for index, header in enumerate(headers)
+    ]
+    lines = [
+        f"## {ABLATION_REPORT_TITLE}: ALL LANGUAGES",
+        "",
+        _ablation_cohort_line(cohort),
+        "",
+        ABLATION_METRIC_NOTE,
+        "",
+        _markdown_header_line(headers, col_widths),
+        _markdown_separator_line(col_widths, alignments),
+    ]
+    lines.extend(_markdown_cells_line(row, col_widths, alignments) for row in rows)
+    return lines
 
 
 def _markdown_report(report: Mapping[str, Any]) -> str:
@@ -1819,7 +2036,7 @@ def _markdown_report(report: Mapping[str, Any]) -> str:
         "Mode",
         "Total",
         "Intent/Slot",
-        "Canonical",
+        "Exact Canonical",
         "Mismatch",
         "Fallback",
         "Avg ms",
@@ -1865,6 +2082,13 @@ def _markdown_report(report: Mapping[str, Any]) -> str:
         total = payload["overall"]["total"]
         if total:
             lines.append(f"- `{mode_name}`: {_markdown_metric(payload['overall'])}")
+    if language_ablation_payloads := [
+        payload.get("ablations", {})
+        for payload in report.get("languages", {}).values()
+        if payload.get("ablations")
+    ]:
+        global_ablations = _ablation_results_from_payloads(language_ablation_payloads)
+        lines.extend(["", *_markdown_ablation_lines(_ablation_payload(global_ablations))])
     last_lang: str | None = None
     for row in _all_rows:
         if row.lang != last_lang:
@@ -1943,7 +2167,7 @@ def _text_report(report: Mapping[str, Any]) -> str:
 
         if payload.get("ablations"):
             _lbl_lines = _text_ablation_table(
-                f"Ablation Top-1: {lang.upper()}", payload.get("ablations", {})
+                f"{ABLATION_REPORT_TITLE}: {lang.upper()}", payload.get("ablations", {})
             )
             lines.extend(_lbl_lines)
 
@@ -1972,10 +2196,19 @@ def _text_report(report: Mapping[str, Any]) -> str:
     overall = report.get("overall", {})
     _global_summary = _text_summary_table("Summary: ALL LANGUAGES", overall.get("summary", {}))
     lines.extend(_global_summary)
-    _global_ablation = _text_ablation_table(
-        "Ablation Top-1: ALL LANGUAGES", overall.get("ablations", {})
-    )
-    lines.extend(_global_ablation)
+    if language_ablation_payloads := [
+        payload.get("ablations", {})
+        for payload in report.get("languages", {}).values()
+        if payload.get("ablations")
+    ]:
+        global_ablations = _ablation_results_from_payloads(language_ablation_payloads)
+        lines.extend(
+            _text_ablation_table(
+                f"{ABLATION_REPORT_TITLE}: ALL LANGUAGES",
+                _ablation_payload(global_ablations),
+                show_metric_note=True,
+            )
+        )
 
     if threshold_failures := overall.get("threshold_failures", []):
         lines.append("\nThreshold failures:")
@@ -2047,28 +2280,34 @@ def _text_summary_table(title: str, payload: Mapping[str, Any]) -> list[str]:
     return lines
 
 
-def _text_ablation_table(title: str, payload: Mapping[str, Any]) -> list[str]:
+def _text_ablation_table(
+    title: str,
+    payload: Mapping[str, Any],
+    *,
+    show_metric_note: bool = False,
+) -> list[str]:
     """Return text lines for an ablation table with dynamically aligned columns."""
-    _headers = ("Component", "Total", "Canonical", "Intent/Slot", "Fallback")
+    ablations = _ablation_results_from_payloads((payload,))
+    cohort = _aggregate_ablation_cohort(ablations)
+    _headers = ("Component", "Evaluated", "Exact Canonical", "Intent/Slot")
     ab_rows: list[tuple[str, ...]] = []
     for comp in ABLATION_COMPONENTS:
-        comp_data = payload.get(comp, {})
-        overall = comp_data.get("overall", {})
-        total = overall.get("total", 0)
-        if total == 0:
+        if cohort.evaluated == 0:
             continue
-        den = total - overall.get("drift", 0)
+        stats = _aggregate_ablation_stats(ablations, comp)
         ab_rows.append(
             (
                 comp,
-                str(total),
-                _metric_str(overall.get("correct", 0), den),
-                _metric_str(overall.get("intent_slots_correct", 0), den),
-                _metric_str(overall.get("fallback", 0), den),
+                str(cohort.evaluated),
+                _metric_str(stats.canonical_correct, cohort.evaluated),
+                _metric_str(stats.intent_slots_correct, cohort.evaluated),
             )
         )
     hdr, sep, data = align_table(_headers, ab_rows, alignments="<")
-    lines: list[str] = [f"\n{title}", sep, hdr, sep]
+    lines: list[str] = [f"\n{title}", _ablation_cohort_line(cohort)]
+    if show_metric_note:
+        lines.append(ABLATION_METRIC_NOTE)
+    lines.extend((sep, hdr, sep))
     lines.extend(data)
     lines.append(sep)
     return lines
@@ -2365,7 +2604,6 @@ def _evaluate_case(
         latency_ms,
         query=query,
         language=lang,
-        ranked=ranked,
         is_drift=is_drift,
         hassil_intents=hassil_intents,
         hassil_slot_lists=hassil_slot_lists,
@@ -2490,10 +2728,9 @@ def _evaluate_language_mode(
     skip_ablations: bool,
     benchmark_slot_prefs: set[tuple[str, str]] | None,
     results: dict[str, dict[str, CategoryStats]],
-    ablations: dict[str, dict[str, CategoryStats]],
+    ablations: AblationResults,
     failures: list[dict[str, Any]],
     language_rows: list[dict[str, Any]],
-    all_case_rows: list[dict[str, Any]],
 ) -> None:
     """Evaluate all cases for one language/mode combination."""
     for case in test_cases:
@@ -2510,25 +2747,12 @@ def _evaluate_language_mode(
             stats,
         )
         language_rows.append(result.row)
-        all_case_rows.append(result.row)
 
         if mode_name == "lexical" and not skip_ablations:
-            ablation_ranked = result.ranked
-            used_hassil_shortcut = (
-                result.selected is not None
-                and result.selected.candidate.metadata.get("evaluation_path") == "hassil_shortcut"
-            )
-            if used_hassil_shortcut:
-                ablation_ranked = context.runtime.rank_with_dynamic_candidates(
-                    context.language,
-                    context.index,
-                    case["query"],
-                    slot_preferences=benchmark_slot_prefs,
-                    intent_context=case.get("context"),
-                )
             _record_ablations(
                 ablations,
-                ablation_ranked,
+                result.ranked,
+                bool(result.gate["accepted"]),
                 case,
                 result.expected_slots,
                 language=context.language,
@@ -2557,10 +2781,9 @@ def _evaluate_language_modes(
     skip_ablations: bool,
     benchmark_slot_prefs: set[tuple[str, str]] | None,
     results: dict[str, dict[str, CategoryStats]],
-    ablations: dict[str, dict[str, CategoryStats]],
+    ablations: AblationResults,
     failures: list[dict[str, Any]],
     language_rows: list[dict[str, Any]],
-    all_case_rows: list[dict[str, Any]],
 ) -> None:
     """Evaluate all enabled modes for one prepared language context."""
     for mode_name in _evaluation_modes(skip_hassil):
@@ -2574,7 +2797,6 @@ def _evaluate_language_modes(
             ablations,
             failures,
             language_rows,
-            all_case_rows,
         )
 
 
@@ -2586,8 +2808,7 @@ def _evaluate_dataset_language(
     skip_ablations: bool,
     benchmark_slot_prefs: set[tuple[str, str]] | None,
     global_results: dict[str, Any],
-    global_ablations: dict[str, Any],
-    all_case_rows: list[dict[str, Any]],
+    global_ablations: AblationResults,
     failure_limit: int,
 ) -> tuple[dict[str, Any], CategoryStats]:
     """Evaluate cases for a single language dataset and return language report payload."""
@@ -2612,20 +2833,19 @@ def _evaluate_dataset_language(
         ablations,
         failures,
         language_rows,
-        all_case_rows,
     )
 
     _print_summary_table(f"Summary: {lang.upper()}", results)
     if not skip_ablations:
-        _print_ablation_table(f"Ablation Top-1: {lang.upper()}", ablations)
+        _print_ablation_table(f"{ABLATION_REPORT_TITLE}: {lang.upper()}", ablations)
     _print_failure_details(failures, failure_limit)
     _merge_results(global_results, results)
-    _merge_results(global_ablations, ablations)
+    global_ablations.merge(ablations)
     return (
         {
             "coverage": coverage,
             "summary": _summary_payload(results),
-            "ablations": _summary_payload(ablations),
+            "ablations": {} if skip_ablations else _ablation_payload(ablations),
             "failures": failures,
             "cases": language_rows,
         },
@@ -2672,7 +2892,6 @@ async def run_evaluation(
     overall_success = True
     global_results = _new_results()
     global_ablations = _new_ablation_results()
-    all_case_rows: list[dict[str, Any]] = []
     threshold_failures: list[str] = []
     benchmark_slot_prefs = _load_benchmark_slot_preferences(datasets)
     report: dict[str, Any] = {
@@ -2702,7 +2921,6 @@ async def run_evaluation(
             benchmark_slot_prefs,
             global_results,
             global_ablations,
-            all_case_rows,
             failure_limit,
         )
         language_threshold_failures = _threshold_failures(
@@ -2723,7 +2941,11 @@ async def run_evaluation(
 
     _print_summary_table("Summary: ALL LANGUAGES", global_results)
     if not skip_ablations:
-        _print_ablation_table("Ablation Top-1: ALL LANGUAGES", global_ablations)
+        _print_ablation_table(
+            f"{ABLATION_REPORT_TITLE}: ALL LANGUAGES",
+            global_ablations,
+            show_metric_note=True,
+        )
     lex_stats = _aggregate_mode_stats(global_results, "lexical")
     if aggregate_threshold_failures := _threshold_failures(
         lex_stats,
@@ -2740,7 +2962,6 @@ async def run_evaluation(
 
     report["overall"] = {
         "summary": _summary_payload(global_results),
-        "ablations": _summary_payload(global_ablations),
         "threshold_failures": threshold_failures,
     }
     if output_json:

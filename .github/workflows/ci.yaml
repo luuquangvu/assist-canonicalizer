@@ -48,20 +48,19 @@ jobs:
       - name: Run Interrogate
         run: uv run --no-project interrogate
 
-      - name: Run Tests
+      - name: Run Pytest
         run: uv run --no-project pytest
 
-      - name: Run Multilingual Accuracy and Fallback Gate
+      - name: Run Multilingual Accuracy Gate
         run: >-
           uv run --no-project tools/benchmark.py
           --mode accuracy
-          --skip-hassil
           --skip-ablations
           --min-intent-slot-accuracy 92.0
           --max-fallback-rate 8.0
           --max-mismatch-rate 2.0
-          --min-language-intent-slot-accuracy 90.0
-          --max-language-fallback-rate 9.5
+          --min-language-intent-slot-accuracy 91.0
+          --max-language-fallback-rate 8.5
           --max-language-mismatch-rate 2.5
 
   setup-matrix:
@@ -208,5 +207,5 @@ jobs:
           done
           uv --no-config pip install --overrides overrides.txt --python .venv/bin/python "$HA_SPEC" "${INSTALL_TEST_DEPS[@]}"
 
-      - name: Run Tests
+      - name: Run Pytest
         run: uv run --no-project --python .venv/bin/python pytest --no-cov -m "not current_intents"
