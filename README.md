@@ -11,7 +11,7 @@
 
 **[ 🇺🇸 English | [🇻🇳 Tiếng Việt](README.vi.md) ]**
 
-**Assist Canonicalizer** enhances Home Assistant Assist intent accuracy by canonicalizing natural-language commands through a multi-signal lexical ranking engine before they reach the built-in conversation agent. It integrates as a native conversation agent, slashing mismatches and fallback rates while running entirely on your local machine, LLM-free, no cloud, no telemetry, no external calls.
+**Assist Canonicalizer** improves intent recognition in Home Assistant Assist by mapping natural-language requests to canonical intent sentences before they reach the built-in conversation agent. It runs as a Home Assistant conversation agent and uses local, multi-signal lexical ranking for canonicalization, without requiring an LLM or an external service.
 
 ---
 
@@ -46,16 +46,16 @@
 
 ## Features
 
-- **Native Conversation Agent**: Registers as a fully-fledged Home Assistant conversation agent. Intercepts every Assist command, preprocesses it through lexical canonicalization, and transparently delegates validated results to your existing conversation pipeline.
+- **Home Assistant Conversation Agent**: Integrates directly with Assist as a conversation agent. It canonicalizes incoming requests and sends the selected command through Home Assistant's standard conversation flow.
 - **Multi-Signal Lexical Ranking Engine**: Scores every candidate against your input using four complementary signals: **RapidFuzz fuzzy matching**, **character n-gram Jaccard similarity**, **BM25 probabilistic retrieval**, and **intent domain action matching**. The weighted ensemble consistently outperforms single-signal approaches.
 - **Automatic Candidate Index Building**: Builds its canonical candidate index from every available source: built-in Home Assistant intents, your custom sentence YAML files, exposed entity names and aliases, area and floor registry entries, and dynamically expanded slot values. No manual configuration required.
 - **On-Disk Candidate Persistence**: Saves canonicalized candidate lists to Home Assistant's storage layer so that intent source parsing can be skipped on subsequent rebuilds. Indexes are rebuilt from saved candidates, eliminating the need to re-parse sentence templates and YAML files.
 - **Configurable Confidence Gates**: Fine-tune acceptance behavior with **Minimum Match Confidence** and **Minimum Confidence Margin** thresholds. Only candidates that clear both thresholds receive canonicalization.
-- **Safe Multi-Stage Fallback**: If the ranking confidence is too low, the margin between the top candidate and the next candidate of a different intent is insufficient, the index is empty, or validation against the built-in agent fails, the system dispatches your original text to a separately configured fallback agent. Selecting an LLM-based agent here is ideal, as it can interpret natural language differently and recover from mismatches that the built-in recognizer cannot handle.
+- **Bounded Recovery and Safe Fallback**: Requests with equally ranked, opposing actions are sent to the fallback agent instead of being resolved by guesswork. If Home Assistant rejects a canonical command before intent handling begins, the integration may try one other candidate that independently passes the same confidence checks. Otherwise, it sends the original request to the configured fallback agent.
 - **Rich Developer Tools**: Five dedicated actions (`test_match`, `rebuild_index`, `clear_index`, `diagnostics`, `dump_candidates`) give you full visibility into the ranking process, live index inspection, and manual control over index lifecycle, all from the standard Developer Tools Actions panel.
 - **Per-Language Isolation**: Maintains a dedicated candidate index for each language, with automatic language variant matching against Home Assistant's supported language list. Slot values are dynamically expanded per language.
 - **Scalable Candidate Capping**: Built-in safety limits prevent memory exhaustion by automatically capping candidates per language, per intent, per template, and per ranking pass.
-- **Local-Only Processing**: Classified as `local_push` IoT class. Every operation: normalization, indexing, ranking, and validation runs entirely within your Home Assistant instance. No cloud dependency, no telemetry, no external calls.
+- **Local Canonicalization**: Normalization, indexing, ranking, and recovery checks run inside your Home Assistant instance. The integration itself sends no telemetry and makes no cloud requests; any external processing depends on the fallback agent you configure.
 
 ---
 
@@ -84,7 +84,7 @@
 
 1. Go to **Settings** > **Devices & Services**.
 2. Click **Add Integration** and search for **Assist Canonicalizer**.
-3. Select the **Fallback Conversation Agent**. When the canonicalizer cannot safely match a candidate, your original text is dispatched to this agent as a second chance. Choosing the built-in Home Assistant agent as the fallback is usually ineffective; the accepted canonicalized candidate was already validated against it and failed, so sending the raw text back to the same agent will likely fail again. For best results, select an LLM-based conversation agent that can interpret natural language differently and recover from the mismatch.
+3. Select the **Fallback Conversation Agent**. When the canonicalizer cannot safely complete a request, it sends the original text to this agent for a second chance. For the best chance of recovery, choose an agent that interprets language differently, such as an LLM-based conversation agent. The built-in Home Assistant agent is also supported, but it may encounter the same limitation that led to fallback.
 4. Set the **Minimum Match Confidence**. A candidate must score at or above this threshold across all four ranking signals to be accepted. Stick with the default value initially and use the **Test Match** action to observe real scores before making adjustments.
 5. Set the **Minimum Confidence Margin**. The gap between the top-ranked candidate and the next candidate with a different intent name must be at least this value. This prevents situations where the input is ambiguous and two different intents score similarly. Use the default value at first; only tighten or relax it after analyzing actual score breakdowns with **Test Match**.
 6. Go to **Settings** > **Voice assistants** and open your Assist pipeline. Under **Conversation agents**, select **Assist Canonicalizer** from the agent list.
@@ -98,7 +98,7 @@
 
 ## How It Works
 
-When you speak a command (via speech-to-text) or type into the Assist chat box, Assist Canonicalizer intercepts the text and processes it through the following pipeline:
+When you speak a command (via speech-to-text) or type in the Assist chat box, Assist Canonicalizer receives the request and processes it through the following pipeline:
 
 ```mermaid
 flowchart TD
@@ -106,11 +106,16 @@ flowchart TD
     B --> C[Index Lookup]
     C --> D[Multi-Signal Ranking]
     D --> E{Confidence Gate}
-    E -->|Passed| F[Validation via HA Agent]
-    E -->|Failed| G[Fallback Agent]
-    F -->|Accepted| H[Canonicalized Result]
-    F -->|Rejected| G
-    G --> I[Original Text Delegated]
+    E -->|Pass| F[Execute with Home Assistant Agent]
+    E -->|Fail| G[Fallback Agent Receives Original Input]
+    F -->|Success| H[Return Home Assistant Result]
+    F -->|Rejected| R{Safe to retry?}
+    R -->|No| G
+    R -->|Yes| J{Another candidate passes the same gates?}
+    J -->|Yes, once| K[Execute Recovery Candidate]
+    J -->|No| G
+    K -->|Success| H
+    K -->|Failure| G
 ```
 
 1. **Text Normalization**: The input is NFKC-normalized, casefolded, punctuation-stripped, and whitespace-collapsed into a canonical token sequence. This normalization is language-agnostic and applied identically to both input text and candidate sentences, ensuring fair comparison.
@@ -127,11 +132,18 @@ flowchart TD
    - **Keyword Relevance**: Weighs how important each word is across all candidates, giving more credit to distinctive words that appear in your input.
    - **Intent Context**: Rewards candidates whose intent type (e.g., turning on a light, setting a temperature) aligns with the top matches, preventing nonsensical pairings.
 
-4. **Confidence Gate**: The top-ranked candidate must clear both the configured `min_confidence` and `min_margin` thresholds. If either threshold is not met, the system falls back.
+4. **Confidence Gate**: The top-ranked candidate must meet both the configured `min_confidence` and `min_margin` thresholds. If different commands for opposing actions receive the same score, the integration falls back instead of choosing arbitrarily. Candidates that produce the same normalized command and slot payload are treated as equivalent and sent to HassIL only once.
 
-5. **Validation**: The accepted candidate is validated by sending its canonical sentence to the built-in Home Assistant conversation agent (HassIL). If the HA agent successfully processes the canonicalized sentence, the result is returned. Otherwise, the system falls back.
+5. **Execution and Bounded Recovery**: The selected canonical sentence is sent to the built-in Home Assistant conversation agent (HassIL), which may execute the intent. Because this is a live execution path, recovery is deliberately limited.
 
-6. **Fallback**: When ranking or validation is not safe, the original user text is forwarded to your configured fallback conversation agent, preserving the standard Assist experience.
+   A recovery candidate is considered only when the integration can confirm that the selected command was rejected before an intent handler ran:
+
+   - `no_intent_match` is returned before intent handling and therefore permits recovery.
+   - `no_valid_targets` permits recovery only when a recognition-only check of the same command confirms unmatched entities. If the check cannot confirm them, for example because the command matches completely or the check is unavailable or fails, the integration falls back.
+
+   When recovery is allowed, unusable and duplicate commands are removed, and the remaining candidates must pass the same confidence gates again. The recovery candidate may have a different intent or slot payload, but only one additional command can be executed. Handler errors, exceptions, and unknown error codes never trigger candidate recovery.
+
+6. **Fallback**: If ranking does not produce a safe candidate, recovery is not eligible, or execution fails, the integration forwards the original input to your configured fallback conversation agent.
 
 ---
 
@@ -148,9 +160,9 @@ The ranking engine was benchmarked using real-world test datasets across five la
 | Mode      | Intent/Slot | Mismatch | Fallback |
 | :-------- | ----------: | -------: | -------: |
 | `hassil`  |       47.7% |     0.0% |    52.3% |
-| `lexical` |   **92.7%** | **1.5%** | **5.8%** |
+| `lexical` |   **92.8%** | **1.3%** | **5.8%** |
 
-> Intent/slot accuracy jumped from **47.7% to 92.7%**. The combined error rate (mismatch + fallback) dropped from **52.3% to 7.3%**.
+> Intent/slot accuracy jumped from **47.7% to 92.8%**. The combined error rate (mismatch + fallback) dropped from **52.3% to 7.2%**.
 
 <!-- BENCHMARK_OVERALL_END -->
 
@@ -163,11 +175,11 @@ The ranking engine was benchmarked using real-world test datasets across five la
 | EN       | `hassil`  |       52.7% |     0.0% |    47.3% |
 | EN       | `lexical` |   **92.2%** | **2.3%** | **5.4%** |
 | DE       | `hassil`  |       48.4% |     0.0% |    51.6% |
-| DE       | `lexical` |   **95.1%** | **0.8%** | **4.1%** |
+| DE       | `lexical` |   **94.3%** | **0.8%** | **4.9%** |
 | FR       | `hassil`  |       49.6% |     0.0% |    50.4% |
 | FR       | `lexical` |   **93.3%** | **1.7%** | **5.0%** |
 | NL       | `hassil`  |       48.8% |     0.0% |    51.2% |
-| NL       | `lexical` |   **89.9%** | **1.6%** | **8.5%** |
+| NL       | `lexical` |   **91.5%** | **0.8%** | **7.8%** |
 | VI       | `hassil`  |       37.0% |     0.0% |    63.0% |
 | VI       | `lexical` |   **93.0%** | **1.0%** | **6.0%** |
 
@@ -264,7 +276,7 @@ The integration uses two configurable thresholds to decide whether to accept a t
 : The weighted final score of the best candidate must be at or above this value. Scores range from 0.0 (no match) to 1.0 (perfect match across all four signals).
 
 **Minimum Confidence Margin** (`min_margin`)
-: The score gap between the top-ranked candidate and the next candidate with a different intent name must be at least this value. This prevents situations where the input is ambiguous and two different intents score similarly.
+: The top-ranked candidate must lead the next candidate with a different intent by at least this value. If equally scored candidates represent opposing actions with different commands, the integration falls back. Candidates that produce the same normalized command and slots are treated as equivalent and sent to HassIL once.
 
 When a query **falls back**, the reason is recorded in diagnostics as one of:
 
@@ -273,7 +285,7 @@ When a query **falls back**, the reason is recorded in diagnostics as one of:
 | `low_confidence`       | No candidate met the `min_confidence` threshold                                                          |
 | `low_margin`           | The top candidate and the next candidate with a different intent scored too closely (below `min_margin`) |
 | `empty_index`          | No index exists for the active language                                                                  |
-| `validation_failed`    | The top candidate was accepted but failed HA agent validation                                            |
+| `validation_failed`    | Neither the selected canonical command nor its single eligible recovery attempt, if any, succeeded       |
 | `ranking_failed`       | An unexpected error occurred during the ranking phase                                                    |
 | `unexpected_exception` | An unrecoverable error occurred during processing                                                        |
 
@@ -289,7 +301,7 @@ You can inspect the fallback reason for the last query using the **Diagnostics**
 
 1. Run the **Diagnostics** action and check `last_fallback_reason`. If it's `empty_index`, the index hasn't been built yet. Indexes are proactively warmed up at startup/reload for all configured Assist pipeline languages. If `empty_index` still appears, the warmup may have been skipped (no pipelines configured, no default language available), or the background build hasn't completed yet. You can force a rebuild with the **Rebuild Index** action.
 2. If the reason is `low_confidence`, your `min_confidence` threshold may be too high. Try lowering it in the integration options. Use **Test Match** with sample sentences to see actual scores.
-3. If the reason is `validation_failed`, the canonical sentence was matched but the built-in HA agent rejected it. Use **Dump Candidates** to inspect whether the correct candidates exist for your language.
+3. If the reason is `validation_failed`, neither the selected canonical command nor its single eligible recovery attempt, if any, succeeded. Use **Dump Candidates** to inspect the ranked commands, intents, and slot payloads for your language.
 
 **My custom sentences aren't being recognized.**
 

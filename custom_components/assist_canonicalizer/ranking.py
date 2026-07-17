@@ -2349,25 +2349,6 @@ def _has_safe_relaxed_intent_evidence(
     )
 
 
-def _is_turn_on_off_same_slot_tie(
-    top_candidate: RankedCandidate,
-    competing_candidate: RankedCandidate,
-) -> bool:
-    """Return whether an exact TurnOn/TurnOff tie has identical extracted slots."""
-    if top_candidate.candidate.intent_name != "HassTurnOn":
-        return False
-    if competing_candidate.candidate.intent_name != "HassTurnOff":
-        return False
-    if not isclose(
-        top_candidate.scores.final_score,
-        competing_candidate.scores.final_score,
-        rel_tol=0.0,
-        abs_tol=_STRUCTURAL_TIE_ABS_TOLERANCE,
-    ):
-        return False
-    return top_candidate.candidate.parsed_slots == competing_candidate.candidate.parsed_slots
-
-
 def _is_same_text_same_slot_competitor(
     candidate: RankedCandidate,
     other: RankedCandidate,
@@ -2407,8 +2388,6 @@ def evaluate_confidence_gates(
     if _is_exact_lexical_match(top_candidate):
         # Exact canonical text is delegated back to HassIL with live request
         # context; candidate intent/slot metadata is not executed here.
-        return top_candidate, None
-    if _is_turn_on_off_same_slot_tie(top_candidate, competing_candidate):
         return top_candidate, None
     margin = top_candidate.scores.final_score - competing_candidate.scores.final_score
     if _has_weak_zero_intent_evidence(top_candidate, margin):

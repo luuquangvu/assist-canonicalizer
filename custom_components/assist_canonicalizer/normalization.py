@@ -15,6 +15,9 @@ from .const import (
 _PUNCTUATION_RE = re.compile(r"[^\w\s]", re.UNICODE)
 _WHITESPACE_RE = re.compile(r"\s+")
 _HAS_DIGIT_RE = re.compile(r"\d")
+_NUMERIC_UNICODE_MINUS_RE = re.compile(
+    r"(?<!\w)[\u2010\u2011\u2012\u2013\u2212\ufe63\uff0d](?=(?:\d|[.,]\d))"
+)
 
 # Precomputed BMP translation table that deletes all Unicode combining marks.
 # Built once at import; covers all diacritics used by DE, EN, FR, NL, VI and
@@ -60,17 +63,20 @@ class _PunctuationPlaceholderManager:
 
     def __init__(self) -> None:
         """Initialize the pre-compiled regex patterns for punctuation placeholders."""
+        float_dot_placeholder = _make_placeholder("F_DOT")
+        float_comma_placeholder = _make_placeholder("F_COMMA")
+        numeric_minus_placeholder = _make_placeholder("N_MINUS")
         self.placeholders: list[tuple[re.Pattern[str], str, str, str]] = [
             (
                 re.compile(r"(?<!\w)\.(?=\d)|(?<=\d)\.(?=\d)"),
-                _make_placeholder("F_DOT"),
-                _make_placeholder("F_DOT"),
+                float_dot_placeholder,
+                float_dot_placeholder,
                 ".",
             ),
             (
                 re.compile(r"(?<!\w),(?=\d)|(?<=\d),(?=\d)"),
-                _make_placeholder("F_COMMA"),
-                _make_placeholder("F_COMMA"),
+                float_comma_placeholder,
+                float_comma_placeholder,
                 ",",
             ),
             (
@@ -86,9 +92,12 @@ class _PunctuationPlaceholderManager:
                 "-",
             ),
             (
-                re.compile(r"(?<!\w)-(?=\d)"),
-                _make_placeholder("N_MINUS"),
-                _make_placeholder("N_MINUS"),
+                re.compile(
+                    rf"(?<!\w)-(?=(?:\d|{re.escape(float_dot_placeholder)}\d|"
+                    rf"{re.escape(float_comma_placeholder)}\d))"
+                ),
+                numeric_minus_placeholder,
+                numeric_minus_placeholder,
                 "-",
             ),
         ]
@@ -123,6 +132,7 @@ def normalize_text(text: str) -> str:
     """
     normalized = unicodedata.normalize("NFKC", text).casefold()
     if _HAS_DIGIT_RE.search(normalized) is not None:
+        normalized = _NUMERIC_UNICODE_MINUS_RE.sub("-", normalized)
         with_placeholders = _PLACEHOLDER_MANAGER.apply(normalized)
         without_punctuation = _PUNCTUATION_RE.sub(" ", with_placeholders)
         collapsed = _WHITESPACE_RE.sub(" ", without_punctuation).strip()

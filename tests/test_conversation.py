@@ -12,6 +12,7 @@ import pytest
 from homeassistant.components.conversation.const import HOME_ASSISTANT_AGENT
 from homeassistant.components.conversation.models import ConversationInput
 from homeassistant.core import Context
+from homeassistant.helpers import intent
 
 import custom_components.assist_canonicalizer as assist_canonicalizer
 from custom_components.assist_canonicalizer import _discover_pipeline_languages
@@ -538,7 +539,7 @@ async def test_exact_collision_hassil_rejection_falls_back_to_raw_text() -> None
         patch.object(
             entity,
             "_delegate_text",
-            AsyncMock(side_effect=[validation_error, validation_error, "raw_result"]),
+            AsyncMock(side_effect=[validation_error, "raw_result"]),
         ) as delegate,
     ):
         result = await entity._async_process_with_runtime(user_input)
@@ -547,9 +548,7 @@ async def test_exact_collision_hassil_rejection_falls_back_to_raw_text() -> None
     assert delegate.await_args_list[0].args == ("all fans off", user_input)
     assert delegate.await_args_list[0].kwargs == {"primary": True}
     assert delegate.await_args_list[1].args == ("all fans off", user_input)
-    assert delegate.await_args_list[1].kwargs == {"primary": True}
-    assert delegate.await_args_list[2].args == ("all fans off", user_input)
-    assert delegate.await_args_list[2].kwargs == {"primary": False}
+    assert delegate.await_args_list[1].kwargs == {"primary": False}
     assert runtime.diagnostics.last_fallback_reason == FallbackReason.VALIDATION_FAILED
 
 
@@ -627,7 +626,7 @@ async def test_validation_only_delegates_accepted_candidate() -> None:
         ),
     )
     validation_err_res = MagicMock()
-    validation_err_res.response.error_code = "error"
+    validation_err_res.response.error_code = intent.IntentResponseErrorCode.NO_INTENT_MATCH
     validation_ok_res = MagicMock()
     validation_ok_res.response.error_code = None
     user_input = MockConversationInput("turn kitchen light", "en")
@@ -654,7 +653,7 @@ async def test_validation_only_delegates_accepted_candidate() -> None:
 
 @pytest.mark.asyncio
 async def test_validation_tries_remaining_confident_ranked_candidates() -> None:
-    """Try the next confident ranked candidate before falling back to raw text."""
+    """Re-gate one remaining candidate after HassIL reports no intent match."""
     entry = MagicMock()
     entry.options = {"min_confidence": 0.60, "min_margin": 0.05}
     entry.entry_id = "test_entry"
@@ -686,7 +685,7 @@ async def test_validation_tries_remaining_confident_ranked_candidates() -> None:
         ),
     )
     validation_err_res = MagicMock()
-    validation_err_res.response.error_code = "error"
+    validation_err_res.response.error_code = intent.IntentResponseErrorCode.NO_INTENT_MATCH
     validation_ok_res = MagicMock()
     validation_ok_res.response.error_code = None
     user_input = MockConversationInput("turn kitchen light", "en")
@@ -715,8 +714,8 @@ async def test_validation_tries_remaining_confident_ranked_candidates() -> None:
 
 
 @pytest.mark.asyncio
-async def test_validation_delegate_exception_tries_remaining_candidates() -> None:
-    """Treat primary-agent validation exceptions as one candidate failing validation."""
+async def test_no_intent_match_reranks_cross_intent_candidate() -> None:
+    """Recover a lower-ranked intent after the selected text has no HassIL match."""
     entry = MagicMock()
     entry.options = {"min_confidence": 0.60, "min_margin": 0.05}
     entry.entry_id = "test_entry"
@@ -727,57 +726,439 @@ async def test_validation_delegate_exception_tries_remaining_candidates() -> Non
     hass.async_add_executor_job = AsyncMock(side_effect=lambda target, *args: target(*args))
     entity.hass = hass
 
-    accepted = RankedCandidate(
+    turn_on = RankedCandidate(
         candidate=Candidate(text="turn on kitchen light", intent_name="HassTurnOn"),
-        scores=ScoreBreakdown(
-            rapidfuzz_score=0.9,
-            char_ngram_score=0.9,
-            bm25_score=0.9,
-            intent_score=1.0,
-            final_score=0.9,
-        ),
+        scores=ScoreBreakdown(0.9, 0.9, 0.9, 1.0, 0.9),
     )
-    next_ranked = RankedCandidate(
-        candidate=Candidate(text="turn on kitchen lamp", intent_name="HassTurnOn"),
-        scores=ScoreBreakdown(
-            rapidfuzz_score=0.8,
-            char_ngram_score=0.8,
-            bm25_score=0.8,
-            intent_score=1.0,
-            final_score=0.8,
-        ),
+    turn_off = RankedCandidate(
+        candidate=Candidate(text="turn off kitchen light", intent_name="HassTurnOff"),
+        scores=ScoreBreakdown(0.8, 0.8, 0.8, 1.0, 0.8),
     )
-    validation_ok_res = MagicMock()
-    validation_ok_res.response.error_code = None
+    no_match = MagicMock()
+    no_match.response.error_code = intent.IntentResponseErrorCode.NO_INTENT_MATCH
+    success = MagicMock()
+    success.response.error_code = None
     user_input = MockConversationInput("turn kitchen light", "en")
 
     with (
         patch.object(
             CanonicalizerRuntime,
             "rank_with_dynamic_candidates",
-            return_value=(accepted, next_ranked),
+            return_value=(turn_on, turn_off),
         ),
         patch.object(
             entity,
             "_delegate_text",
-            AsyncMock(side_effect=[RuntimeError("primary failed"), validation_ok_res]),
-        ) as mock_del_text,
-        patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw_delegated")) as raw,
+            AsyncMock(side_effect=[no_match, success]),
+        ) as delegate,
+        patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw")) as raw,
+        patch("custom_components.assist_canonicalizer.conversation.async_get_agent") as get_agent,
     ):
-        res = await entity._async_process_with_runtime(user_input)
+        result = await entity._async_process_with_runtime(user_input)
 
-    assert res == validation_ok_res
-    assert mock_del_text.await_args_list[0].args == ("turn on kitchen light", user_input)
-    assert mock_del_text.await_args_list[0].kwargs == {"primary": True}
-    assert mock_del_text.await_args_list[1].args == ("turn on kitchen lamp", user_input)
-    assert mock_del_text.await_args_list[1].kwargs == {"primary": True}
+    assert result == success
+    assert [call.args[0] for call in delegate.await_args_list] == [
+        "turn on kitchen light",
+        "turn off kitchen light",
+    ]
+    assert all(call.kwargs == {"primary": True} for call in delegate.await_args_list)
     raw.assert_not_awaited()
-    assert runtime.diagnostics.last_error is None
+    get_agent.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_validation_delegate_exceptions_fallback_keep_last_error() -> None:
-    """Keep the last validation exception when every candidate fails validation."""
+async def test_no_intent_match_reranks_candidate_with_different_slots() -> None:
+    """Recover a lower-ranked candidate with independently re-gated slots."""
+    entry = MagicMock()
+    entry.options = {"min_confidence": 0.60, "min_margin": 0.05}
+    entry.entry_id = "test_entry"
+    runtime = CanonicalizerRuntime()
+    runtime.indexes["en"] = MagicMock(candidate_count=3)
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    hass = MagicMock()
+    hass.async_add_executor_job = AsyncMock(side_effect=lambda target, *args: target(*args))
+    entity.hass = hass
+
+    selected = RankedCandidate(
+        candidate=Candidate(
+            text="set office light to 20",
+            intent_name="HassLightSet",
+            metadata={"slots": '{"name":"office light","brightness":20}'},
+        ),
+        scores=ScoreBreakdown(0.9, 0.9, 0.9, 1.0, 0.9),
+    )
+    correct_target = RankedCandidate(
+        candidate=Candidate(
+            text="set kitchen light to 50",
+            intent_name="HassLightSet",
+            metadata={"slots": '{"name":"kitchen light","brightness":50}'},
+        ),
+        scores=ScoreBreakdown(0.85, 0.85, 0.85, 1.0, 0.85),
+    )
+    compatible_target = RankedCandidate(
+        candidate=Candidate(
+            text="set living room light to 50",
+            intent_name="HassLightSet",
+            metadata={"slots": '{"name":"living room light","brightness":50}'},
+        ),
+        scores=ScoreBreakdown(0.8, 0.8, 0.8, 1.0, 0.8),
+    )
+    no_match = MagicMock()
+    no_match.response.error_code = intent.IntentResponseErrorCode.NO_INTENT_MATCH
+    success = MagicMock()
+    success.response.error_code = None
+    user_input = MockConversationInput("set kitchen light to 50", "en")
+
+    with (
+        patch.object(
+            CanonicalizerRuntime,
+            "rank_with_dynamic_candidates",
+            return_value=(selected, correct_target, compatible_target),
+        ),
+        patch.object(
+            entity,
+            "_delegate_text",
+            AsyncMock(side_effect=[no_match, success]),
+        ) as delegate,
+        patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw")) as raw,
+    ):
+        result = await entity._async_process_with_runtime(user_input)
+
+    assert result == success
+    assert [call.args[0] for call in delegate.await_args_list] == [
+        "set office light to 20",
+        "set kitchen light to 50",
+    ]
+    raw.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_no_valid_targets_recovers_after_unmatched_entity_recognition() -> None:
+    """Retry once when re-recognition confirms pre-handler unmatched entities."""
+    entry = MagicMock()
+    entry.options = {"min_confidence": 0.60, "min_margin": 0.05}
+    entry.entry_id = "test_entry"
+    runtime = CanonicalizerRuntime()
+    runtime.indexes["en"] = MagicMock(candidate_count=2)
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    hass = MagicMock()
+    hass.async_add_executor_job = AsyncMock(side_effect=lambda target, *args: target(*args))
+    entity.hass = hass
+    selected = RankedCandidate(
+        candidate=Candidate(
+            text="set kitchen light to 50",
+            intent_name="HassLightSet",
+            metadata={"slots": '{"name":"kitchen light","brightness":50}'},
+        ),
+        scores=ScoreBreakdown(0.9, 0.9, 0.9, 1.0, 0.9),
+    )
+    alternative = RankedCandidate(
+        candidate=Candidate(
+            text="turn on living room light",
+            intent_name="HassTurnOn",
+            metadata={"slots": '{"name":"living room light"}'},
+        ),
+        scores=ScoreBreakdown(0.8, 0.8, 0.8, 1.0, 0.8),
+    )
+    no_targets = MagicMock()
+    no_targets.response.error_code = intent.IntentResponseErrorCode.NO_VALID_TARGETS
+    success = MagicMock()
+    success.response.error_code = None
+    recognize_intent = AsyncMock(
+        return_value=SimpleNamespace(unmatched_entities={"name": object()})
+    )
+    default_agent = SimpleNamespace(async_recognize_intent=recognize_intent)
+    user_input = MockConversationInput("turn on living room light", "en")
+
+    with (
+        patch.object(
+            CanonicalizerRuntime,
+            "rank_with_dynamic_candidates",
+            return_value=(selected, alternative),
+        ),
+        patch.object(
+            entity,
+            "_delegate_text",
+            AsyncMock(side_effect=[no_targets, success]),
+        ) as delegate,
+        patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw")) as raw,
+        patch(
+            "custom_components.assist_canonicalizer.conversation.async_get_agent",
+            return_value=default_agent,
+        ) as get_agent,
+    ):
+        result = await entity._async_process_with_runtime(user_input)
+
+    assert result == success
+    assert [call.args[0] for call in delegate.await_args_list] == [
+        "set kitchen light to 50",
+        "turn on living room light",
+    ]
+    raw.assert_not_awaited()
+    get_agent.assert_called_once_with(hass, HOME_ASSISTANT_AGENT)
+    recognize_intent.assert_awaited_once()
+    assert recognize_intent.await_args is not None
+    recognition_input = recognize_intent.await_args.args[0]
+    assert recognition_input is not user_input
+    assert recognition_input.text == "set kitchen light to 50"
+    assert recognition_input.context is user_input.context
+    assert recognition_input.conversation_id == user_input.conversation_id
+    assert recognition_input.language == user_input.language
+    assert recognition_input.agent_id == HOME_ASSISTANT_AGENT
+    assert user_input.text == "turn on living room light"
+
+
+@pytest.mark.asyncio
+async def test_no_valid_targets_falls_back_after_handler_target_failure() -> None:
+    """Do not retry when re-recognition shows HassIL reached target handling."""
+    entry = MagicMock()
+    entry.options = {"min_confidence": 0.60, "min_margin": 0.05}
+    entry.entry_id = "test_entry"
+    runtime = CanonicalizerRuntime()
+    runtime.indexes["en"] = MagicMock(candidate_count=2)
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    hass = MagicMock()
+    hass.async_add_executor_job = AsyncMock(side_effect=lambda target, *args: target(*args))
+    entity.hass = hass
+    selected = RankedCandidate(
+        candidate=Candidate(text="turn on kitchen light", intent_name="HassTurnOn"),
+        scores=ScoreBreakdown(0.9, 0.9, 0.9, 1.0, 0.9),
+    )
+    alternative = RankedCandidate(
+        candidate=Candidate(text="turn on living room light", intent_name="HassTurnOn"),
+        scores=ScoreBreakdown(0.8, 0.8, 0.8, 1.0, 0.8),
+    )
+    no_targets = MagicMock()
+    no_targets.response.error_code = intent.IntentResponseErrorCode.NO_VALID_TARGETS
+    recognize_intent = AsyncMock(return_value=SimpleNamespace(unmatched_entities={}))
+    default_agent = SimpleNamespace(async_recognize_intent=recognize_intent)
+    user_input = MockConversationInput("turn on the light", "en")
+
+    with (
+        patch.object(
+            CanonicalizerRuntime,
+            "rank_with_dynamic_candidates",
+            return_value=(selected, alternative),
+        ),
+        patch.object(entity, "_delegate_text", AsyncMock(return_value=no_targets)) as delegate,
+        patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw")) as raw,
+        patch(
+            "custom_components.assist_canonicalizer.conversation.async_get_agent",
+            return_value=default_agent,
+        ),
+    ):
+        result = await entity._async_process_with_runtime(user_input)
+
+    assert result == "raw"
+    delegate.assert_awaited_once_with("turn on kitchen light", user_input, primary=True)
+    recognize_intent.assert_awaited_once()
+    raw.assert_awaited_once_with(user_input)
+
+
+@pytest.mark.asyncio
+async def test_unmatched_entity_provenance_check_fails_closed(
+    conversation_entity: AssistCanonicalizerConversationEntity,
+) -> None:
+    """Treat unavailable or failed side-effect-free recognition as indeterminate."""
+    user_input = MockConversationInput("turn on the light", "en")
+
+    with patch(
+        "custom_components.assist_canonicalizer.conversation.async_get_agent",
+        return_value=None,
+    ):
+        assert not await conversation_entity._async_has_unmatched_entities(
+            "turn on kitchen light", user_input
+        )
+
+    recognize_intent = AsyncMock(side_effect=RuntimeError("recognition failed"))
+    default_agent = SimpleNamespace(async_recognize_intent=recognize_intent)
+    with patch(
+        "custom_components.assist_canonicalizer.conversation.async_get_agent",
+        return_value=default_agent,
+    ):
+        assert not await conversation_entity._async_has_unmatched_entities(
+            "turn on kitchen light", user_input
+        )
+
+    recognize_intent = AsyncMock(return_value=None)
+    default_agent = SimpleNamespace(async_recognize_intent=recognize_intent)
+    with patch(
+        "custom_components.assist_canonicalizer.conversation.async_get_agent",
+        return_value=default_agent,
+    ):
+        assert not await conversation_entity._async_has_unmatched_entities(
+            "turn on kitchen light", user_input
+        )
+
+
+@pytest.mark.parametrize(
+    "error_code",
+    [
+        intent.IntentResponseErrorCode.FAILED_TO_HANDLE,
+        intent.IntentResponseErrorCode.UNKNOWN,
+        "future_error_code",
+    ],
+)
+@pytest.mark.asyncio
+async def test_nonretryable_hassil_errors_do_not_execute_another_candidate(
+    error_code: object,
+) -> None:
+    """Do not retry after errors that may follow handler side effects."""
+    entry = MagicMock()
+    entry.options = {"min_confidence": 0.60, "min_margin": 0.05}
+    entry.entry_id = "test_entry"
+    runtime = CanonicalizerRuntime()
+    runtime.indexes["en"] = MagicMock(candidate_count=2)
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    hass = MagicMock()
+    hass.async_add_executor_job = AsyncMock(side_effect=lambda target, *args: target(*args))
+    entity.hass = hass
+    selected = RankedCandidate(
+        candidate=Candidate(text="turn on kitchen light", intent_name="HassTurnOn"),
+        scores=ScoreBreakdown(0.9, 0.9, 0.9, 1.0, 0.9),
+    )
+    remaining = RankedCandidate(
+        candidate=Candidate(text="turn on kitchen lamp", intent_name="HassTurnOn"),
+        scores=ScoreBreakdown(0.8, 0.8, 0.8, 1.0, 0.8),
+    )
+    failed = MagicMock()
+    failed.response.error_code = error_code
+    user_input = MockConversationInput("turn kitchen light", "en")
+
+    with (
+        patch.object(
+            CanonicalizerRuntime,
+            "rank_with_dynamic_candidates",
+            return_value=(selected, remaining),
+        ),
+        patch.object(entity, "_delegate_text", AsyncMock(return_value=failed)) as delegate,
+        patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw")) as raw,
+    ):
+        result = await entity._async_process_with_runtime(user_input)
+
+    assert result == "raw"
+    delegate.assert_awaited_once_with("turn on kitchen light", user_input, primary=True)
+    raw.assert_awaited_once_with(user_input)
+
+
+@pytest.mark.asyncio
+async def test_candidate_recovery_is_capped_at_one_additional_hassil_call() -> None:
+    """Fall back after two failed primary executions without trying a third candidate."""
+    entry = MagicMock()
+    entry.options = {"min_confidence": 0.60, "min_margin": 0.05}
+    entry.entry_id = "test_entry"
+    runtime = CanonicalizerRuntime()
+    runtime.indexes["en"] = MagicMock(candidate_count=3)
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    hass = MagicMock()
+    hass.async_add_executor_job = AsyncMock(side_effect=lambda target, *args: target(*args))
+    entity.hass = hass
+    ranked = tuple(
+        RankedCandidate(
+            candidate=Candidate(text=text, intent_name="HassTurnOn"),
+            scores=ScoreBreakdown(score, score, score, 1.0, score),
+        )
+        for text, score in (
+            ("turn on kitchen light", 0.9),
+            ("turn on kitchen lamp", 0.8),
+            ("switch on kitchen light", 0.7),
+        )
+    )
+    no_match = MagicMock()
+    no_match.response.error_code = intent.IntentResponseErrorCode.NO_INTENT_MATCH
+    user_input = MockConversationInput("turn kitchen light", "en")
+
+    with (
+        patch.object(
+            CanonicalizerRuntime,
+            "rank_with_dynamic_candidates",
+            return_value=ranked,
+        ),
+        patch.object(
+            entity,
+            "_delegate_text",
+            AsyncMock(side_effect=[no_match, no_match]),
+        ) as delegate,
+        patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw")) as raw,
+    ):
+        result = await entity._async_process_with_runtime(user_input)
+
+    assert result == "raw"
+    assert [call.args[0] for call in delegate.await_args_list] == [
+        "turn on kitchen light",
+        "turn on kitchen lamp",
+    ]
+    raw.assert_awaited_once_with(user_input)
+
+
+@pytest.mark.asyncio
+async def test_candidate_recovery_skips_normalized_duplicate_text(
+    conversation_entity: AssistCanonicalizerConversationEntity,
+) -> None:
+    """Do not send the same delegated command twice during recovery."""
+    selected = RankedCandidate(
+        candidate=Candidate(text="Turn on kitchen light!", intent_name="HassTurnOn"),
+        scores=ScoreBreakdown(0.9, 0.9, 0.9, 1.0, 0.9),
+    )
+    duplicate = RankedCandidate(
+        candidate=Candidate(text="turn on kitchen light", intent_name="HassTurnOn"),
+        scores=ScoreBreakdown(0.85, 0.85, 0.85, 1.0, 0.85),
+    )
+    distinct = RankedCandidate(
+        candidate=Candidate(text="switch on kitchen light", intent_name="HassTurnOn"),
+        scores=ScoreBreakdown(0.8, 0.8, 0.8, 1.0, 0.8),
+    )
+    user_input = MockConversationInput("turn kitchen light", "en")
+
+    recovery = await conversation_entity._async_ranked_recovery_candidate(
+        (selected, duplicate, distinct),
+        selected,
+        "Turn on kitchen light!",
+        intent.IntentResponseErrorCode.NO_INTENT_MATCH.value,
+        0.60,
+        0.05,
+        user_input,
+    )
+
+    assert recovery is not None
+    assert recovery[0] is distinct
+    assert recovery[1] == "switch on kitchen light"
+
+
+@pytest.mark.asyncio
+async def test_candidate_recovery_reapplies_margin_gate(
+    conversation_entity: AssistCanonicalizerConversationEntity,
+) -> None:
+    """Reject recovery when the remaining top intents are still ambiguous."""
+    selected = RankedCandidate(
+        candidate=Candidate(text="first command", intent_name="IntentA"),
+        scores=ScoreBreakdown(0.9, 0.9, 0.9, 1.0, 0.9),
+    )
+    remaining = RankedCandidate(
+        candidate=Candidate(text="second command", intent_name="IntentB"),
+        scores=ScoreBreakdown(0.8, 0.8, 0.8, 1.0, 0.8),
+    )
+    competitor = RankedCandidate(
+        candidate=Candidate(text="third command", intent_name="IntentC"),
+        scores=ScoreBreakdown(0.78, 0.78, 0.78, 1.0, 0.78),
+    )
+
+    recovery = await conversation_entity._async_ranked_recovery_candidate(
+        (selected, remaining, competitor),
+        selected,
+        "first command",
+        intent.IntentResponseErrorCode.NO_INTENT_MATCH.value,
+        0.60,
+        0.05,
+        MockConversationInput("ambiguous command", "en"),
+    )
+
+    assert recovery is None
+
+
+@pytest.mark.asyncio
+async def test_validation_delegate_exception_does_not_retry_candidates() -> None:
+    """Do not execute another candidate after an indeterminate delegate exception."""
     entry = MagicMock()
     entry.options = {"min_confidence": 0.60, "min_margin": 0.05}
     entry.entry_id = "test_entry"
@@ -819,12 +1200,7 @@ async def test_validation_delegate_exceptions_fallback_keep_last_error() -> None
         patch.object(
             entity,
             "_delegate_text",
-            AsyncMock(
-                side_effect=[
-                    RuntimeError("first primary failed"),
-                    RuntimeError("second primary failed"),
-                ]
-            ),
+            AsyncMock(side_effect=RuntimeError("primary failed")),
         ) as mock_del_text,
         patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw_delegated")) as raw,
     ):
@@ -833,11 +1209,68 @@ async def test_validation_delegate_exceptions_fallback_keep_last_error() -> None
     assert res == "raw_delegated"
     assert mock_del_text.await_args_list[0].args == ("turn on kitchen light", user_input)
     assert mock_del_text.await_args_list[0].kwargs == {"primary": True}
-    assert mock_del_text.await_args_list[1].args == ("turn on kitchen lamp", user_input)
-    assert mock_del_text.await_args_list[1].kwargs == {"primary": True}
+    assert len(mock_del_text.await_args_list) == 1
+    raw.assert_awaited_once_with(user_input)
+    assert runtime.diagnostics.last_error == "primary failed"
+
+
+@pytest.mark.asyncio
+async def test_validation_delegate_exception_fallback_keeps_error() -> None:
+    """Keep a candidate execution exception when falling back without retrying."""
+    entry = MagicMock()
+    entry.options = {"min_confidence": 0.60, "min_margin": 0.05}
+    entry.entry_id = "test_entry"
+    runtime = CanonicalizerRuntime()
+    runtime.indexes["en"] = MagicMock(candidate_count=2)
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    hass = MagicMock()
+    hass.async_add_executor_job = AsyncMock(side_effect=lambda target, *args: target(*args))
+    entity.hass = hass
+
+    accepted = RankedCandidate(
+        candidate=Candidate(text="turn on kitchen light", intent_name="HassTurnOn"),
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.9,
+            char_ngram_score=0.9,
+            bm25_score=0.9,
+            intent_score=1.0,
+            final_score=0.9,
+        ),
+    )
+    next_ranked = RankedCandidate(
+        candidate=Candidate(text="turn on kitchen lamp", intent_name="HassTurnOn"),
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.8,
+            char_ngram_score=0.8,
+            bm25_score=0.8,
+            intent_score=1.0,
+            final_score=0.8,
+        ),
+    )
+    user_input = MockConversationInput("turn kitchen light", "en")
+
+    with (
+        patch.object(
+            CanonicalizerRuntime,
+            "rank_with_dynamic_candidates",
+            return_value=(accepted, next_ranked),
+        ),
+        patch.object(
+            entity,
+            "_delegate_text",
+            AsyncMock(side_effect=RuntimeError("primary failed")),
+        ) as mock_del_text,
+        patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw_delegated")) as raw,
+    ):
+        res = await entity._async_process_with_runtime(user_input)
+
+    assert res == "raw_delegated"
+    assert mock_del_text.await_args_list[0].args == ("turn on kitchen light", user_input)
+    assert mock_del_text.await_args_list[0].kwargs == {"primary": True}
+    assert len(mock_del_text.await_args_list) == 1
     raw.assert_awaited_once_with(user_input)
     assert runtime.diagnostics.last_fallback_reason == FallbackReason.VALIDATION_FAILED
-    assert runtime.diagnostics.last_error == "second primary failed"
+    assert runtime.diagnostics.last_error == "primary failed"
 
 
 @pytest.mark.asyncio
@@ -1127,10 +1560,10 @@ async def test_async_process_shortcut_restores_chat_log(
     [False, True],
 )
 @pytest.mark.asyncio
-async def test_async_validate_ranked_candidate_restores_chat_log(
+async def test_async_execute_ranked_candidate_restores_chat_log(
     simulate_exception: bool,
 ) -> None:
-    """Test that the chat log is restored if candidate validation fails or raises an exception."""
+    """Restore the chat log when candidate execution fails or raises an exception."""
     entry = MagicMock()
     runtime = CanonicalizerRuntime()
     entity = AssistCanonicalizerConversationEntity(entry, runtime)
@@ -1189,16 +1622,19 @@ async def test_async_validate_ranked_candidate_restores_chat_log(
 
         mock_delegate.side_effect = side_effect
 
-        res = await entity._async_validate_ranked_candidate(ranked_candidate, user_input)
-        assert res is None
+        res = await entity._async_execute_ranked_candidate(ranked_candidate, user_input)
+        if simulate_exception:
+            assert res is None
+        else:
+            assert res is validation_res
 
         # Verify that mock_chat_log.content was restored (keeping only the original user message)
         assert mock_chat_log.content == [mock_user_message]
 
 
 @pytest.mark.asyncio
-async def test_async_validate_rehydrates_from_candidate_metadata_with_cold_cache() -> None:
-    """Rehydrate validation text without loading intents on the event loop."""
+async def test_async_execute_rehydrates_from_candidate_metadata_with_cold_cache() -> None:
+    """Rehydrate execution text without loading intents on the event loop."""
     entry = MagicMock()
     runtime = CanonicalizerRuntime()
     entity = AssistCanonicalizerConversationEntity(entry, runtime)
@@ -1230,7 +1666,7 @@ async def test_async_validate_rehydrates_from_candidate_metadata_with_cold_cache
             ) as delegate,
             patch("home_assistant_intents.get_intents") as get_intents,
         ):
-            result = await entity._async_validate_ranked_candidate(ranked, user_input)
+            result = await entity._async_execute_ranked_candidate(ranked, user_input)
 
         assert result is validation_result
         delegate.assert_awaited_once_with(
@@ -1429,10 +1865,10 @@ async def test_play_back_deltas_without_listener(
 
 
 @pytest.mark.asyncio
-async def test_async_validate_ranked_candidate_exceptions(
+async def test_async_execute_ranked_candidate_exceptions(
     conversation_entity: AssistCanonicalizerConversationEntity,
 ) -> None:
-    """Test that _async_validate_ranked_candidate returns None on delegate exceptions."""
+    """Test that candidate execution returns None on delegate exceptions."""
     rc = RankedCandidate(
         candidate=Candidate(text="test", intent_name="test"),
         scores=ScoreBreakdown(1.0, 1.0, 1.0, 1.0, 1.0),
@@ -1444,7 +1880,7 @@ async def test_async_validate_ranked_candidate_exceptions(
         "_delegate_text",
         side_effect=Exception("delegate exception"),
     ):
-        res = await conversation_entity._async_validate_ranked_candidate(rc, user_input)
+        res = await conversation_entity._async_execute_ranked_candidate(rc, user_input)
         assert res is None
 
 

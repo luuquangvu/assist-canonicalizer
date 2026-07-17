@@ -1710,6 +1710,45 @@ def test_query_registry_candidates_preserve_fractional_range_values(
     }
 
 
+@pytest.mark.parametrize(
+    ("query_value", "canonical_value", "slot_value"),
+    [
+        ("-.5", "-.5", -0.5),
+        ("-,5", "-,5", -0.5),
+        ("\N{MINUS SIGN}.5", "-.5", -0.5),
+        ("\N{MINUS SIGN}5", "-5", -5),
+    ],
+)
+def test_query_registry_candidates_preserve_signed_range_values(
+    query_value: str,
+    canonical_value: str,
+    slot_value: float,
+) -> None:
+    """Keep leading-decimal and Unicode-minus values negative through expansion."""
+    candidates = build_query_registry_candidates(
+        "en",
+        _build_range_intent_source(
+            "temperature",
+            {
+                "type": "temperature",
+                "from": -10,
+                "to": 10,
+                "fractions": "halves",
+            },
+            "HassClimateSetTemperature",
+            ["set temperature to {temperature}"],
+        ),
+        {},
+        f"set temperature to {query_value}",
+        max_candidates=1,
+    )
+
+    assert [candidate.text for candidate in candidates] == [f"set temperature to {canonical_value}"]
+    assert orjson.loads(candidates[0].metadata["slots"]) == {
+        "temperature": slot_value,
+    }
+
+
 def test_query_registry_candidates_respect_numeric_range_step() -> None:
     """Do not inject query numbers that HassIL range step validation rejects."""
     candidates = build_query_registry_candidates(

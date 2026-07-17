@@ -88,7 +88,7 @@ async def test_async_setup_entry(monkeypatch: pytest.MonkeyPatch) -> None:
     # Verify triggering the intent update callback schedules index rebuild
     assert subscription_recorder.saved_callback is not None
     runtime.indexes["en"] = MagicMock()
-    subscription_recorder.saved_callback({"some": "update"})
+    subscription_recorder.saved_callback({"some": {"intents": {}}})
     hass.add_job.assert_called_with(runtime.async_rebuild_index, hass, "en")
 
 

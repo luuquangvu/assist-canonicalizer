@@ -51,6 +51,19 @@ jobs:
       - name: Run Tests
         run: uv run --no-project pytest
 
+      - name: Run Multilingual Accuracy and Fallback Gate
+        run: >-
+          uv run --no-project tools/benchmark.py
+          --mode accuracy
+          --skip-hassil
+          --skip-ablations
+          --min-intent-slot-accuracy 92.0
+          --max-fallback-rate 8.0
+          --max-mismatch-rate 2.0
+          --min-language-intent-slot-accuracy 90.0
+          --max-language-fallback-rate 9.5
+          --max-language-mismatch-rate 2.5
+
   setup-matrix:
     runs-on: ubuntu-latest
     name: "Setup Compatibility Matrix"

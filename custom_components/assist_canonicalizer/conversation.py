@@ -8,10 +8,12 @@ import contextvars
 import logging
 import time
 from collections.abc import Callable, Iterator, Sequence
+from copy import copy
 from functools import partial
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from homeassistant.components import conversation
+from homeassistant.components.conversation.agent_manager import async_get_agent
 from homeassistant.components.conversation.const import HOME_ASSISTANT_AGENT
 from homeassistant.components.conversation.models import (
     AbstractConversationAgent,
@@ -22,6 +24,7 @@ from homeassistant.const import MATCH_ALL
 from homeassistant.helpers import intent
 
 if TYPE_CHECKING:
+    from homeassistant.components.conversation.default_agent import DefaultAgent
     from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from homeassistant.helpers import area_registry, device_registry, entity_registry
@@ -34,6 +37,7 @@ from .const import (
     NAME,
     FallbackReason,
 )
+from .normalization import normalize_text
 from .ranking import RankedCandidate, evaluate_confidence_gates
 from .rehydration import get_wildcard_rehydration
 from .runtime import CanonicalizerRuntime
@@ -226,6 +230,7 @@ class AssistCanonicalizerConversationEntity(
         old_len: int | None,
         *,
         update_diagnostics_on_error: bool = False,
+        return_error_result: bool = False,
     ) -> ConversationResult | None:
         """Delegate text and capture/play back deltas silently, restoring on failure."""
         deltas: list[dict] = []
@@ -239,7 +244,7 @@ class AssistCanonicalizerConversationEntity(
                 deltas = captured
             if self._result_has_error(result):
                 self._restore_chat_log_content(chat_log, old_len)
-                return None
+                return result if return_error_result else None
         except Exception as err:
             if update_diagnostics_on_error:
                 self._runtime.update_diagnostics(last_error=str(err))
@@ -314,18 +319,36 @@ class AssistCanonicalizerConversationEntity(
             )
             return await self._delegate_raw_text(user_input)
 
-        for ranked_candidate in self._ranked_validation_candidates(
+        delegated_text = self._candidate_delegation_text(selected, user_input)
+        execution_result = await self._async_execute_ranked_candidate(
+            selected,
+            user_input,
+            delegated_text,
+        )
+        if execution_result is not None and not self._result_has_error(execution_result):
+            self._runtime.update_diagnostics(clear_last_error=True)
+            return execution_result
+
+        error_code = self._result_error_code(execution_result)
+        recovery = await self._async_ranked_recovery_candidate(
             ranked,
             selected,
+            delegated_text,
+            error_code,
             min_confidence,
-        ):
-            validation_result = await self._async_validate_ranked_candidate(
-                ranked_candidate,
+            min_margin,
+            user_input,
+        )
+        if recovery is not None:
+            recovery_candidate, recovery_text = recovery
+            recovery_result = await self._async_execute_ranked_candidate(
+                recovery_candidate,
                 user_input,
+                recovery_text,
             )
-            if validation_result is not None:
+            if recovery_result is not None and not self._result_has_error(recovery_result):
                 self._runtime.update_diagnostics(clear_last_error=True)
-                return validation_result
+                return recovery_result
 
         self._runtime.update_diagnostics(last_fallback_reason=FallbackReason.VALIDATION_FAILED)
         return await self._delegate_raw_text(user_input)
@@ -370,12 +393,25 @@ class AssistCanonicalizerConversationEntity(
 
         return None if area_id is None else reg_area.async_get_area(area_id)
 
-    async def _async_validate_ranked_candidate(
+    def _candidate_delegation_text(
         self,
         ranked_candidate: RankedCandidate,
         user_input: ConversationInput,
+    ) -> str | None:
+        """Return the rehydrated canonical text to execute for one candidate."""
+        candidate = ranked_candidate.candidate
+        rehydrated, _replacements = get_wildcard_rehydration(candidate, user_input.text)
+        if candidate.has_wildcard and rehydrated == candidate.text:
+            return None
+        return rehydrated
+
+    async def _async_execute_ranked_candidate(
+        self,
+        ranked_candidate: RankedCandidate,
+        user_input: ConversationInput,
+        delegated_text: str | None = None,
     ) -> ConversationResult | None:
-        """Validate one accepted canonical candidate through the primary HassIL agent.
+        """Execute one canonical candidate through the primary HassIL agent.
 
         Wildcard placeholders (e.g. ``shopping_list_item``) in candidate text
         are rehydrated from the original query before delegation so that the
@@ -384,43 +420,117 @@ class AssistCanonicalizerConversationEntity(
         chat_log = self._get_active_chat_log()
         old_len = len(chat_log.content) if chat_log is not None else None
 
-        candidate = ranked_candidate.candidate
-        candidate_text = candidate.text
-        rehydrated, _replacements = get_wildcard_rehydration(candidate, user_input.text)
-        if candidate.has_wildcard and rehydrated == candidate_text:
+        if delegated_text is None:
+            delegated_text = self._candidate_delegation_text(ranked_candidate, user_input)
+        if delegated_text is None:
             return None
 
         try:
-            validation_result = await self._delegate_with_capture(
-                rehydrated,
+            execution_result = await self._delegate_with_capture(
+                delegated_text,
                 user_input,
                 chat_log,
                 old_len,
                 update_diagnostics_on_error=True,
+                return_error_result=True,
             )
         except Exception:
             return None
 
-        return validation_result
+        return execution_result
 
     async def _delegate_raw_text(self, user_input: ConversationInput) -> ConversationResult:
         """Delegate the original user text to the configured fallback path."""
         return await self._delegate_text(user_input.text, user_input, primary=False)
 
-    @staticmethod
-    def _ranked_validation_candidates(
+    async def _async_error_allows_candidate_recovery(
+        self,
+        error_code: str | None,
+        delegated_text: str | None,
+        user_input: ConversationInput,
+    ) -> bool:
+        """Return whether a primary error proves that one recovery is safe."""
+        if error_code == intent.IntentResponseErrorCode.NO_INTENT_MATCH.value:
+            return True
+        if (
+            error_code != intent.IntentResponseErrorCode.NO_VALID_TARGETS.value
+            or delegated_text is None
+        ):
+            return False
+        return await self._async_has_unmatched_entities(delegated_text, user_input)
+
+    async def _async_ranked_recovery_candidate(
+        self,
         ranked: Sequence[RankedCandidate],
         selected: RankedCandidate,
+        delegated_text: str | None,
+        error_code: str | None,
         min_confidence: float,
-    ) -> tuple[RankedCandidate, ...]:
-        """Return ranked candidates to validate, preferring the selected candidate."""
-        candidates = [selected]
-        candidates.extend(
-            candidate
-            for candidate in ranked
-            if candidate is not selected and candidate.scores.final_score >= min_confidence
+        min_margin: float,
+        user_input: ConversationInput,
+    ) -> tuple[RankedCandidate, str] | None:
+        """Return at most one fully re-gated, error-compatible recovery candidate."""
+        if not await self._async_error_allows_candidate_recovery(
+            error_code, delegated_text, user_input
+        ):
+            return None
+
+        delegated_key = normalize_text(delegated_text) if delegated_text is not None else None
+        remaining: list[tuple[RankedCandidate, str]] = []
+        for candidate in ranked:
+            if candidate is selected:
+                continue
+            candidate_text = self._candidate_delegation_text(candidate, user_input)
+            if candidate_text is None:
+                continue
+            if delegated_key is not None and normalize_text(candidate_text) == delegated_key:
+                continue
+            remaining.append((candidate, candidate_text))
+
+        accepted, _reason = evaluate_confidence_gates(
+            tuple(candidate for candidate, _text in remaining),
+            min_confidence=min_confidence,
+            min_margin=min_margin,
         )
-        return tuple(candidates)
+        if accepted is None:
+            return None
+        return next(
+            (
+                (candidate, candidate_text)
+                for candidate, candidate_text in remaining
+                if candidate is accepted
+            ),
+            None,
+        )
+
+    async def _async_has_unmatched_entities(
+        self,
+        delegated_text: str,
+        user_input: ConversationInput,
+    ) -> bool:
+        """Return whether side-effect-free HassIL recognition has unmatched entities."""
+        try:
+            recognition_input = copy(user_input)
+            recognition_input.text = delegated_text
+            recognition_input.agent_id = HOME_ASSISTANT_AGENT
+            default_agent = cast(
+                "DefaultAgent | None",
+                async_get_agent(self.hass, HOME_ASSISTANT_AGENT),
+            )
+            if default_agent is None:
+                return False
+            recognition_result = await default_agent.async_recognize_intent(recognition_input)
+        except Exception as err:
+            _LOGGER.debug(
+                "Unable to classify no_valid_targets recovery provenance: %s",
+                err,
+            )
+            return False
+
+        return bool(
+            recognition_result is not None
+            and getattr(recognition_result, "unmatched_entities", None)
+        )
 
     async def _delegate_text(
         self,
@@ -517,8 +627,19 @@ class AssistCanonicalizerConversationEntity(
     @staticmethod
     def _result_has_error(result: ConversationResult) -> bool:
         """Return whether a conversation result contains an intent error."""
+        return AssistCanonicalizerConversationEntity._result_error_code(result) is not None
+
+    @staticmethod
+    def _result_error_code(result: ConversationResult | None) -> str | None:
+        """Return a normalized Home Assistant intent error code."""
+        if result is None:
+            return None
         response = getattr(result, "response", None)
-        return getattr(response, "error_code", None) is not None
+        error_code = getattr(response, "error_code", None)
+        if error_code is None:
+            return None
+        normalized = getattr(error_code, "value", error_code)
+        return normalized if isinstance(normalized, str) else str(normalized)
 
     @staticmethod
     def _error_result(user_input: ConversationInput, message: str) -> ConversationResult:

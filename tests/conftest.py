@@ -1,7 +1,5 @@
 """Fixture configurations for Assist Canonicalizer tests."""
 
-import asyncio
-import contextlib
 import shutil
 from collections.abc import Callable, Generator, Mapping, Sequence
 from pathlib import Path
@@ -55,44 +53,6 @@ def fallback_agent_manager_factory() -> Callable[
         return MockConversationAgentManager(agent_infos, agents)
 
     return factory
-
-
-@pytest.fixture(autouse=True)
-def enable_event_loop_debug() -> None:
-    """Override pytest-homeassistant-custom-component autouse fixture.
-
-    Prevents RuntimeError when querying the event loop during sync tests under
-    HassEventLoopPolicy.
-    """
-    with contextlib.suppress(RuntimeError):
-        loop = asyncio.get_event_loop()
-        loop.set_debug(True)
-
-
-@pytest.fixture(autouse=True)
-def verify_cleanup(
-    expected_lingering_tasks: bool,
-    expected_lingering_timers: bool,
-) -> Generator[None]:
-    """Override pytest-homeassistant-custom-component autouse fixture.
-
-    Prevents RuntimeError when querying the event loop during sync tests under
-    HassEventLoopPolicy.
-    """
-    try:
-        event_loop = asyncio.get_event_loop()
-    except RuntimeError:
-        yield
-        return
-
-    yield
-    if event_loop.is_closed() or event_loop.is_running():
-        return
-    shutdown_executor = event_loop.shutdown_default_executor()
-    try:
-        event_loop.run_until_complete(shutdown_executor)
-    except RuntimeError:
-        shutdown_executor.close()
 
 
 @pytest.fixture(autouse=True)

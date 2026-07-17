@@ -659,6 +659,9 @@ def _validate_single_test_case(case: Any, lang: str, path: str, index: int) -> d
 
     expected_slots = _validate_expected_slots(case.get("expected_slots", {}), path, index)
     intent_context = _validate_context(case.get("context", {}), path, index)
+    expected_fallback = case.get("expected_fallback", False)
+    if not isinstance(expected_fallback, bool):
+        raise ValueError(f"{path}: test case #{index} expected_fallback must be a boolean")
 
     validated_case = {
         "query": query,
@@ -666,6 +669,7 @@ def _validate_single_test_case(case: Any, lang: str, path: str, index: int) -> d
         "expected_canonical": expected_canonical,
         "expected_slots": expected_slots,
         "category": case["category"],
+        "expected_fallback": expected_fallback,
     }
     if intent_context:
         validated_case["context"] = intent_context
@@ -1338,6 +1342,7 @@ def _record_case_result(
     hassil_intents: Any | None = None,
     hassil_slot_lists: dict[str, Any] | None = None,
     intent_context: Mapping[str, Any] | None = None,
+    expected_fallback: bool = False,
 ) -> tuple[bool, str, dict[str, Any], RankedCandidate | None]:
     """Record one evaluated case and return whether it matched completely."""
     _record_case_attempt(stats, latency_ms, is_drift)
@@ -1350,6 +1355,11 @@ def _record_case_result(
     )
     if is_drift:
         return False, "drift", actual_slots, selected
+    if expected_fallback:
+        if selected is None:
+            stats.fallback += 1
+            return True, "expected_fallback", actual_slots, selected
+        return False, "unsafe_selection", actual_slots, selected
     if selected is None:
         stats.fallback += 1
         return False, "fallback", actual_slots, selected
@@ -1402,9 +1412,13 @@ def _case_row(
         else None
     )
     actual_intent = selected.candidate.intent_name if selected is not None else None
+    expected_fallback = bool(case.get("expected_fallback", False))
     canonical_ok = actual_text == case["expected_canonical"]
-    intent_ok = actual_intent == case["expected_intent"]
+    intent_ok = _intents_match(actual_intent, case["expected_intent"])
     slots_ok = _slots_match_any(actual_slots, expected_slots, language=lang)
+    intent_slots_ok = intent_ok and slots_ok
+    fallback = selected is None
+    outcome_ok = fallback if expected_fallback else intent_slots_ok
     evaluation_path = (
         selected.candidate.metadata.get("evaluation_path") if selected is not None else None
     ) or ("hassil_baseline" if mode_name == "hassil" else "ranking")
@@ -1432,12 +1446,14 @@ def _case_row(
         "expected_intent": case["expected_intent"],
         "actual_intent": actual_intent,
         "expected_slots": expected_slots[0] if expected_slots else {},
+        "expected_fallback": expected_fallback,
         "actual_slots": dict(actual_slots),
         "canonical_ok": canonical_ok,
         "intent_ok": intent_ok,
         "slots_ok": slots_ok,
-        "intent_slots_ok": intent_ok and slots_ok,
-        "fallback": selected is None,
+        "intent_slots_ok": intent_slots_ok,
+        "outcome_ok": outcome_ok,
+        "fallback": fallback,
         "reason": reason,
         "final_score": final_score,
         "top_score": top_score,
@@ -1488,6 +1504,7 @@ def _failure_detail(
             "context": dict(case.get("context", {})),
             "reason": reason,
             "expected": case["expected_canonical"],
+            "expected_fallback": bool(case.get("expected_fallback", False)),
             "actual": None,
             "expected_intent": case["expected_intent"],
             "actual_intent": None,
@@ -1506,6 +1523,7 @@ def _failure_detail(
         "context": dict(case.get("context", {})),
         "reason": reason,
         "expected": case["expected_canonical"],
+        "expected_fallback": bool(case.get("expected_fallback", False)),
         "actual": rehydrate_wildcard_text(
             selected.candidate.text, case["query"], selected.candidate.language
         ),
@@ -1619,31 +1637,31 @@ def _print_summary_table(title: str, results: dict[str, dict[str, CategoryStats]
     for category in categories:
         hass_stats = results["hassil"].get(category, CategoryStats())
         lex_stats = results["lexical"].get(category, CategoryStats())
-        hass_slots_den = hass_stats.total - hass_stats.drift
-        lex_slots_den = lex_stats.total - lex_stats.drift
+        hass_den = hass_stats.total - hass_stats.drift
+        lex_den = lex_stats.total - lex_stats.drift
         print(
             f"{category:<24} | {lex_stats.total:<5} | "
-            f"{_metric_str(hass_stats.intent_slots_correct, hass_slots_den):<17} | "
-            f"{_metric_str(lex_stats.intent_slots_correct, lex_slots_den):<17} | "
-            f"{_metric_str(hass_stats.mismatch, hass_slots_den):<17} | "
-            f"{_metric_str(lex_stats.mismatch, lex_slots_den):<17} | "
-            f"{_metric_str(hass_stats.fallback, hass_slots_den):<17} | "
-            f"{_metric_str(lex_stats.fallback, lex_slots_den):<17} | "
+            f"{_metric_str(hass_stats.intent_slots_correct, hass_den):<17} | "
+            f"{_metric_str(lex_stats.intent_slots_correct, lex_den):<17} | "
+            f"{_metric_str(hass_stats.mismatch, hass_den):<17} | "
+            f"{_metric_str(lex_stats.mismatch, lex_den):<17} | "
+            f"{_metric_str(hass_stats.fallback, hass_den):<17} | "
+            f"{_metric_str(lex_stats.fallback, lex_den):<17} | "
             f"{lex_stats.average_latency_ms:<8.1f}"
         )
     hass_total = _aggregate_mode_stats(results, "hassil")
     lex_total = _aggregate_mode_stats(results, "lexical")
-    hass_overall_den = hass_total.total - hass_total.drift
-    lex_overall_den = lex_total.total - lex_total.drift
+    hass_den = hass_total.total - hass_total.drift
+    lex_den = lex_total.total - lex_total.drift
     print("-" * 166)
     print(
         f"{'Overall':<24} | {lex_total.total:<5} | "
-        f"{_metric_str(hass_total.intent_slots_correct, hass_overall_den):<17} | "
-        f"{_metric_str(lex_total.intent_slots_correct, lex_overall_den):<17} | "
-        f"{_metric_str(hass_total.mismatch, hass_overall_den):<17} | "
-        f"{_metric_str(lex_total.mismatch, lex_overall_den):<17} | "
-        f"{_metric_str(hass_total.fallback, hass_overall_den):<17} | "
-        f"{_metric_str(lex_total.fallback, lex_overall_den):<17} | "
+        f"{_metric_str(hass_total.intent_slots_correct, hass_den):<17} | "
+        f"{_metric_str(lex_total.intent_slots_correct, lex_den):<17} | "
+        f"{_metric_str(hass_total.mismatch, hass_den):<17} | "
+        f"{_metric_str(lex_total.mismatch, lex_den):<17} | "
+        f"{_metric_str(hass_total.fallback, hass_den):<17} | "
+        f"{_metric_str(lex_total.fallback, lex_den):<17} | "
         f"{lex_total.average_latency_ms:<8.1f}"
     )
     print("-" * 166)
@@ -1662,11 +1680,12 @@ def _print_ablation_table(title: str, ablations: dict[str, dict[str, CategorySta
         stats = _aggregate_mode_stats(ablations, component)
         if stats.total == 0:
             continue
+        den = stats.total - stats.drift
         print(
             f"{component:<16} | {stats.total:<5} | "
-            f"{_metric_str(stats.correct, stats.total):<16} | "
-            f"{_metric_str(stats.intent_slots_correct, stats.total):<19} | "
-            f"{_metric_str(stats.fallback, stats.total):<14}"
+            f"{_metric_str(stats.correct, den):<16} | "
+            f"{_metric_str(stats.intent_slots_correct, den):<19} | "
+            f"{_metric_str(stats.fallback, den):<14}"
         )
     print("-" * 96)
 
@@ -1719,6 +1738,7 @@ def _record_ablations(
             hassil_intents=hassil_intents,
             hassil_slot_lists=hassil_slot_lists,
             intent_context=intent_context,
+            expected_fallback=bool(case.get("expected_fallback", False)),
         )
 
 
@@ -1845,7 +1865,6 @@ def _markdown_report(report: Mapping[str, Any]) -> str:
         total = payload["overall"]["total"]
         if total:
             lines.append(f"- `{mode_name}`: {_markdown_metric(payload['overall'])}")
-
     last_lang: str | None = None
     for row in _all_rows:
         if row.lang != last_lang:
@@ -1987,31 +2006,35 @@ def _text_summary_table(title: str, payload: Mapping[str, Any]) -> list[str]:
         hass_cat = hassil_data.get("categories", {}).get(cat, {})
         lex_cat = lex_data.get("categories", {}).get(cat, {})
         lex_total = lex_cat.get("total", 0)
+        hass_den = hass_cat.get("total", 0) - hass_cat.get("drift", 0)
+        lex_den = lex_total - lex_cat.get("drift", 0)
         cat_rows.append(
             (
                 cat,
                 str(lex_total),
-                _metric_str(hass_cat.get("intent_slots_correct", 0), hass_cat.get("total", 0)),
-                _metric_str(lex_cat.get("intent_slots_correct", 0), lex_cat.get("total", 0)),
-                _metric_str(hass_cat.get("mismatch", 0), hass_cat.get("total", 0)),
-                _metric_str(lex_cat.get("mismatch", 0), lex_cat.get("total", 0)),
-                _metric_str(hass_cat.get("fallback", 0), hass_cat.get("total", 0)),
-                _metric_str(lex_cat.get("fallback", 0), lex_cat.get("total", 0)),
+                _metric_str(hass_cat.get("intent_slots_correct", 0), hass_den),
+                _metric_str(lex_cat.get("intent_slots_correct", 0), lex_den),
+                _metric_str(hass_cat.get("mismatch", 0), hass_den),
+                _metric_str(lex_cat.get("mismatch", 0), lex_den),
+                _metric_str(hass_cat.get("fallback", 0), hass_den),
+                _metric_str(lex_cat.get("fallback", 0), lex_den),
                 f"{lex_cat.get('average_latency_ms', 0):.1f}",
             )
         )
 
     hass_overall = hassil_data.get("overall", {})
     lex_overall = lex_data.get("overall", {})
+    hass_den = hass_overall.get("total", 0) - hass_overall.get("drift", 0)
+    lex_den = lex_overall.get("total", 0) - lex_overall.get("drift", 0)
     overall_row: tuple[str, ...] = (
         "Overall",
         str(lex_overall.get("total", 0)),
-        _metric_str(hass_overall.get("intent_slots_correct", 0), hass_overall.get("total", 0)),
-        _metric_str(lex_overall.get("intent_slots_correct", 0), lex_overall.get("total", 0)),
-        _metric_str(hass_overall.get("mismatch", 0), hass_overall.get("total", 0)),
-        _metric_str(lex_overall.get("mismatch", 0), lex_overall.get("total", 0)),
-        _metric_str(hass_overall.get("fallback", 0), hass_overall.get("total", 0)),
-        _metric_str(lex_overall.get("fallback", 0), lex_overall.get("total", 0)),
+        _metric_str(hass_overall.get("intent_slots_correct", 0), hass_den),
+        _metric_str(lex_overall.get("intent_slots_correct", 0), lex_den),
+        _metric_str(hass_overall.get("mismatch", 0), hass_den),
+        _metric_str(lex_overall.get("mismatch", 0), lex_den),
+        _metric_str(hass_overall.get("fallback", 0), hass_den),
+        _metric_str(lex_overall.get("fallback", 0), lex_den),
         f"{lex_overall.get('average_latency_ms', 0):.1f}",
     )
     cat_rows.append(overall_row)
@@ -2034,13 +2057,14 @@ def _text_ablation_table(title: str, payload: Mapping[str, Any]) -> list[str]:
         total = overall.get("total", 0)
         if total == 0:
             continue
+        den = total - overall.get("drift", 0)
         ab_rows.append(
             (
                 comp,
                 str(total),
-                _metric_str(overall.get("correct", 0), overall.get("total", 0)),
-                _metric_str(overall.get("intent_slots_correct", 0), overall.get("total", 0)),
-                _metric_str(overall.get("fallback", 0), overall.get("total", 0)),
+                _metric_str(overall.get("correct", 0), den),
+                _metric_str(overall.get("intent_slots_correct", 0), den),
+                _metric_str(overall.get("fallback", 0), den),
             )
         )
     hdr, sep, data = align_table(_headers, ab_rows, alignments="<")
@@ -2172,20 +2196,28 @@ def _threshold_failures(
     stats: CategoryStats,
     min_intent_slot_accuracy: float | None,
     max_fallback_rate: float | None,
+    max_mismatch_rate: float | None = None,
+    *,
+    scope: str | None = None,
 ) -> list[str]:
     """Return threshold failure messages for the selected aggregate stats."""
     failures = []
+    prefix = f"{scope}: " if scope else ""
     if (
         min_intent_slot_accuracy is not None
         and stats.intent_slot_accuracy < min_intent_slot_accuracy
     ):
         failures.append(
-            f"intent/slot accuracy {stats.intent_slot_accuracy:.1f}% "
+            f"{prefix}intent/slot accuracy {stats.intent_slot_accuracy:.1f}% "
             f"is below {min_intent_slot_accuracy:.1f}%"
         )
     if max_fallback_rate is not None and stats.fallback_rate > max_fallback_rate:
         failures.append(
-            f"fallback rate {stats.fallback_rate:.1f}% is above {max_fallback_rate:.1f}%"
+            f"{prefix}fallback rate {stats.fallback_rate:.1f}% is above {max_fallback_rate:.1f}%"
+        )
+    if max_mismatch_rate is not None and stats.mismatch_rate > max_mismatch_rate:
+        failures.append(
+            f"{prefix}mismatch rate {stats.mismatch_rate:.1f}% is above {max_mismatch_rate:.1f}%"
         )
     return failures
 
@@ -2338,6 +2370,7 @@ def _evaluate_case(
         hassil_intents=hassil_intents,
         hassil_slot_lists=hassil_slot_lists,
         intent_context=intent_context,
+        expected_fallback=bool(case.get("expected_fallback", False)),
     )
     row = _case_row(
         lang,
@@ -2556,7 +2589,7 @@ def _evaluate_dataset_language(
     global_ablations: dict[str, Any],
     all_case_rows: list[dict[str, Any]],
     failure_limit: int,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], CategoryStats]:
     """Evaluate cases for a single language dataset and return language report payload."""
     context = _build_language_evaluation_context(lang, slots)
     coverage = _language_coverage_payload(context, test_cases)
@@ -2588,13 +2621,16 @@ def _evaluate_dataset_language(
     _print_failure_details(failures, failure_limit)
     _merge_results(global_results, results)
     _merge_results(global_ablations, ablations)
-    return {
-        "coverage": coverage,
-        "summary": _summary_payload(results),
-        "ablations": _summary_payload(ablations),
-        "failures": failures,
-        "cases": language_rows,
-    }
+    return (
+        {
+            "coverage": coverage,
+            "summary": _summary_payload(results),
+            "ablations": _summary_payload(ablations),
+            "failures": failures,
+            "cases": language_rows,
+        },
+        _aggregate_mode_stats(results, "lexical"),
+    )
 
 
 async def run_evaluation(
@@ -2602,8 +2638,12 @@ async def run_evaluation(
     failure_limit: int,
     output_json: str | None,
     output_md: str | None,
-    min_intent_slot_accuracy: float | None,
-    max_fallback_rate: float | None,
+    min_intent_slot_accuracy: float | None = None,
+    max_fallback_rate: float | None = None,
+    max_mismatch_rate: float | None = None,
+    min_language_intent_slot_accuracy: float | None = None,
+    max_language_fallback_rate: float | None = None,
+    max_language_mismatch_rate: float | None = None,
     datasets_dir: str = "tests/real_world",
     skip_hassil: bool = False,
     skip_ablations: bool = False,
@@ -2633,6 +2673,7 @@ async def run_evaluation(
     global_results = _new_results()
     global_ablations = _new_ablation_results()
     all_case_rows: list[dict[str, Any]] = []
+    threshold_failures: list[str] = []
     benchmark_slot_prefs = _load_benchmark_slot_preferences(datasets)
     report: dict[str, Any] = {
         "report_schema": "assist_canonicalizer_accuracy",
@@ -2652,7 +2693,7 @@ async def run_evaluation(
         if not test_cases:
             continue
 
-        report["languages"][lang] = _evaluate_dataset_language(
+        language_payload, language_stats = _evaluate_dataset_language(
             lang,
             test_cases,
             slots,
@@ -2664,20 +2705,37 @@ async def run_evaluation(
             all_case_rows,
             failure_limit,
         )
+        language_threshold_failures = _threshold_failures(
+            language_stats,
+            min_language_intent_slot_accuracy,
+            max_language_fallback_rate,
+            max_language_mismatch_rate,
+            scope=lang.upper(),
+        )
+        language_payload["threshold_failures"] = language_threshold_failures
+        report["languages"][lang] = language_payload
+        if language_threshold_failures:
+            overall_success = False
+            threshold_failures.extend(language_threshold_failures)
+            print(f"\nThreshold failures: {lang.upper()}")
+            for failure in language_threshold_failures:
+                print(f"- {failure}")
 
     _print_summary_table("Summary: ALL LANGUAGES", global_results)
     if not skip_ablations:
         _print_ablation_table("Ablation Top-1: ALL LANGUAGES", global_ablations)
     lex_stats = _aggregate_mode_stats(global_results, "lexical")
-    threshold_failures = _threshold_failures(
+    if aggregate_threshold_failures := _threshold_failures(
         lex_stats,
         min_intent_slot_accuracy,
         max_fallback_rate,
-    )
-    if threshold_failures:
+        max_mismatch_rate,
+        scope="ALL",
+    ):
         overall_success = False
+        threshold_failures.extend(aggregate_threshold_failures)
         print("\nThreshold failures:")
-        for failure in threshold_failures:
+        for failure in aggregate_threshold_failures:
             print(f"- {failure}")
 
     report["overall"] = {
@@ -3100,6 +3158,16 @@ def _compare_regression_recursive(
             )
 
 
+def _profile_regressions(reports: Mapping[str, Mapping[str, Any]]) -> list[str]:
+    """Return labeled regressions from one or more profiling reports."""
+    regressions: list[str] = []
+    for target, report in reports.items():
+        regressions.extend(
+            f"{target}: {regression}" for regression in report.get("regressions", [])
+        )
+    return regressions
+
+
 def _serialize_profile_report_value(obj: object) -> object:
     """Serialize profile report values into JSON-compatible containers."""
     if isinstance(obj, StatsResult):
@@ -3185,8 +3253,6 @@ class ReportGenerator:
             print(f"\nStability: {stability}")
 
         print("\n" + "=" * 90)
-        print("PROFILE_OK")
-        print("=" * 90)
 
     @staticmethod
     def json_report(report: dict[str, Any], path: str) -> None:
@@ -3477,7 +3543,7 @@ class ReportGenerator:
         if regressions := report.get("regressions", []):
             lines.append("\nREGRESSION DETECTIONS:")
             lines.extend(f"  {r}" for r in regressions)
-        lines.extend(("", "=" * 80, "PROFILE_OK", "=" * 80))
+        lines.extend(("", "=" * 80))
         while lines and lines[-1] == "":
             lines.pop()
         atomic_write(path, "\n".join(lines) + "\n")
@@ -5453,7 +5519,30 @@ def main() -> None:
         default=None,
         help="Fail when production-flow fallback rate exceeds this percentage",
     )
-
+    parser.add_argument(
+        "--max-mismatch-rate",
+        type=float,
+        default=None,
+        help="Fail when production-flow mismatch rate exceeds this percentage",
+    )
+    parser.add_argument(
+        "--min-language-intent-slot-accuracy",
+        type=float,
+        default=None,
+        help="Fail when any language's intent/slot accuracy falls below this percentage",
+    )
+    parser.add_argument(
+        "--max-language-fallback-rate",
+        type=float,
+        default=None,
+        help="Fail when any language's fallback rate exceeds this percentage",
+    )
+    parser.add_argument(
+        "--max-language-mismatch-rate",
+        type=float,
+        default=None,
+        help="Fail when any language's mismatch rate exceeds this percentage",
+    )
     # Performance mode stats
     parser.add_argument(
         "--iterations",
@@ -5494,6 +5583,12 @@ def main() -> None:
             "Maximum regression percentage allowed before flagging "
             f"(default: {DEFAULT_MAX_REGRESSION_PCT})"
         ),
+    )
+    parser.add_argument(
+        "--fail-on-regression",
+        action="store_true",
+        default=False,
+        help="Exit nonzero when performance baseline comparison reports regressions",
     )
     parser.add_argument(
         "--cprofile",
@@ -5556,6 +5651,19 @@ def main() -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+    percentage_thresholds = (
+        ("--max-mismatch-rate", args.max_mismatch_rate),
+        ("--min-language-intent-slot-accuracy", args.min_language_intent_slot_accuracy),
+        ("--max-language-fallback-rate", args.max_language_fallback_rate),
+        ("--max-language-mismatch-rate", args.max_language_mismatch_rate),
+    )
+    for option_name, option_value in percentage_thresholds:
+        if option_value is not None and not (0.0 <= option_value <= 100.0):
+            print(
+                f"Error: {option_name} must be between 0.0 and 100.0",
+                file=sys.stderr,
+            )
+            sys.exit(1)
     if args.iterations < 1:
         print("Error: --iterations must be positive", file=sys.stderr)
         sys.exit(1)
@@ -5622,6 +5730,10 @@ def main() -> None:
                 output_txt=safe_output_txt,
                 min_intent_slot_accuracy=args.min_intent_slot_accuracy,
                 max_fallback_rate=args.max_fallback_rate,
+                max_mismatch_rate=args.max_mismatch_rate,
+                min_language_intent_slot_accuracy=args.min_language_intent_slot_accuracy,
+                max_language_fallback_rate=args.max_language_fallback_rate,
+                max_language_mismatch_rate=args.max_language_mismatch_rate,
                 datasets_dir=str(Path(safe_datasets_dir).relative_to(_REPO_ROOT)),
                 skip_hassil=args.skip_hassil,
                 skip_ablations=args.skip_ablations,
@@ -5648,6 +5760,7 @@ def main() -> None:
             )
 
         print("PROFILE_START", flush=True)
+        profile_reports: dict[str, dict[str, Any]] = {}
         try:
             if safe_target == "all":
                 all_reports = {}
@@ -5679,11 +5792,12 @@ def main() -> None:
                         out_json,
                         out_md,
                         out_txt,
-                        args.save_baseline,
+                        False,
                         language_filter,
                         warn_on_missing=_explicit_baseline,
                     )
                     all_reports[tgt] = report
+                profile_reports = all_reports
 
                 output_dir = Path(_REPO_ROOT) / BENCHMARK_DIR
                 output_dir.mkdir(parents=True, exist_ok=True)
@@ -5716,7 +5830,7 @@ def main() -> None:
                 _write_profile_all_text(all_reports, str(agg_txt_path))
                 print(f"Aggregate all-targets Text report saved to {agg_txt_path}")
             else:
-                _run_profiling(
+                report = _run_profiling(
                     safe_target,
                     datasets,
                     args.iterations,
@@ -5727,10 +5841,11 @@ def main() -> None:
                     safe_output_json,
                     safe_output_md,
                     safe_output_txt,
-                    args.save_baseline,
+                    False,
                     language_filter,
                     warn_on_missing=_explicit_baseline,
                 )
+                profile_reports[safe_target] = report
 
             # Optional cProfile dump during rankings profiling
             if args.cprofile:
@@ -5820,6 +5935,15 @@ def main() -> None:
             print(f"\nPROFILE_FAILED: {exc}", flush=True)
             raise
 
+        regressions = _profile_regressions(profile_reports)
+        if args.fail_on_regression and regressions:
+            print("\nPROFILE_FAILED: performance regressions detected", flush=True)
+            for regression in regressions:
+                print(f"- {regression}", flush=True)
+            sys.exit(1)
+        if args.save_baseline:
+            for profile_target, report in profile_reports.items():
+                baseline_mgr.save(profile_target, dict(report))
         print("PROFILE_OK", flush=True)
         sys.exit(0)
 

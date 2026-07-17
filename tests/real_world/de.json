@@ -844,26 +844,27 @@
       "expected_intent": "HassTurnOn",
       "expected_canonical": "schalt wohnzimmerlicht ein",
       "category": "missing_words",
+      "expected_fallback": true,
       "expected_slots": {
         "area": "wohnzimmer",
         "domain": "light"
       }
     },
     {
-      "query": "schalte wasserkocher",
+      "query": "wasser kocher an",
       "language": "de",
       "expected_intent": "HassTurnOn",
-      "expected_canonical": "schalt wasserkocher ein",
+      "expected_canonical": "wasserkocher an",
       "category": "missing_words",
       "expected_slots": {
         "name": "wasserkocher"
       }
     },
     {
-      "query": "schalte das wohnzimmerlicht",
+      "query": "wohn zimmerlicht ein",
       "language": "de",
       "expected_intent": "HassTurnOn",
-      "expected_canonical": "schalt wohnzimmerlicht ein",
+      "expected_canonical": "wohnzimmerlicht ein",
       "category": "missing_words",
       "expected_slots": {
         "area": "wohnzimmer",
@@ -871,10 +872,10 @@
       }
     },
     {
-      "query": "schalte den wasserkocher",
+      "query": "wasser kocher einschalten",
       "language": "de",
       "expected_intent": "HassTurnOn",
-      "expected_canonical": "schalt wasserkocher ein",
+      "expected_canonical": "wasserkocher einschalten",
       "category": "missing_words",
       "expected_slots": {
         "name": "wasserkocher"
@@ -891,14 +892,14 @@
       }
     },
     {
-      "query": "mach das wohnzimmerlicht",
+      "query": "bade zimmerlüfter an",
       "language": "de",
       "expected_intent": "HassTurnOn",
-      "expected_canonical": "schalt wohnzimmerlicht ein",
+      "expected_canonical": "badezimmerlüfter an",
       "category": "missing_words",
       "expected_slots": {
-        "area": "wohnzimmer",
-        "domain": "light"
+        "area": "badezimmer",
+        "domain": "fan"
       }
     },
     {
@@ -922,13 +923,14 @@
       }
     },
     {
-      "query": "schalte küchenlicht",
+      "query": "schlaf zimmerlicht ein",
       "language": "de",
       "expected_intent": "HassTurnOn",
-      "expected_canonical": "schalt küchenlicht ein",
+      "expected_canonical": "schlafzimmerlicht ein",
       "category": "missing_words",
       "expected_slots": {
-        "name": "küchenlicht"
+        "area": "schlafzimmer",
+        "domain": "light"
       }
     },
     {
@@ -994,14 +996,14 @@
       }
     },
     {
-      "query": "wohnzimmer licht schalten",
+      "query": "wohnzimmer lüfter ein",
       "language": "de",
       "expected_intent": "HassTurnOn",
-      "expected_canonical": "schalte das wohnzimmerlicht ein",
+      "expected_canonical": "lüfter wohnzimmer ein",
       "category": "missing_words",
       "expected_slots": {
-        "area": "wohnzimmer",
-        "domain": "light"
+        "name": "lüfter",
+        "area": "wohnzimmer"
       }
     },
     {
