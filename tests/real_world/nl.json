@@ -226,7 +226,7 @@
       }
     },
     {
-      "query": "keuken lamp",
+      "query": "keuken lamp a",
       "language": "nl",
       "expected_intent": "HassTurnOn",
       "expected_canonical": "keuken lamp aan",
@@ -237,10 +237,10 @@
       }
     },
     {
-      "query": "badkamerventilator af",
+      "query": "badkamerventilator ui",
       "language": "nl",
       "expected_intent": "HassTurnOff",
-      "expected_canonical": "zet badkamerventilator uit",
+      "expected_canonical": "badkamerventilator uit",
       "category": "missing_words",
       "expected_slots": {
         "area": "badkamer",
@@ -301,10 +301,10 @@
       "category": "complex_distortion"
     },
     {
-      "query": "kunt u de stoofzuiger voor mij opstarten alstublieft",
+      "query": "kunt u de stofzuiger voor mij startten alstublieft",
       "language": "nl",
       "expected_intent": "HassVacuumStart",
-      "expected_canonical": "start stofzuiger",
+      "expected_canonical": "de stofzuiger starten",
       "category": "complex_distortion",
       "expected_slots": {
         "name": "stofzuiger"

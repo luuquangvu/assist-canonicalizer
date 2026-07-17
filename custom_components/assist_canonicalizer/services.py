@@ -14,8 +14,8 @@ import voluptuous as vol
 from homeassistant.core import ServiceCall, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
-from homeassistant.util import language as language_module
 
+from .builtin_intents import language_variant_for
 from .const import (
     ATTR_ACCEPTED,
     ATTR_CANDIDATE_COUNT,
@@ -51,20 +51,15 @@ ATTR_REBUILD = "rebuild"
 def validate_supported_language(value: Any) -> str:
     """Validate that the language is supported by Home Assistant.
 
-    Retrieves the list of supported languages dynamically from home_assistant_intents.
+    Resolve the language through the shared Home Assistant language-pack matcher.
     """
     lang = cv.string(value)
     if not lang.strip():
         raise vol.Invalid("Language cannot be empty")
 
-    try:
-        import home_assistant_intents
-    except ImportError as err:
-        raise vol.Invalid("Home Assistant intents package is not installed") from err
-
-    get_languages = home_assistant_intents.get_languages
-    if matches := language_module.matches(lang, set(get_languages())):
-        return matches[0]
+    language_variant = language_variant_for(lang)
+    if language_variant is not None:
+        return language_variant
     raise vol.Invalid(f"Language '{lang}' is not supported by Home Assistant")
 
 

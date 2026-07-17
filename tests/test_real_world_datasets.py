@@ -266,6 +266,20 @@ def test_real_world_category_contracts_cover_every_category() -> None:
     assert HARD_CATEGORIES | HASSIL_ALIGN_CATEGORIES == KNOWN_CATEGORIES
 
 
+def test_real_world_datasets_retain_one_expected_fallback_ambiguity() -> None:
+    """Keep exactly one deliberate action-omission case as an ordinary fallback."""
+    fallback_cases: list[tuple[str, str]] = []
+    for language in _discover_languages():
+        path = DATASET_DIR / f"{language}.json"
+        data = orjson.loads(path.read_bytes())
+        cases = benchmark._validate_test_cases(data["test_cases"], language, str(path))
+        fallback_cases.extend(
+            (language, case["query"]) for case in cases if case["expected_fallback"]
+        )
+
+    assert fallback_cases == [("de", "schalte wohnzimmerlicht")]
+
+
 @pytest.mark.current_intents
 def test_real_world_expected_intents_are_hassil_candidates(
     dataset_context: DatasetContext,
@@ -821,6 +835,39 @@ def test_benchmark_validate_test_cases_accepts_context() -> None:
     assert validated[0]["context"] == {"area": "kitchen", "floor": 1, "enabled": True}
 
 
+def test_benchmark_validate_test_cases_accepts_expected_fallback() -> None:
+    """Dataset validation should preserve an explicit fallback expectation."""
+    cases = [
+        {
+            "query": "turn kitchen light",
+            "expected_intent": "HassTurnOn",
+            "expected_canonical": "turn on kitchen light",
+            "category": "missing_words",
+            "expected_fallback": True,
+        }
+    ]
+
+    validated = benchmark._validate_test_cases(cases, "en", "test.json")
+
+    assert validated[0]["expected_fallback"] is True
+
+
+def test_benchmark_validate_test_cases_rejects_invalid_expected_fallback() -> None:
+    """Fallback expectations must be explicit booleans."""
+    cases = [
+        {
+            "query": "turn kitchen light",
+            "expected_intent": "HassTurnOn",
+            "expected_canonical": "turn on kitchen light",
+            "category": "missing_words",
+            "expected_fallback": "yes",
+        }
+    ]
+
+    with pytest.raises(ValueError, match="expected_fallback must be a boolean"):
+        benchmark._validate_test_cases(cases, "en", "test.json")
+
+
 def test_benchmark_validate_test_cases_rejects_invalid_context() -> None:
     """Dataset context must be a flat object with scalar values."""
     cases = [
@@ -971,6 +1018,118 @@ def test_benchmark_lexical_mode_ranks_after_production_hassil_fallback(
     )
 
     assert ranked is expected_ranked
+
+
+def test_benchmark_expected_fallback_uses_ordinary_fallback_accounting() -> None:
+    """Count deliberate fallback in the common denominator and fallback bucket."""
+    safe_stats = benchmark.CategoryStats()
+
+    is_ok, reason, _slots, selected = benchmark._record_case_result(
+        safe_stats,
+        None,
+        "turn on kitchen light",
+        "HassTurnOn",
+        [{}],
+        expected_fallback=True,
+    )
+
+    assert is_ok
+    assert reason == "expected_fallback"
+    assert selected is None
+    assert safe_stats.total == 1
+    assert safe_stats.fallback == 1
+    assert safe_stats.intent_slots_correct == 0
+    assert safe_stats.mismatch == 0
+
+    unsafe_stats = benchmark.CategoryStats()
+    unsafe_candidate = RankedCandidate(
+        candidate=Candidate(text="turn on kitchen light", intent_name="HassTurnOn"),
+        scores=ScoreBreakdown(1.0, 1.0, 1.0, 1.0, 1.0),
+    )
+
+    is_ok, reason, _slots, selected = benchmark._record_case_result(
+        unsafe_stats,
+        unsafe_candidate,
+        "turn on kitchen light",
+        "HassTurnOn",
+        [{}],
+        expected_fallback=True,
+    )
+
+    assert not is_ok
+    assert reason == "unsafe_selection"
+    assert selected is unsafe_candidate
+    assert unsafe_stats.total == 1
+    assert unsafe_stats.mismatch == 1
+
+
+def test_benchmark_case_row_uses_equivalent_list_intents() -> None:
+    """Report list-intent aliases with the same equivalence used by accounting."""
+    selected = RankedCandidate(
+        candidate=Candidate(
+            text="add milk to the list",
+            intent_name="HassListAddItem",
+            language="en",
+        ),
+        scores=ScoreBreakdown(1.0, 1.0, 1.0, 1.0, 1.0),
+    )
+
+    row = benchmark._case_row(
+        "en",
+        "lexical",
+        {
+            "query": "add milk to the list",
+            "expected_canonical": "add milk to the list",
+            "expected_intent": "HassShoppingListAddItem",
+            "category": "intent_coverage",
+        },
+        selected,
+        "",
+        {"item": "milk"},
+        0.0,
+        {},
+        [{"item": "milk"}],
+    )
+
+    assert row["intent_ok"] is True
+    assert row["intent_slots_ok"] is True
+    assert row["outcome_ok"] is True
+
+
+def test_benchmark_thresholds_cover_language_accuracy_fallback_and_mismatch() -> None:
+    """Apply every retained quality dimension to a labeled threshold scope."""
+    stats = benchmark.CategoryStats(
+        total=10,
+        intent_slots_correct=7,
+        fallback=1,
+    )
+
+    failures = benchmark._threshold_failures(
+        stats,
+        min_intent_slot_accuracy=80.0,
+        max_fallback_rate=9.0,
+        max_mismatch_rate=15.0,
+        scope="NL",
+    )
+
+    assert failures == [
+        "NL: intent/slot accuracy 70.0% is below 80.0%",
+        "NL: fallback rate 10.0% is above 9.0%",
+        "NL: mismatch rate 20.0% is above 15.0%",
+    ]
+
+
+def test_benchmark_profile_regressions_are_labeled_by_target() -> None:
+    """Collect regression messages across independently profiled targets."""
+    assert benchmark._profile_regressions(
+        {
+            "rank": {"regressions": ["REGRESSION [aggregate.p95]"]},
+            "runtime": {"regressions": ["REGRESSION [scenario_stats.rejected.p99]"]},
+        }
+    ) == [
+        "rank: REGRESSION [aggregate.p95]",
+        "runtime: REGRESSION [scenario_stats.rejected.p99]",
+    ]
 
 
 def test_dataset_hassil_cache_includes_context(monkeypatch: pytest.MonkeyPatch) -> None:

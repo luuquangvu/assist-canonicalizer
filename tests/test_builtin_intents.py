@@ -62,6 +62,23 @@ def test_language_variant_for_invalid() -> None:
     assert language_variant_for(" ") is None
 
 
+def test_language_variant_for_resolves_equal_scores_deterministically() -> None:
+    """Use lexical language-pack order when Home Assistant match scores tie."""
+    mock_module = MagicMock()
+    mock_module.get_languages.side_effect = [
+        ("pt-BR", "pt"),
+        ("pt", "pt-BR"),
+        ("zh-TW", "zh-HK", "zh-CN"),
+        ("zh-CN", "zh-HK", "zh-TW"),
+    ]
+
+    with patch.dict(sys.modules, {"home_assistant_intents": mock_module}):
+        assert language_variant_for("pt-AO") == "pt"
+        assert language_variant_for("pt-AO") == "pt"
+        assert language_variant_for("zh-SG") == "zh-CN"
+        assert language_variant_for("zh-SG") == "zh-CN"
+
+
 def test_json_load_invalid() -> None:
     """Test json load failure raises orjson.JSONDecodeError."""
 

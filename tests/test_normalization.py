@@ -110,6 +110,11 @@ def test_normalize_text_preserves_target_punctuation() -> None:
     assert normalize_text("humidity between 50%-60%") == "humidity between 50%-60%"
     assert normalize_text("set temperature to -5") == "set temperature to -5"
     assert normalize_text("-27.5 degrees") == "-27.5 degrees"
+    assert normalize_text("-.5 degrees") == "-.5 degrees"
+    assert normalize_text("-,5 degrees") == "-,5 degrees"
+    assert normalize_text("\N{MINUS SIGN}5 degrees") == "-5 degrees"
+    assert normalize_text("\N{MINUS SIGN}.5 degrees") == "-.5 degrees"
+    assert normalize_text("temperature (\N{MINUS SIGN}.5)") == "temperature -.5"
     assert normalize_text("minus - 5 spaced") == "minus 5 spaced"
 
     # Stripped contexts (non-digits or incorrect boundary)

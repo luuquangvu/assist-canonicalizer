@@ -52,7 +52,8 @@ def language_variant_for(language: str) -> str | None:
         return language
 
     get_languages = home_assistant_intents.get_languages
-    matches = language_module.matches(language, set(get_languages()))
+    supported_languages = sorted(get_languages())
+    matches = language_module.matches(language, supported_languages)
     return matches[0] if matches else None
 
 

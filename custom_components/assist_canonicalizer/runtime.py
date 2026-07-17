@@ -8,6 +8,7 @@ import hashlib
 import inspect
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence, Set
+from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -66,6 +67,8 @@ _INDEX_MANIFEST_KEY = f"{DOMAIN}.index_manifest"
 _INDEX_MANIFEST_VERSION = 1
 _MAX_REBUILD_ATTEMPTS = 5
 
+IndexGeneration = tuple[int, int]
+
 
 def _new_set_event() -> asyncio.Event:
     """Return an asyncio event initialized in the set state."""
@@ -106,12 +109,13 @@ class CanonicalizerRuntime:
         default_factory=dict
     )
     cleanup_callbacks: list[Callable[[], None]] = field(default_factory=list)
-    rebuild_tasks: dict[str, tuple[int, asyncio.Task[CanonicalIndex | None]]] = field(
+    rebuild_tasks: dict[str, tuple[IndexGeneration, asyncio.Task[CanonicalIndex | None]]] = field(
         default_factory=dict
     )
     warmup_tasks: set[asyncio.Task[Any]] = field(default_factory=set, repr=False)
-    _logged_rebuilds: set[tuple[str, int]] = field(default_factory=set, repr=False)
+    _logged_rebuilds: set[tuple[str, IndexGeneration]] = field(default_factory=set, repr=False)
     index_generation: int = 0
+    _language_index_generations: dict[str, int] = field(default_factory=dict, repr=False)
     source_generation: int = 0
     rebuild_timer_cancel: Callable[[], None] | None = None
     _storage_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
@@ -154,11 +158,11 @@ class CanonicalizerRuntime:
         if self._closed:
             return None
         language = normalize_language(language)
-        generation = self.index_generation
+        generation = self._index_generation_for(language)
         task_state = self.rebuild_tasks.get(language)
         if task_state is not None:
-            generation, task = task_state
-            if generation != self.index_generation or task.done():
+            task_generation, task = task_state
+            if task_generation != generation or task.done():
                 self.rebuild_tasks.pop(language, None)
                 task = None
         else:
@@ -217,7 +221,7 @@ class CanonicalizerRuntime:
     ) -> CanonicalIndex | None:
         """Load one persisted index while the public operation tracks its lifetime."""
         language = normalize_language(language)
-        generation = self.index_generation
+        generation = self._index_generation_for(language)
         source_generation = self.source_generation
         build_inputs = self._capture_build_inputs()
         snapshot = await _async_add_executor_job_drained(
@@ -228,7 +232,7 @@ class CanonicalizerRuntime:
         )
         if (
             self._closed
-            or self.index_generation != generation
+            or self._index_generation_for(language) != generation
             or self.source_generation != source_generation
         ):
             return None
@@ -236,7 +240,7 @@ class CanonicalizerRuntime:
         async with self._storage_lock:
             if (
                 self._closed
-                or self.index_generation != generation
+                or self._index_generation_for(language) != generation
                 or self.source_generation != source_generation
             ):
                 return None
@@ -280,7 +284,7 @@ class CanonicalizerRuntime:
         index = await _async_add_executor_job_drained(hass, build_index, language, candidates)
         if (
             self._closed
-            or self.index_generation != generation
+            or self._index_generation_for(language) != generation
             or self.source_generation != source_generation
         ):
             return None
@@ -295,7 +299,7 @@ class CanonicalizerRuntime:
         index: CanonicalIndex,
         fingerprint: str,
         *,
-        expected_index_generation: int | None = None,
+        expected_index_generation: IndexGeneration | None = None,
         expected_source_generation: int | None = None,
     ) -> bool:
         """Save an index with the source fingerprint that produced it."""
@@ -313,6 +317,7 @@ class CanonicalizerRuntime:
 
         async with self._storage_lock:
             if not self._storage_generation_matches(
+                language,
                 expected_index_generation,
                 expected_source_generation,
             ):
@@ -324,6 +329,7 @@ class CanonicalizerRuntime:
             else:
                 cache_epoch, persisted_languages = manifest
             if not self._storage_generation_matches(
+                language,
                 expected_index_generation,
                 expected_source_generation,
             ):
@@ -332,6 +338,7 @@ class CanonicalizerRuntime:
             data["cache_epoch"] = cache_epoch
             await _async_await_drained(_index_store(hass, language).async_save(data))
             if not self._storage_generation_matches(
+                language,
                 expected_index_generation,
                 expected_source_generation,
             ):
@@ -467,13 +474,17 @@ class CanonicalizerRuntime:
 
     def clear_index(self, language: str | None = None) -> None:
         """Clear one language index or all indexes and invalidate active rebuilds."""
-        self.index_generation += 1
         if language is not None:
             language = normalize_language(language)
         if language is None:
+            self.index_generation += 1
+            self._language_index_generations.clear()
             self.indexes.clear()
             self.rebuild_tasks.clear()
         else:
+            self._language_index_generations[language] = (
+                self._language_index_generations.get(language, 0) + 1
+            )
             self.rebuild_tasks.pop(language, None)
             self.indexes.pop(language, None)
         self.update_diagnostics(candidate_count=self.total_candidate_count())
@@ -502,13 +513,17 @@ class CanonicalizerRuntime:
         self._invalidate_source_dependent_indexes(clear_sources=False)
 
     def update_intent_sources(self, intents_update: Mapping[Any, Mapping[str, Any]]) -> None:
-        """Update cached Home Assistant conversation intent sources."""
+        """Merge changed Home Assistant conversation intent sources."""
         if self._closed:
             return
         updated_sources = {
-            _source_key(source): source_config for source, source_config in intents_update.items()
+            _source_key(source): deepcopy(dict(source_config))
+            for source, source_config in intents_update.items()
         }
-        self.intent_sources = updated_sources
+        merged_sources = dict(self.intent_sources) | updated_sources
+        if merged_sources == self.intent_sources:
+            return
+        self.intent_sources = merged_sources
         self._invalidate_source_dependent_indexes(clear_sources=True)
 
     def subscribed_source_counts(self) -> dict[str, int]:
@@ -596,7 +611,7 @@ class CanonicalizerRuntime:
         """Copy mutable runtime inputs before executor work begins."""
         return (
             self.config_path,
-            dict(self.intent_sources),
+            deepcopy(self.intent_sources),
             {key: tuple(values) for key, values in self.registry_slot_values.items()},
         )
 
@@ -611,7 +626,8 @@ class CanonicalizerRuntime:
 
     def _storage_generation_matches(
         self,
-        expected_index_generation: int | None,
+        language: str,
+        expected_index_generation: IndexGeneration | None,
         expected_source_generation: int | None,
     ) -> bool:
         """Return whether a pending store write still belongs to current inputs."""
@@ -619,12 +635,20 @@ class CanonicalizerRuntime:
             not self._closed
             and (
                 expected_index_generation is None
-                or self.index_generation == expected_index_generation
+                or self._index_generation_for(language) == expected_index_generation
             )
             and (
                 expected_source_generation is None
                 or self.source_generation == expected_source_generation
             )
+        )
+
+    def _index_generation_for(self, language: str) -> IndexGeneration:
+        """Return the global and language-scoped invalidation generation."""
+        language = normalize_language(language)
+        return (
+            self.index_generation,
+            self._language_index_generations.get(language, 0),
         )
 
     def _start_index_load(self) -> bool:
@@ -752,6 +776,7 @@ class CanonicalizerRuntime:
         self.registry_slot_index = RegistrySlotIndex({})
         self.registry_slot_indexes.clear()
         self.dynamic_registry_intents.clear()
+        self._language_index_generations.clear()
         self.rebuild_tasks.clear()
         self.warmup_tasks.clear()
         self.update_diagnostics(candidate_count=0, dynamic_candidate_count=0)
@@ -809,7 +834,7 @@ async def _run_rebuild(
     runtime: CanonicalizerRuntime,
     hass: Any,
     language: str,
-    generation: int,
+    generation: IndexGeneration,
 ) -> CanonicalIndex | None:
     """Build from a stable source generation and persist the matching fingerprint."""
     try:
@@ -831,7 +856,7 @@ async def _run_rebuild(
                 _build_index_from_snapshot,
                 snapshot,
             )
-            if runtime.closed or runtime.index_generation != generation:
+            if runtime.closed or runtime._index_generation_for(language) != generation:
                 return None
             if runtime.source_generation != source_generation:
                 continue
@@ -843,7 +868,7 @@ async def _run_rebuild(
                 expected_index_generation=generation,
                 expected_source_generation=source_generation,
             )
-            if runtime.closed or runtime.index_generation != generation:
+            if runtime.closed or runtime._index_generation_for(language) != generation:
                 return None
             if runtime.source_generation != source_generation or not saved:
                 continue

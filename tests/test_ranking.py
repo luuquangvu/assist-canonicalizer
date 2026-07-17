@@ -327,7 +327,7 @@ def test_rank_candidates_prefers_known_opposing_intent_tie(
     preferred_intent: str,
     other_intent: str,
 ) -> None:
-    """Apply HassIL known-pair preferences only for exact structural ties."""
+    """Keep opposing structural ties ordered deterministically but fail closed."""
     slots = orjson.dumps({"name": "wohnzimmerlicht"}).decode("utf-8")
     ranked = rank_candidates(
         "schalte wohnzimmerlicht",
@@ -349,8 +349,7 @@ def test_rank_candidates_prefers_known_opposing_intent_tie(
     )
 
     assert ranked[0].candidate.intent_name == preferred_intent
-    if preferred_intent == "HassTurnOn":
-        assert accepted_candidate(ranked) is ranked[0]
+    assert accepted_candidate(ranked) is None
 
 
 def test_known_opposing_intent_preference_ignores_score_near_ties() -> None:

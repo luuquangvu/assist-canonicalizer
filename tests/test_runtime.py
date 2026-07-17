@@ -299,6 +299,36 @@ async def test_async_rebuild_index_coalesces_concurrent_language_jobs(monkeypatc
     assert runtime.rebuild_tasks == {}
 
 
+async def test_async_rebuild_index_replaces_stale_task_with_current_generation(
+    monkeypatch: Any,
+) -> None:
+    """Use the current generation when replacing a stale rebuild task."""
+    monkeypatch.setattr(homeassistant.helpers.storage, "Store", MockStore)
+    MockStore.reset()
+    runtime = CanonicalizerRuntime()
+    build_counter = _SnapshotBuildCounter()
+    hass = HashableFakeHass(async_create_task=lambda coro: asyncio.create_task(coro))
+
+    monkeypatch.setattr(runtime_module, "_build_index_from_snapshot", build_counter)
+    stale_generation = runtime._index_generation_for("en")
+    runtime.clear_index("en")
+
+    async def completed_rebuild() -> CanonicalIndex | None:
+        """Return a completed task carrying the stale generation."""
+        return None
+
+    stale_task = asyncio.create_task(completed_rebuild())
+    await stale_task
+    runtime.rebuild_tasks["en"] = (stale_generation, stale_task)
+
+    index = await runtime.async_rebuild_index(hass, "en")
+
+    assert index is not None
+    assert build_counter.calls == 1
+    assert runtime.get_index("en") is index
+    assert runtime.rebuild_tasks == {}
+
+
 async def test_rank_with_dynamic_candidates_includes_tail_registry_alias() -> None:
     """Rank a query-time registry alias even when build-time expansion capped it."""
     intent_sources: dict[str, Mapping[str, Any]] = {
@@ -887,11 +917,45 @@ def test_rank_with_dynamic_candidates_preserves_comma_decimal_range_selection() 
 def test_runtime_intent_update_invalidates_compiled_dynamic_templates() -> None:
     """Discard compiled templates when subscribed intent sources change."""
     runtime = CanonicalizerRuntime()
+    runtime.update_intent_sources({"config": {"intents": {"OldIntent": {}}}})
     runtime.dynamic_registry_intents["en"] = ()
 
-    runtime.update_intent_sources({})
+    runtime.update_intent_sources({"config": {"intents": {"NewIntent": {}}}})
 
     assert runtime.dynamic_registry_intents == {}
+
+
+def test_runtime_intent_updates_merge_partial_sources_and_isolate_snapshots() -> None:
+    """Retain unchanged sources across deltas and copy mutable callback payloads."""
+    runtime = CanonicalizerRuntime()
+    config_source: dict[str, Any] = {
+        "intents": {"ConfigIntent": {"data": [{"sentences": ["config"]}]}}
+    }
+    trigger_source: dict[str, Any] = {
+        "intents": {"TriggerIntent": {"data": [{"sentences": ["trigger"]}]}}
+    }
+
+    runtime.update_intent_sources(
+        {
+            "config": config_source,
+            "trigger": trigger_source,
+        }
+    )
+    config_source["intents"]["ConfigIntent"]["data"][0]["sentences"][0] = "mutated"
+    runtime.update_intent_sources(
+        {"trigger": {"intents": {"UpdatedTrigger": {"data": [{"sentences": ["updated trigger"]}]}}}}
+    )
+
+    assert set(runtime.intent_sources) == {"config", "trigger"}
+    assert runtime.intent_sources["config"]["intents"]["ConfigIntent"]["data"][0]["sentences"] == [
+        "config"
+    ]
+    assert "UpdatedTrigger" in runtime.intent_sources["trigger"]["intents"]
+
+    runtime.update_intent_sources({"trigger": {}})
+
+    assert "config" in runtime.intent_sources
+    assert runtime.intent_sources["trigger"] == {}
 
 
 def test_runtime_normalizes_language_cache_keys() -> None:
@@ -1195,6 +1259,30 @@ async def test_async_rebuild_does_not_publish_after_index_clear(monkeypatch: Any
     assert runtime.rebuild_tasks == {}
 
 
+async def test_language_clear_does_not_invalidate_other_language_rebuild(
+    monkeypatch: Any,
+) -> None:
+    """Publish a VI rebuild that overlaps an unrelated EN clear."""
+    monkeypatch.setattr(homeassistant.helpers.storage, "Store", MockStore)
+    MockStore.reset()
+    runtime = CanonicalizerRuntime()
+    hass = FakeHass()
+    build_counter = _SnapshotBuildCounter()
+    monkeypatch.setattr(runtime_module, "_build_index_from_snapshot", build_counter)
+
+    rebuild_task = asyncio.create_task(runtime.async_rebuild_index(hass, "vi"))
+    await hass.job_started.wait()
+    runtime.clear_index("en")
+    hass.release_job.set()
+
+    index = await rebuild_task
+
+    assert index is not None
+    assert index.language == "vi"
+    assert runtime.get_index("vi") is index
+    assert build_counter.calls == 1
+
+
 async def test_async_shutdown_prevents_blocked_rebuild_publication(monkeypatch: Any) -> None:
     """Do not publish or persist a rebuild that finishes after runtime shutdown starts."""
     monkeypatch.setattr(homeassistant.helpers.storage, "Store", MockStore)
@@ -1429,8 +1517,8 @@ async def test_async_shutdown_cancels_and_drains_rebuild_tasks() -> None:
 
     task_en = asyncio.create_task(pending_rebuild())
     task_vi = asyncio.create_task(pending_rebuild())
-    runtime.rebuild_tasks["en"] = (runtime.index_generation, task_en)
-    runtime.rebuild_tasks["vi"] = (runtime.index_generation, task_vi)
+    runtime.rebuild_tasks["en"] = (runtime._index_generation_for("en"), task_en)
+    runtime.rebuild_tasks["vi"] = (runtime._index_generation_for("vi"), task_vi)
 
     await runtime.async_shutdown()
 
