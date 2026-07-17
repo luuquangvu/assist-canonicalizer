@@ -16,7 +16,11 @@ import orjson
 import pytest
 
 from custom_components.assist_canonicalizer import ranking
-from custom_components.assist_canonicalizer.candidate import Candidate, slot_alias_values_by_key
+from custom_components.assist_canonicalizer.candidate import (
+    Candidate,
+    CandidateSource,
+    slot_alias_values_by_key,
+)
 from custom_components.assist_canonicalizer.const import (
     DEFAULT_MIN_CONFIDENCE,
     DEFAULT_MIN_MARGIN,
@@ -778,7 +782,7 @@ def test_benchmark_runtime_slow_query_payload_orders_by_mean() -> None:
 
 
 def test_benchmark_accuracy_report_exposes_schema_metadata(tmp_path: Path) -> None:
-    """Accuracy reports should advertise additive field/column changes."""
+    """Accuracy reports should advertise machine-readable schema changes."""
     report = {
         "report_schema": "assist_canonicalizer_accuracy",
         "report_schema_version": benchmark.ACCURACY_REPORT_SCHEMA_VERSION,
@@ -796,6 +800,222 @@ def test_benchmark_accuracy_report_exposes_schema_metadata(tmp_path: Path) -> No
     assert payload["report_schema_version"] == benchmark.ACCURACY_REPORT_SCHEMA_VERSION
     assert f"**Report schema:** v{benchmark.ACCURACY_REPORT_SCHEMA_VERSION}" in markdown
     assert f"Report Schema: v{benchmark.ACCURACY_REPORT_SCHEMA_VERSION}" in text
+
+
+def test_benchmark_ablation_payload_keeps_only_meaningful_counts(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Ablations should exclude ineligible cases and serialize lossless counters."""
+    ablations = benchmark._new_ablation_results()
+    selected = RankedCandidate(
+        candidate=Candidate(
+            text="turn on kitchen light",
+            intent_name="HassTurnOn",
+            language="en",
+        ),
+        scores=ScoreBreakdown(1.0, 1.0, 1.0, 1.0, 1.0),
+    )
+    base_case = {
+        "query": "turn on kitchen light",
+        "expected_canonical": "turn on kitchen light",
+        "expected_intent": "HassTurnOn",
+        "category": "test",
+    }
+
+    benchmark._record_ablations(ablations, (selected,), True, base_case, [{}], language="en")
+    benchmark._record_ablations(
+        ablations,
+        (selected,),
+        False,
+        {**base_case, "expected_fallback": True},
+        [{}],
+        language="en",
+    )
+    benchmark._record_ablations(
+        ablations,
+        (selected,),
+        True,
+        {**base_case, "drift": True},
+        [{}],
+        language="en",
+    )
+    benchmark._record_ablations(ablations, (), False, base_case, [{}], language="en")
+
+    payload = benchmark._ablation_payload(ablations)
+    assert payload["cohort"] == {
+        "dataset_cases": 4,
+        "evaluated": 3,
+        "production_fallbacks": 2,
+        "excluded": {
+            "drift": 1,
+        },
+    }
+    component_counts = payload["categories"]["test"]["components"]["rapidfuzz"]
+    assert component_counts == {
+        "canonical_correct": 1,
+        "intent_correct": 1,
+        "slots_correct": 1,
+        "intent_slots_correct": 1,
+    }
+    assert "fallback" not in component_counts
+    assert "average_latency_ms" not in component_counts
+
+    benchmark._print_ablation_table("Production-Flow Component Top-1: TEST", ablations)
+    console_output = capsys.readouterr().out
+    text_output = "\n".join(
+        benchmark._text_ablation_table(
+            "Production-Flow Component Top-1: TEST",
+            payload,
+        )
+    )
+
+    assert "Fallback" not in console_output
+    assert "Fallback" not in text_output
+    assert "Cohort: 3/4 evaluated" in console_output
+    assert "production_fallbacks=2" in console_output
+    assert "Cohort: 3/4 evaluated" in text_output
+    assert "production_fallbacks=2" in text_output
+    assert "Exact Canonical" in console_output
+    assert "Exact Canonical" in text_output
+    assert benchmark.ABLATION_METRIC_NOTE not in console_output
+    assert benchmark.ABLATION_METRIC_NOTE not in text_output
+    assert "Intent/Slot" in console_output
+    assert "Intent/Slot" in text_output
+
+    console_lines = console_output.splitlines()
+    table_start = next(index for index, line in enumerate(console_lines) if line.startswith("-"))
+    assert len({len(line) for line in console_lines[table_start:]}) == 1
+
+    benchmark._print_ablation_table(
+        "Production-Flow Component Top-1: ALL LANGUAGES",
+        ablations,
+        show_metric_note=True,
+    )
+    aggregate_console = capsys.readouterr().out
+    aggregate_text = "\n".join(
+        benchmark._text_ablation_table(
+            "Production-Flow Component Top-1: ALL LANGUAGES",
+            payload,
+            show_metric_note=True,
+        )
+    )
+    markdown_lines = benchmark._markdown_ablation_lines(payload)
+    markdown_table = [line for line in markdown_lines if line.startswith("|")]
+    assert aggregate_console.count(benchmark.ABLATION_METRIC_NOTE) == 1
+    assert aggregate_text.count(benchmark.ABLATION_METRIC_NOTE) == 1
+    assert markdown_lines.count(benchmark.ABLATION_METRIC_NOTE) == 1
+    assert len({len(line) for line in markdown_table}) == 1
+    assert markdown_table[0].startswith("| Component")
+    assert markdown_table[-1].startswith("| `final`")
+
+
+def test_benchmark_final_ablation_preserves_production_rank_order() -> None:
+    """Final component selection must be the candidate production ranked first."""
+    scores = ScoreBreakdown(0.8, 0.8, 0.8, 0.8, 0.8)
+    production_top = RankedCandidate(
+        candidate=Candidate(
+            text="device turn off",
+            intent_name="HassTurnOff",
+            source=CandidateSource.GENERATED_SAMPLE,
+        ),
+        scores=scores,
+    )
+    more_trusted_tie = RankedCandidate(
+        candidate=Candidate(
+            text="turn off device",
+            intent_name="HassTurnOff",
+            source=CandidateSource.BUILT_IN,
+        ),
+        scores=scores,
+    )
+
+    selected = benchmark._select_ablation_candidate(
+        (production_top, more_trusted_tie),
+        "final",
+    )
+
+    assert selected is production_top
+
+
+def test_benchmark_ablation_candidate_with_none_scores() -> None:
+    """Ablation selection must filter out None component scores and handle all-None fallback."""
+    # Candidate 1: Rapidfuzz score is None, but high final score
+    c1 = RankedCandidate(
+        candidate=Candidate(
+            text="c1",
+            intent_name="HassTurnOff",
+            source=CandidateSource.GENERATED_SAMPLE,
+        ),
+        scores=ScoreBreakdown(
+            rapidfuzz_score=cast(Any, None),
+            char_ngram_score=0.9,
+            bm25_score=0.9,
+            intent_score=0.9,
+            final_score=0.9,
+        ),
+    )
+    # Candidate 2: Rapidfuzz score is 0.5, lower final score
+    c2 = RankedCandidate(
+        candidate=Candidate(
+            text="c2",
+            intent_name="HassTurnOff",
+            source=CandidateSource.GENERATED_SAMPLE,
+        ),
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.5,
+            char_ngram_score=0.8,
+            bm25_score=0.8,
+            intent_score=0.8,
+            final_score=0.8,
+        ),
+    )
+
+    # When component is rapidfuzz, c1 has None, c2 has 0.5.
+    # It should filter out c1 and return c2.
+    selected = benchmark._select_ablation_candidate((c1, c2), "rapidfuzz")
+    assert selected is c2
+
+    # When all candidates have None component scores, it should fallback to ranked[0].
+    # Let's say rapidfuzz score for both c1 and c3 is None.
+    c3 = RankedCandidate(
+        candidate=Candidate(
+            text="c3",
+            intent_name="HassTurnOff",
+            source=CandidateSource.GENERATED_SAMPLE,
+        ),
+        scores=ScoreBreakdown(
+            rapidfuzz_score=cast(Any, None),
+            char_ngram_score=0.7,
+            bm25_score=0.7,
+            intent_score=0.7,
+            final_score=0.7,
+        ),
+    )
+    selected_all_none = benchmark._select_ablation_candidate((c1, c3), "rapidfuzz")
+    assert selected_all_none is c1
+
+
+def test_benchmark_case_accounting_preserves_production_selection() -> None:
+    """Expected answers must assess, not replace, the production-selected candidate."""
+    stats = benchmark.CategoryStats()
+    production_selected = RankedCandidate(
+        candidate=Candidate(text="device turn off", intent_name="HassTurnOff", language="en"),
+        scores=ScoreBreakdown(0.8, 0.8, 0.8, 0.8, 0.8),
+    )
+
+    is_ok, reason, _slots, selected = benchmark._record_case_result(
+        stats,
+        production_selected,
+        "turn off device",
+        "HassTurnOff",
+        [{}],
+    )
+
+    assert not is_ok
+    assert reason == "canonical"
+    assert selected is production_selected
+    assert stats.correct == 0
+    assert stats.intent_correct == 1
 
 
 def test_benchmark_hassil_missing_list_retry_fails_on_repeat(

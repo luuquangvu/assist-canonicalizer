@@ -2,49 +2,49 @@ repos:
   - repo: local
     hooks:
       - id: ruff-format
-        name: ruff-format
+        name: Run Ruff Format
         entry: uv run --no-project ruff format
         language: system
         pass_filenames: false
         always_run: true
 
       - id: ruff-check
-        name: ruff-check
+        name: Run Ruff Check
         entry: uv run --no-project ruff check --fix
         language: system
         pass_filenames: false
         always_run: true
 
       - id: ty-check
-        name: ty-check
+        name: Run Ty Check
         entry: uv run --no-project ty check
         language: system
         pass_filenames: false
         always_run: true
 
       - id: pyright
-        name: pyright
+        name: Run Pyright
         entry: uv run --no-project pyright
         language: system
         pass_filenames: false
         always_run: true
 
       - id: interrogate
-        name: interrogate
+        name: Run Interrogate
         entry: uv run --no-project interrogate
         language: system
         pass_filenames: false
         always_run: true
 
       - id: prettier
-        name: prettier
+        name: Run Prettier
         entry: npx prettier --log-level warn --write .
         language: system
         pass_filenames: false
         always_run: true
 
       - id: pytest
-        name: pytest
+        name: Run Pytest
         entry: uv run --no-project pytest
         language: system
         pass_filenames: false
@@ -52,7 +52,7 @@ repos:
         stages: [pre-push]
 
       - id: compatibility
-        name: compatibility
+        name: Run Compatibility Check
         entry: uv run --no-project tools/validate_compatibility.py
         language: system
         pass_filenames: false
