@@ -1,0 +1,36 @@
+reapply:
+
+clear_conversation_traces:
+
+get_conversation_traces:
+
+recognize_canonical:
+  fields:
+    text:
+      required: true
+      selector:
+        text:
+    language:
+      required: true
+      selector:
+        text:
+    device_id:
+      selector:
+        text:
+    satellite_id:
+      selector:
+        text:
+
+prepare_case:
+  fields:
+    intent:
+      required: true
+      selector:
+        text:
+    language:
+      required: true
+      selector:
+        text:
+    slots:
+      selector:
+        object:

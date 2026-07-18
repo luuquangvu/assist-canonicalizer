@@ -1,0 +1,22 @@
+{
+  "domain": "assist_canonicalizer_benchmark",
+  "name": "Assist Canonicalizer Benchmark Fixture",
+  "codeowners": ["@luuquangvu"],
+  "dependencies": [
+    "climate",
+    "conversation",
+    "demo",
+    "humidifier",
+    "intent",
+    "lawn_mower",
+    "lock",
+    "media_player",
+    "siren",
+    "todo"
+  ],
+  "documentation": "https://github.com/luuquangvu/assist-canonicalizer",
+  "integration_type": "service",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/luuquangvu/assist-canonicalizer/issues",
+  "version": "1.0.0"
+}

@@ -53,6 +53,39 @@ def test_normalize_text_applies_nfkc_casefold_punctuation_and_spaces() -> None:
     assert normalize_text("  Bật, ĐÈN!!  Phòng   Khách  ") == "bật đèn phòng khách"
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "বাতি চালু করুন",
+        "बत्ती जलाओ",
+        "ഓണാക്കൂ",
+        "ਚਲਾਦੋ",
+        "లైట్ ఆన్ చెయ్యి",
+        "เปิดไฟห้องครัว",
+        "اَلْعَرَبِيَّةُ",
+        "מִטְבָּח",
+    ],
+)
+def test_normalize_text_preserves_script_forming_marks(text: str) -> None:
+    """Keep Unicode marks that are part of letters across installed scripts."""
+    assert normalize_text(text) == text
+
+
+def test_normalize_text_handles_join_controls_and_orphan_visual_marks() -> None:
+    """Remove format controls without splitting words or retaining emoji marks."""
+    assert normalize_text("می\u200cخواهم") == "میخواهم"  # noqa: RUF001
+    assert normalize_text("❤️ light") == "light"
+    assert normalize_text("\u0301\u0300 light") == "light"
+    assert normalize_text("बत्ती—जलाओ!") == "बत्ती जलाओ"
+
+
+def test_no_diacritic_normalization_only_folds_latin_marks() -> None:
+    """Do not turn non-Latin words into a different lexical representation."""
+    assert normalize_text_no_diacritics("Cafe\u0301") == "cafe"
+    assert normalize_text_no_diacritics("बत्ती जलाओ", "hi") == "बत्ती जलाओ"
+    assert normalize_text_no_diacritics("اَلْعَرَبِيَّةُ", "ar") == "اَلْعَرَبِيَّةُ"
+
+
 def test_tokenize_text_returns_normalized_tokens() -> None:
     """Tokenize normalized text on whitespace."""
     assert tokenize_text("Turn   ON kitchen-light") == ("turn", "on", "kitchen", "light")

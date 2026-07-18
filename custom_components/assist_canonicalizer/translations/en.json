@@ -7,7 +7,7 @@
         "data": {
           "fallback_agent_id": "Fallback Conversation Agent",
           "min_confidence": "Minimum Match Confidence",
-          "min_margin": "Minimum Confidence Margin"
+          "min_margin": "Base Confidence Margin"
         }
       }
     },
@@ -23,7 +23,7 @@
         "data": {
           "fallback_agent_id": "Fallback Conversation Agent",
           "min_confidence": "Minimum Match Confidence",
-          "min_margin": "Minimum Confidence Margin"
+          "min_margin": "Base Confidence Margin"
         }
       }
     }

@@ -63,3 +63,13 @@ def test_translation_key_order(translation_file):
         translation = orjson.loads(f.read())
 
     check_dict_order(translation, reference)
+
+
+def test_english_margin_label_describes_dynamic_base_policy() -> None:
+    """Keep the stored min_margin key while correcting its user-facing semantics."""
+    strings = orjson.loads(STRINGS_JSON.read_bytes())
+    english = orjson.loads((TRANSLATIONS_DIR / "en.json").read_bytes())
+
+    assert strings["config"]["step"]["user"]["data"]["min_margin"] == ("Base Confidence Margin")
+    assert strings["options"]["step"]["init"]["data"]["min_margin"] == ("Base Confidence Margin")
+    assert english["config"]["step"]["user"]["data"]["min_margin"] == ("Base Confidence Margin")

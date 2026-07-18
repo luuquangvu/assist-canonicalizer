@@ -10,6 +10,7 @@ from typing import Any
 from homeassistant.components.conversation import agent_manager
 from homeassistant.components.homeassistant import exposed_entities
 from homeassistant.const import Platform
+from homeassistant.core import callback
 from homeassistant.helpers import area_registry, entity_registry, floor_registry
 from homeassistant.helpers import event as ha_event
 
@@ -142,6 +143,7 @@ def _handle_intent_updates(
         hass.add_job(runtime.async_rebuild_index, hass, language)
 
 
+@callback
 def _debounced_registry_rebuild(
     hass: HomeAssistantInstance,
     runtime: CanonicalizerRuntime,
@@ -157,6 +159,7 @@ def _debounced_registry_rebuild(
         hass.add_job(runtime.async_rebuild_index, hass, language)
 
 
+@callback
 def _schedule_registry_refresh(
     hass: HomeAssistantInstance,
     runtime: CanonicalizerRuntime,

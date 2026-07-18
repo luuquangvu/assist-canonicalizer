@@ -28,6 +28,7 @@ from custom_components.assist_canonicalizer.ranking import (
     CharNGramIndex,
     RankedCandidate,
     ScoreBreakdown,
+    SlotTokenIndex,
     WildcardVariantGroup,
     _best_positional_score,
     _calculate_slot_penalty,
@@ -46,6 +47,7 @@ from custom_components.assist_canonicalizer.ranking import (
     _rank_prefilter_keys_with_sparse_bm25,
     _raw_cached_fuzz_ratio,
     _ScoringContext,
+    _top_additional_slot_indices,
     _top_additional_wildcard_indices,
     _top_prefilter_indices,
     _wildcard_variants_match,
@@ -457,7 +459,9 @@ def test_accepted_candidate_enforces_margin_for_competing_intents() -> None:
 def test_accepted_candidate_relaxes_margin_for_high_confidence_top() -> None:
     """Accept a high-confidence top candidate with a small positive margin."""
     top = RankedCandidate(
-        candidate=Candidate(text="turn on kitchen light", intent_name="HassTurnOn", language="en"),
+        candidate=Candidate(
+            text="get kitchen light state", intent_name="HassGetState", language="en"
+        ),
         scores=ScoreBreakdown(
             rapidfuzz_score=0.82,
             char_ngram_score=0.82,
@@ -468,7 +472,10 @@ def test_accepted_candidate_relaxes_margin_for_high_confidence_top() -> None:
     )
     competitor = RankedCandidate(
         candidate=Candidate(
-            text="turn off kitchen light", intent_name="HassTurnOff", language="en"
+            text="get kitchen temperature",
+            intent_name="HassClimateGetTemperature",
+            language="en",
+            metadata={"slots": '{"name":"kitchen light"}'},
         ),
         scores=ScoreBreakdown(
             rapidfuzz_score=0.81,
@@ -479,13 +486,21 @@ def test_accepted_candidate_relaxes_margin_for_high_confidence_top() -> None:
         ),
     )
 
-    assert accepted_candidate((top, competitor)) is top
+    decision = evaluate_confidence_gates((top, competitor))
+
+    assert decision.accepted_candidate is top
+    assert decision.margin_policy == "high_confidence_relaxation"
 
 
 def test_accepted_candidate_does_not_relax_margin_below_relaxed_threshold() -> None:
     """Reject high-confidence candidates below the relaxed margin threshold."""
     top = RankedCandidate(
-        candidate=Candidate(text="turn on kitchen light", intent_name="HassTurnOn", language="en"),
+        candidate=Candidate(
+            text="turn on kitchen light",
+            intent_name="HassTurnOn",
+            language="en",
+            metadata={"slots": '{"name":"kitchen light"}'},
+        ),
         scores=ScoreBreakdown(
             rapidfuzz_score=0.82,
             char_ngram_score=0.82,
@@ -570,7 +585,12 @@ def test_accepted_candidate_rejects_low_margin_without_high_confidence() -> None
 def test_accepted_candidate_rejects_weak_zero_intent_evidence() -> None:
     """Reject low-scoring fuzzy winners that only match entity text."""
     top = RankedCandidate(
-        candidate=Candidate(text="water heater", intent_name="HassTurnOn", language="en"),
+        candidate=Candidate(
+            text="water heater",
+            intent_name="HassTurnOn",
+            language="en",
+            metadata={"slots": '{"name":"water heater"}'},
+        ),
         scores=ScoreBreakdown(
             rapidfuzz_score=0.65,
             char_ngram_score=0.65,
@@ -580,7 +600,12 @@ def test_accepted_candidate_rejects_weak_zero_intent_evidence() -> None:
         ),
     )
     competitor = RankedCandidate(
-        candidate=Candidate(text="water heater off", intent_name="HassTurnOff", language="en"),
+        candidate=Candidate(
+            text="water heater off",
+            intent_name="HassTurnOff",
+            language="en",
+            metadata={"slots": '{"name":"water heater"}'},
+        ),
         scores=ScoreBreakdown(
             rapidfuzz_score=0.59,
             char_ngram_score=0.59,
@@ -590,8 +615,736 @@ def test_accepted_candidate_rejects_weak_zero_intent_evidence() -> None:
         ),
     )
 
-    assert accepted_candidate((top, competitor)) is None
-    assert confidence_gate_rejection_reason((top, competitor)) == FallbackReason.LOW_CONFIDENCE
+    decision = evaluate_confidence_gates((top, competitor))
+
+    assert not decision.accepted
+    assert decision.rejection_reason is FallbackReason.LOW_CONFIDENCE
+    assert decision.margin_policy == "weak_zero_intent_evidence"
+
+
+def test_accepted_candidate_requires_margin_between_distinct_same_intent_targets() -> None:
+    """Do not treat different target payloads as duplicate intent variants."""
+    top = RankedCandidate(
+        candidate=Candidate(
+            text="turn on kitchen light",
+            intent_name="HassTurnOn",
+            language="en",
+            metadata={"slots": '{"name":"kitchen light"}'},
+        ),
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.90,
+            char_ngram_score=0.90,
+            bm25_score=0.90,
+            intent_score=0.90,
+            final_score=0.90,
+        ),
+    )
+    competitor = RankedCandidate(
+        candidate=Candidate(
+            text="turn on kitchen fan",
+            intent_name="HassTurnOn",
+            language="en",
+            metadata={"slots": '{"name":"kitchen fan"}'},
+        ),
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.89,
+            char_ngram_score=0.89,
+            bm25_score=0.89,
+            intent_score=0.89,
+            final_score=0.89,
+        ),
+    )
+
+    decision = evaluate_confidence_gates((top, competitor))
+
+    assert not decision.accepted
+    assert decision.rejection_reason is FallbackReason.LOW_MARGIN
+    assert decision.margin_policy == "target_base_margin"
+    assert decision.target_incompatible_competition
+    assert not decision.relaxation_used
+
+
+def test_accepted_candidate_ignores_same_intent_variants_with_identical_slots() -> None:
+    """Keep wording variants with the same executable payload out of the margin gate."""
+    top = RankedCandidate(
+        candidate=Candidate(
+            text="turn on the kitchen light",
+            intent_name="HassTurnOn",
+            language="en",
+            metadata={"slots": '{"name":"kitchen light"}'},
+        ),
+        scores=ScoreBreakdown(0.90, 0.90, 0.90, 0.90, 0.90),
+    )
+    variant = RankedCandidate(
+        candidate=Candidate(
+            text="switch on the kitchen light",
+            intent_name="HassTurnOn",
+            language="en",
+            metadata={"slots": '{"name":"kitchen light"}'},
+        ),
+        scores=ScoreBreakdown(0.89, 0.89, 0.89, 0.89, 0.89),
+    )
+
+    decision = evaluate_confidence_gates((top, variant))
+
+    assert decision.accepted_candidate is top
+    assert decision.meaningful_competitor is None
+    assert decision.margin_policy == "no_competitor"
+
+
+def test_accepted_candidate_ignores_overlapping_same_target_decompositions() -> None:
+    """Treat overlapping area/domain and name payloads as one physical target."""
+    top = RankedCandidate(
+        candidate=Candidate(
+            text="turn on the living room light",
+            intent_name="HassTurnOn",
+            language="en",
+            metadata={
+                "slots": '{"area":"living room","domain":"light"}',
+                "static_slots": "domain",
+            },
+        ),
+        scores=ScoreBreakdown(0.90, 0.90, 0.90, 0.90, 0.90),
+    )
+    variant = RankedCandidate(
+        candidate=Candidate(
+            text="switch on the living room light",
+            intent_name="HassTurnOn",
+            language="en",
+            metadata={"slots": '{"name":"living room light"}'},
+        ),
+        scores=ScoreBreakdown(0.89, 0.89, 0.89, 0.89, 0.89),
+    )
+
+    decision = evaluate_confidence_gates((top, variant))
+
+    assert decision.accepted_candidate is top
+    assert decision.meaningful_competitor is None
+    assert decision.margin_policy == "no_competitor"
+
+
+def test_accepted_candidate_uses_literal_evidence_from_equivalent_action_variant() -> None:
+    """Use an explicit grammar action from a same-target generated variant."""
+    top = RankedCandidate(
+        candidate=Candidate(
+            text="the living room light on",
+            intent_name="HassTurnOn",
+            language="en",
+            metadata={
+                "slots": '{"area":"living room","domain":"light"}',
+                "static_slots": "domain",
+                "literal_text": "light on",
+            },
+        ),
+        scores=ScoreBreakdown(0.67, 0.67, 0.67, 0.67, 0.67),
+    )
+    competitor = RankedCandidate(
+        candidate=Candidate(
+            text="the living room light off",
+            intent_name="HassTurnOff",
+            language="en",
+            metadata={
+                "slots": '{"area":"living room","domain":"light"}',
+                "static_slots": "domain",
+                "literal_text": "light off",
+            },
+        ),
+        scores=ScoreBreakdown(0.66, 0.66, 0.66, 0.66, 0.66),
+    )
+    action_variant = RankedCandidate(
+        candidate=Candidate(
+            text="illuminate the living room",
+            intent_name="HassTurnOn",
+            language="en",
+            metadata={
+                "slots": '{"area":"living room","domain":"light"}',
+                "static_slots": "domain",
+                "literal_text": "illuminate",
+            },
+        ),
+        scores=ScoreBreakdown(0.65, 0.65, 0.65, 0.80, 0.65),
+    )
+
+    decision = evaluate_confidence_gates(
+        (top, competitor, action_variant),
+        query="illuminate the living room light",
+        language="en",
+    )
+
+    assert decision.accepted_candidate is top
+    assert decision.meaningful_competitor is competitor
+    assert decision.margin_policy == "supported_literal_action_evidence"
+    assert decision.relaxation_used
+
+
+def test_accepted_candidate_does_not_relax_shared_target_literal_evidence() -> None:
+    """A shared target noun is not enough to choose between opposing actions."""
+    top = RankedCandidate(
+        candidate=Candidate(
+            text="living room light on",
+            intent_name="HassTurnOn",
+            language="en",
+            metadata={
+                "slots": '{"name":"living room light"}',
+                "literal_text": "light",
+            },
+        ),
+        scores=ScoreBreakdown(0.67, 0.67, 0.67, 0.67, 0.67),
+    )
+    competitor = RankedCandidate(
+        candidate=Candidate(
+            text="living room light off",
+            intent_name="HassTurnOff",
+            language="en",
+            metadata={
+                "slots": '{"name":"living room light"}',
+                "literal_text": "light",
+            },
+        ),
+        scores=ScoreBreakdown(0.66, 0.66, 0.66, 0.66, 0.66),
+    )
+
+    decision = evaluate_confidence_gates(
+        (top, competitor),
+        query="living room light",
+        language="en",
+    )
+
+    assert not decision.accepted
+    assert decision.margin_policy == "opposing_action_base_margin"
+
+
+def test_accepted_candidate_does_not_relax_fuzzy_unique_action_evidence() -> None:
+    """A merely similar unique literal cannot override action ambiguity."""
+    top = RankedCandidate(
+        candidate=Candidate(
+            text="restart the kitchen fan",
+            intent_name="HassTurnOn",
+            language="en",
+            metadata={
+                "slots": '{"name":"kitchen fan"}',
+                "literal_text": "restart",
+            },
+        ),
+        scores=ScoreBreakdown(0.67, 0.67, 0.67, 0.67, 0.67),
+    )
+    competitor = RankedCandidate(
+        candidate=Candidate(
+            text="stop the kitchen fan",
+            intent_name="HassTurnOff",
+            language="en",
+            metadata={
+                "slots": '{"name":"kitchen fan"}',
+                "literal_text": "stop",
+            },
+        ),
+        scores=ScoreBreakdown(0.66, 0.66, 0.66, 0.66, 0.66),
+    )
+
+    decision = evaluate_confidence_gates(
+        (top, competitor),
+        query="start the kitchen fan",
+        language="en",
+    )
+
+    assert not decision.accepted
+    assert decision.margin_policy == "opposing_action_base_margin"
+
+
+def test_accepted_candidate_uses_query_supported_same_intent_target() -> None:
+    """Do not manufacture ambiguity when only the top target is spoken."""
+    top = RankedCandidate(
+        candidate=Candidate(
+            text="turn off kitchen light",
+            intent_name="HassTurnOff",
+            language="en",
+            metadata={"slots": '{"name":"kitchen light"}'},
+        ),
+        scores=ScoreBreakdown(0.70, 0.70, 0.70, 0.70, 0.70),
+    )
+    competitor = RankedCandidate(
+        candidate=Candidate(
+            text="turn off kitchen fan",
+            intent_name="HassTurnOff",
+            language="en",
+            metadata={"slots": '{"name":"kitchen fan"}'},
+        ),
+        scores=ScoreBreakdown(0.69, 0.69, 0.69, 0.69, 0.69),
+    )
+
+    decision = evaluate_confidence_gates(
+        (top, competitor),
+        query="turn off the kitchen light",
+        language="en",
+    )
+
+    assert decision.accepted_candidate is top
+    assert decision.meaningful_competitor is None
+    assert decision.margin_policy == "no_competitor"
+
+
+def test_accepted_candidate_uses_diacritic_tolerant_target_evidence() -> None:
+    """Use normalized spoken target evidence across a diacritic transcription error."""
+    top = RankedCandidate(
+        candidate=Candidate(
+            text="tắt đèn phòng khách",
+            intent_name="HassTurnOff",
+            language="vi",
+            metadata={"slots": '{"name":"đèn phòng khách"}'},
+        ),
+        scores=ScoreBreakdown(0.70, 0.70, 0.70, 0.70, 0.70),
+    )
+    competitor = RankedCandidate(
+        candidate=Candidate(
+            text="tắt rèm phòng khách",
+            intent_name="HassTurnOff",
+            language="vi",
+            metadata={"slots": '{"name":"rèm phòng khách"}'},
+        ),
+        scores=ScoreBreakdown(0.69, 0.69, 0.69, 0.69, 0.69),
+    )
+
+    decision = evaluate_confidence_gates(
+        (top, competitor),
+        query="tắt đền phòng khách",
+        language="vi",
+    )
+
+    assert decision.accepted_candidate is top
+    assert decision.meaningful_competitor is None
+
+
+def test_accepted_candidate_uses_bounded_morphological_target_evidence() -> None:
+    """Recognize a long shared target stem without language-specific stemming."""
+    top = RankedCandidate(
+        candidate=Candidate(
+            text="turn off the bedroom ventilator",
+            intent_name="HassTurnOff",
+            language="en",
+            metadata={"slots": '{"name":"bedroom ventilator"}'},
+        ),
+        scores=ScoreBreakdown(0.75, 0.75, 0.75, 0.75, 0.75),
+    )
+    competitor = RankedCandidate(
+        candidate=Candidate(
+            text="turn off the bedroom light",
+            intent_name="HassTurnOff",
+            language="en",
+            metadata={"slots": '{"name":"bedroom light"}'},
+        ),
+        scores=ScoreBreakdown(0.70, 0.70, 0.70, 0.70, 0.70),
+    )
+
+    decision = evaluate_confidence_gates(
+        (top, competitor),
+        query="stop the bedroom ventilation",
+        language="en",
+    )
+
+    assert decision.accepted_candidate is top
+    assert decision.meaningful_competitor is None
+
+
+def test_accepted_candidate_uses_contextual_short_target_typo() -> None:
+    """Use a short typo only when the rest of the target phrase is anchored."""
+    top = RankedCandidate(
+        candidate=Candidate(
+            text="tắt quạt phòng tắm",
+            intent_name="HassTurnOff",
+            language="vi",
+            metadata={"slots": '{"name":"quạt phòng tắm"}'},
+        ),
+        scores=ScoreBreakdown(0.70, 0.70, 0.70, 0.70, 0.70),
+    )
+    competitor = RankedCandidate(
+        candidate=Candidate(
+            text="tắt quạt phòng làm việc",
+            intent_name="HassTurnOff",
+            language="vi",
+            metadata={"slots": '{"name":"quạt phòng làm việc"}'},
+        ),
+        scores=ScoreBreakdown(0.69, 0.69, 0.69, 0.69, 0.69),
+    )
+
+    decision = evaluate_confidence_gates(
+        (top, competitor),
+        query="tắt quạt phòg tắh",
+        language="vi",
+    )
+
+    assert decision.accepted_candidate is top
+    assert decision.meaningful_competitor is None
+
+
+def test_accepted_candidate_rejects_unspoken_same_intent_target_choice() -> None:
+    """Never choose between distinct targets when neither one is in the query."""
+    top = RankedCandidate(
+        candidate=Candidate(
+            text="turn on kitchen light",
+            intent_name="HassTurnOn",
+            language="en",
+            metadata={"slots": '{"name":"kitchen light"}'},
+        ),
+        scores=ScoreBreakdown(0.90, 0.90, 0.90, 0.90, 0.90),
+    )
+    competitor = RankedCandidate(
+        candidate=Candidate(
+            text="turn on kitchen fan",
+            intent_name="HassTurnOn",
+            language="en",
+            metadata={"slots": '{"name":"kitchen fan"}'},
+        ),
+        scores=ScoreBreakdown(0.70, 0.70, 0.70, 0.70, 0.70),
+    )
+
+    decision = evaluate_confidence_gates(
+        (top, competitor),
+        query="turn on something in the kitchen",
+        language="en",
+    )
+
+    assert not decision.accepted
+    assert decision.rejection_reason is FallbackReason.LOW_CONFIDENCE
+    assert decision.margin_policy == "target_without_query_support"
+    assert decision.target_incompatible_competition
+
+
+def test_accepted_candidate_promotes_query_supported_lower_target() -> None:
+    """Drop a higher same-intent payload when only the lower target is spoken."""
+    unsupported = RankedCandidate(
+        candidate=Candidate(
+            text="set office light to 20",
+            intent_name="HassLightSet",
+            language="en",
+            metadata={"slots": '{"name":"office light","brightness":20}'},
+        ),
+        scores=ScoreBreakdown(0.90, 0.90, 0.90, 0.90, 0.90),
+    )
+    supported = RankedCandidate(
+        candidate=Candidate(
+            text="set kitchen light to 50",
+            intent_name="HassLightSet",
+            language="en",
+            metadata={"slots": '{"name":"kitchen light","brightness":50}'},
+        ),
+        scores=ScoreBreakdown(0.85, 0.85, 0.85, 0.85, 0.85),
+    )
+    other_intent = RankedCandidate(
+        candidate=Candidate(
+            text="turn off kitchen light",
+            intent_name="HassTurnOff",
+            language="en",
+            metadata={"slots": '{"name":"kitchen light"}'},
+        ),
+        scores=ScoreBreakdown(0.70, 0.70, 0.70, 0.70, 0.70),
+    )
+
+    decision = evaluate_confidence_gates(
+        (unsupported, supported, other_intent),
+        query="set kitchen light to 50",
+        language="en",
+    )
+
+    assert decision.accepted_candidate is supported
+    assert decision.top_candidate is supported
+
+
+def test_accepted_candidate_promotes_nonliteral_target_from_generic_leader() -> None:
+    """Use a spoken concrete target when a generic same-intent form ranks first."""
+    generic = RankedCandidate(
+        candidate=Candidate(
+            text="turn off the fans in the room",
+            intent_name="HassTurnOff",
+            language="en",
+            metadata={
+                "literal_text": "turn off the fans in the room",
+                "slots": '{"domain":"fan"}',
+                "static_slots": "domain",
+            },
+        ),
+        scores=ScoreBreakdown(0.75, 0.75, 0.75, 0.75, 0.75),
+    )
+    supported = RankedCandidate(
+        candidate=Candidate(
+            text="turn off the bathroom fan",
+            intent_name="HassTurnOff",
+            language="en",
+            metadata={"slots": '{"name":"bathroom fan"}'},
+        ),
+        scores=ScoreBreakdown(0.70, 0.70, 0.70, 0.70, 0.70),
+    )
+
+    decision = evaluate_confidence_gates(
+        (generic, supported),
+        query="please turn off the bathroom fan",
+        language="en",
+    )
+
+    assert decision.accepted_candidate is supported
+    assert decision.top_candidate is supported
+
+
+def test_accepted_candidate_does_not_promote_literal_only_target_evidence() -> None:
+    """Do not reinterpret an intent grammar word as a concrete target."""
+    generic = RankedCandidate(
+        candidate=Candidate(
+            text="turn on the light",
+            intent_name="HassTurnOn",
+            language="en",
+            metadata={
+                "literal_text": "turn on the light",
+                "slots": '{"domain":"light"}',
+                "static_slots": "domain",
+            },
+        ),
+        scores=ScoreBreakdown(0.90, 0.90, 0.90, 0.90, 0.90),
+    )
+    concrete = RankedCandidate(
+        candidate=Candidate(
+            text="turn on light",
+            intent_name="HassTurnOn",
+            language="en",
+            metadata={"slots": '{"name":"light"}'},
+        ),
+        scores=ScoreBreakdown(0.70, 0.70, 0.70, 0.70, 0.70),
+    )
+
+    decision = evaluate_confidence_gates(
+        (generic, concrete),
+        query="turn on the light",
+        language="en",
+    )
+
+    assert decision.accepted_candidate is generic
+    assert decision.top_candidate is generic
+
+
+def test_accepted_candidate_compares_localized_raw_slot_payloads() -> None:
+    """Treat mapped and entity forms of one localized target as equivalent."""
+    top = RankedCandidate(
+        candidate=Candidate(
+            text="mở cái cửa sổ phòng ngủ",
+            intent_name="HassTurnOn",
+            language="vi",
+            metadata={
+                "slots": '{"name":"cửa sổ phòng ngủ"}',
+                "slots_raw": '{"name":"cửa sổ phòng ngủ"}',
+            },
+        ),
+        scores=ScoreBreakdown(0.70, 0.70, 0.70, 0.70, 0.70),
+    )
+    variant = RankedCandidate(
+        candidate=Candidate(
+            text="mở cửa sổ phòng ngủ",
+            intent_name="HassTurnOn",
+            language="vi",
+            metadata={
+                "slots": '{"domain":"cover","device_class":"window","area":"phòng ngủ"}',
+                "slots_raw": ('{"domain":"cover","device_class":"cửa sổ","area":"phòng ngủ"}'),
+                "static_slots": "domain",
+            },
+        ),
+        scores=ScoreBreakdown(0.69, 0.69, 0.69, 0.69, 0.69),
+    )
+
+    decision = evaluate_confidence_gates(
+        (top, variant),
+        query="mở hộ cửa sổ phòng ngủ",
+        language="vi",
+    )
+
+    assert decision.accepted_candidate is top
+    assert decision.meaningful_competitor is None
+    assert decision.margin_policy == "no_competitor"
+
+
+def test_accepted_candidate_rejects_wildcard_absorbing_concrete_target() -> None:
+    """Do not let exact wildcard rehydration hide a supported concrete target."""
+    wildcard = RankedCandidate(
+        candidate=Candidate(
+            text="play search_query",
+            intent_name="HassMediaSearchAndPlay",
+            language="en",
+            metadata={
+                "sentence_template": "play {search_query}",
+                "wildcard_slots": "search_query",
+                "slots": '{"search_query":"search_query"}',
+                "literal_text": "play",
+            },
+        ),
+        scores=ScoreBreakdown(1.0, 1.0, 1.0, 1.0, 0.74),
+    )
+    concrete = RankedCandidate(
+        candidate=Candidate(
+            text="start the kitchen vacuum",
+            intent_name="HassVacuumStart",
+            language="en",
+            metadata={"slots": '{"name":"kitchen vacuum"}'},
+        ),
+        scores=ScoreBreakdown(0.65, 0.65, 0.65, 0.65, 0.62),
+    )
+
+    decision = evaluate_confidence_gates(
+        (wildcard, concrete),
+        query="play the kitchen vacuum",
+        language="en",
+    )
+
+    assert not decision.accepted
+    assert decision.rejection_reason is FallbackReason.LOW_CONFIDENCE
+    assert decision.margin_policy == "wildcard_absorbed_concrete_target"
+
+
+def test_accepted_candidate_rejects_incomplete_read_only_literal() -> None:
+    """Require the complete query-form literal for a fuzzy read-only intent."""
+    top = RankedCandidate(
+        candidate=Candidate(
+            text="how warm is it here",
+            intent_name="HassClimateGetTemperature",
+            language="en",
+            metadata={
+                "literal_text": "how warm is it|how warm is it here",
+                "slots": "{}",
+            },
+        ),
+        scores=ScoreBreakdown(0.80, 0.50, 0.90, 0.75, 0.74),
+    )
+    competitor = RankedCandidate(
+        candidate=Candidate(
+            text="how warm is it in the kitchen",
+            intent_name="HassClimateGetTemperature",
+            language="en",
+            metadata={
+                "literal_text": "how warm is it in",
+                "slots": '{"area":"kitchen"}',
+            },
+        ),
+        scores=ScoreBreakdown(0.65, 0.45, 0.60, 0.65, 0.60),
+    )
+
+    decision = evaluate_confidence_gates(
+        (top, competitor),
+        query="it is too warm here",
+        language="en",
+    )
+
+    assert not decision.accepted
+    assert decision.rejection_reason is FallbackReason.LOW_CONFIDENCE
+    assert decision.margin_policy == "read_only_incomplete_literal"
+
+
+def test_accepted_candidate_allows_omission_only_read_only_query() -> None:
+    """Preserve a read-only match when its candidate covers every query token."""
+    top = RankedCandidate(
+        candidate=Candidate(
+            text="what is the weather",
+            intent_name="HassGetWeather",
+            language="en",
+            metadata={"literal_text": "what is the weather", "slots": "{}"},
+        ),
+        scores=ScoreBreakdown(0.80, 0.70, 0.80, 0.75, 0.74),
+    )
+    competitor = RankedCandidate(
+        candidate=Candidate(
+            text="what is the weather in the kitchen",
+            intent_name="HassGetWeather",
+            language="en",
+            metadata={
+                "literal_text": "what is the weather in",
+                "slots": '{"area":"kitchen"}',
+            },
+        ),
+        scores=ScoreBreakdown(0.65, 0.60, 0.65, 0.65, 0.60),
+    )
+
+    decision = evaluate_confidence_gates(
+        (top, competitor),
+        query="what the weather",
+        language="en",
+    )
+
+    assert decision.accepted_candidate is top
+
+
+def test_accepted_candidate_uses_read_only_literal_from_generated_variant() -> None:
+    """Preserve intent evidence when a registry expansion has extra target wording."""
+    top = RankedCandidate(
+        candidate=Candidate(
+            text="what is the weather for home weather",
+            intent_name="HassGetWeather",
+            language="en",
+            metadata={
+                "literal_text": "what is the weather for",
+                "slots": '{"name":"home weather"}',
+            },
+        ),
+        scores=ScoreBreakdown(0.80, 0.70, 0.80, 0.75, 0.74),
+    )
+    general_variant = RankedCandidate(
+        candidate=Candidate(
+            text="what is the weather",
+            intent_name="HassGetWeather",
+            language="en",
+            metadata={"literal_text": "what is the weather", "slots": "{}"},
+        ),
+        scores=ScoreBreakdown(0.65, 0.60, 0.65, 0.65, 0.60),
+    )
+    other_intent = RankedCandidate(
+        candidate=Candidate(
+            text="what is the date",
+            intent_name="HassGetCurrentDate",
+            language="en",
+            metadata={"literal_text": "what is the date", "slots": "{}"},
+        ),
+        scores=ScoreBreakdown(0.55, 0.55, 0.55, 0.55, 0.55),
+    )
+
+    decision = evaluate_confidence_gates(
+        (top, general_variant, other_intent),
+        query="what is the weather today",
+        language="en",
+    )
+
+    assert decision.accepted_candidate is top
+    assert decision.margin_policy == "target_base_margin"
+
+
+def test_accepted_candidate_rejects_incomplete_state_change_literal() -> None:
+    """Do not execute a state change from partial action evidence."""
+    top = RankedCandidate(
+        candidate=Candidate(
+            text="clean the living room",
+            intent_name="HassVacuumCleanArea",
+            language="en",
+            metadata={
+                "literal_text": "clean|clean the",
+                "slots": '{"area":"living room"}',
+            },
+        ),
+        scores=ScoreBreakdown(0.75, 0.55, 0.90, 0.65, 0.65),
+    )
+    competitor = RankedCandidate(
+        candidate=Candidate(
+            text="how dark is the living room",
+            intent_name="HassGetState",
+            language="en",
+            metadata={
+                "literal_text": "how dark is",
+                "slots": '{"area":"living room"}',
+            },
+        ),
+        scores=ScoreBreakdown(0.65, 0.45, 0.60, 0.50, 0.54),
+    )
+
+    decision = evaluate_confidence_gates(
+        (top, competitor),
+        query="make it dark in the living room",
+        language="en",
+    )
+
+    assert not decision.accepted
+    assert decision.rejection_reason is FallbackReason.LOW_CONFIDENCE
+    assert decision.margin_policy == "state_change_incomplete_literal"
 
 
 def test_accepted_candidate_keeps_stronger_zero_intent_synonym() -> None:
@@ -620,8 +1373,8 @@ def test_accepted_candidate_keeps_stronger_zero_intent_synonym() -> None:
     assert accepted_candidate((top, competitor)) is top
 
 
-def test_accepted_candidate_relaxes_for_safe_intent_evidence() -> None:
-    """Accept close fuzzy winners with a clear intent-evidence advantage."""
+def test_accepted_candidate_relaxes_action_incompatible_intent_evidence() -> None:
+    """Keep calibrated intent evidence and report the action incompatibility."""
     top = RankedCandidate(
         candidate=Candidate(
             text="turn on kitchen light",
@@ -639,8 +1392,8 @@ def test_accepted_candidate_relaxes_for_safe_intent_evidence() -> None:
     )
     competitor = RankedCandidate(
         candidate=Candidate(
-            text="turn off kitchen light",
-            intent_name="HassTurnOff",
+            text="get kitchen light state",
+            intent_name="HassGetState",
             language="en",
             metadata={"slots": orjson.dumps({"area": "kitchen", "domain": "light"}).decode()},
         ),
@@ -653,7 +1406,69 @@ def test_accepted_candidate_relaxes_for_safe_intent_evidence() -> None:
         ),
     )
 
-    assert accepted_candidate((top, competitor)) is top
+    decision = evaluate_confidence_gates((top, competitor))
+
+    assert decision.accepted_candidate is top
+    assert decision.margin_policy == "safe_intent_evidence_relaxation"
+    assert decision.action_incompatible_competition
+    assert decision.relaxation_used
+
+
+def test_accepted_candidate_rejects_action_incompatible_weaker_intent_evidence() -> None:
+    """Do not let target similarity override stronger action evidence."""
+    top = RankedCandidate(
+        candidate=Candidate(
+            text="is the bedroom window opening",
+            intent_name="HassGetState",
+            language="en",
+            metadata={"slots": '{"name":"bedroom window","state":"opening"}'},
+        ),
+        scores=ScoreBreakdown(0.80, 0.80, 0.80, 0.55, 0.75),
+    )
+    competitor = RankedCandidate(
+        candidate=Candidate(
+            text="open the bedroom window",
+            intent_name="HassTurnOn",
+            language="en",
+            metadata={"slots": '{"name":"bedroom window"}'},
+        ),
+        scores=ScoreBreakdown(0.65, 0.65, 0.65, 0.70, 0.62),
+    )
+
+    decision = evaluate_confidence_gates((top, competitor))
+
+    assert not decision.accepted
+    assert decision.rejection_reason is FallbackReason.LOW_CONFIDENCE
+    assert decision.margin_policy == "action_incompatible_weaker_intent_evidence"
+    assert decision.action_incompatible_competition
+
+
+def test_accepted_candidate_relaxes_safe_non_action_intent_evidence() -> None:
+    """Retain the calibrated relaxation when neither close intent changes state."""
+    top = RankedCandidate(
+        candidate=Candidate(
+            text="query kitchen light state",
+            intent_name="HassGetState",
+            language="en",
+            metadata={"slots": orjson.dumps({"area": "kitchen"}).decode()},
+        ),
+        scores=ScoreBreakdown(0.67, 0.67, 0.67, 0.70, 0.67),
+    )
+    competitor = RankedCandidate(
+        candidate=Candidate(
+            text="query kitchen weather",
+            intent_name="HassGetWeather",
+            language="en",
+            metadata={"slots": orjson.dumps({"area": "kitchen"}).decode()},
+        ),
+        scores=ScoreBreakdown(0.65, 0.65, 0.65, 0.58, 0.65),
+    )
+
+    decision = evaluate_confidence_gates((top, competitor))
+
+    assert decision.accepted_candidate is top
+    assert decision.margin_policy == "safe_intent_evidence_relaxation"
+    assert not decision.action_incompatible_competition
 
 
 def test_accepted_candidate_rejects_safe_intent_evidence_above_score_window() -> None:
@@ -877,25 +1692,44 @@ def test_confidence_gate_rejection_reason_distinguishes_threshold_failures() -> 
     )
 
 
-def test_accepted_candidate_allows_exact_top_against_fuzzy_competing_intent() -> None:
-    """Accept exact top matches when the competing intent is only a fuzzy match."""
-    index = build_index(
-        "en",
-        [
-            Candidate(text="turn on kitchen light", intent_name="HassTurnOn", language="en"),
-            Candidate(text="turn on kitchen light 0%", intent_name="HassLightSet", language="en"),
-        ],
+def test_exact_action_reports_incompatible_read_only_competitor() -> None:
+    """Accept exact text while retaining action-incompatibility diagnostics."""
+    top = RankedCandidate(
+        Candidate(text="turn on kitchen light", intent_name="HassTurnOn"),
+        ScoreBreakdown(1.0, 1.0, 1.0, 0.9, 0.90),
     )
-    ranked = index.rank("turn on kitchen light")
+    competitor = RankedCandidate(
+        Candidate(text="query kitchen light state", intent_name="HassGetState"),
+        ScoreBreakdown(0.99, 0.99, 0.99, 0.9, 0.89),
+    )
 
-    assert (
-        accepted_candidate(
-            ranked,
-            min_confidence=DEFAULT_MIN_CONFIDENCE / 5.0,
-            min_margin=DEFAULT_MIN_MARGIN + 0.95,
-        )
-        is ranked[0]
+    decision = evaluate_confidence_gates(
+        (top, competitor),
+        min_confidence=DEFAULT_MIN_CONFIDENCE / 5.0,
+        min_margin=DEFAULT_MIN_MARGIN,
     )
+
+    assert decision.accepted_candidate is top
+    assert decision.margin_policy == "exact_lexical"
+    assert decision.action_incompatible_competition
+    assert decision.relaxation_used
+
+
+def test_exact_read_only_intent_keeps_safe_lexical_relaxation() -> None:
+    """Keep exact-match relaxation when neither competing intent changes state."""
+    top = RankedCandidate(
+        Candidate(text="query kitchen light state", intent_name="HassGetState"),
+        ScoreBreakdown(1.0, 1.0, 1.0, 0.9, 0.90),
+    )
+    competitor = RankedCandidate(
+        Candidate(text="query kitchen weather", intent_name="HassGetWeather"),
+        ScoreBreakdown(0.99, 0.99, 0.99, 0.9, 0.89),
+    )
+
+    decision = evaluate_confidence_gates((top, competitor), min_margin=0.05)
+
+    assert decision.accepted_candidate is top
+    assert decision.margin_policy == "exact_lexical"
 
 
 def test_accepted_candidate_allows_close_candidates_with_same_intent() -> None:
@@ -1115,6 +1949,97 @@ def test_query_slot_tokens_do_not_reuse_literal_as_slot_prefix() -> None:
         (frozenset({"shutter", "window"}),),
         frozenset({"shut"}),
     ) == frozenset({"window"})
+
+
+def test_slot_prefilter_rescue_requires_complete_target_slot_match() -> None:
+    """Rescue a typoed target without admitting a shared-area competitor."""
+    candidate_slot_tokens = (
+        frozenset({"bedroom", "light"}),
+        frozenset({"bedroom", "window"}),
+        frozenset({"bathroom", "window"}),
+    )
+    slot_token_index = SlotTokenIndex.from_candidate_tokens(candidate_slot_tokens)
+
+    rescued = _top_additional_slot_indices(
+        frozenset({"turn", "off", "bedrom", "windw"}),
+        candidate_slot_tokens,
+        slot_token_index,
+        top_indices=(0,),
+        prefilter_keys=(-0.9, -0.1, -0.8),
+    )
+
+    assert rescued == [1]
+
+
+def test_slot_prefilter_rescue_prioritizes_fully_anchored_specific_targets() -> None:
+    """Do not let area-only variants exhaust the bounded target-rescue budget."""
+    candidate_slot_tokens = (
+        frozenset({"bedroom"}),
+        frozenset({"bedroom", "window"}),
+        frozenset({"bedroom"}),
+    )
+    slot_token_index = SlotTokenIndex.from_candidate_tokens(candidate_slot_tokens)
+
+    rescued = _top_additional_slot_indices(
+        frozenset({"turn", "off", "bedrom", "windw"}),
+        candidate_slot_tokens,
+        slot_token_index,
+        top_indices=(0,),
+        prefilter_keys=(-0.9, -0.1, -0.8),
+        limit=1,
+    )
+
+    assert rescued == [1]
+
+
+def test_index_rank_rescues_typoed_entity_family_outside_general_prefilter() -> None:
+    """Consider a fully anchored entity even when generic retrieval omitted it."""
+    distractors = [
+        Candidate(
+            text=f"turn off the bedroom light option {chr(97 + first)}{chr(97 + second)}",
+            intent_name="HassTurnOff",
+            language="en",
+            metadata={
+                "literal_text": "turn off option",
+                "slots": orjson.dumps({"name": "bedroom light"}).decode(),
+            },
+        )
+        for first in range(23)
+        for second in range(23)
+    ]
+    bedroom_window = Candidate(
+        text="turn off the bedroom window",
+        intent_name="HassTurnOff",
+        language="en",
+        metadata={
+            "literal_text": "turn off",
+            "slots": orjson.dumps({"name": "bedroom window"}).decode(),
+        },
+    )
+    index = build_index("en", [*distractors, bedroom_window])
+
+    ranked = index.rank("plz turn off the bedrom windw")
+
+    assert ranked[0].candidate == bedroom_window
+
+
+def test_slot_prefilter_rescue_keeps_expensive_scoring_bounded(monkeypatch) -> None:
+    """Cap target rescue work independently of the general prefilter size."""
+    candidates = [
+        Candidate(
+            text=f"turn off bedroom window variant {index}",
+            intent_name="HassTurnOff",
+            language="en",
+            metadata={"slots": orjson.dumps({"name": "bedroom window"}).decode()},
+        )
+        for index in range(DEFAULT_RAPIDFUZZ_PREFILTER_CANDIDATES + 50)
+    ]
+    rapidfuzz_counter = _RapidFuzzSimilarityCounter()
+    monkeypatch.setattr(ranking, "rapidfuzz_similarity_normalized", rapidfuzz_counter)
+
+    build_index("en", candidates).rank("turn off bedrom windw", max_candidates=5)
+
+    assert rapidfuzz_counter.calls <= DEFAULT_RAPIDFUZZ_PREFILTER_CANDIDATES + 32
 
 
 def test_rank_candidates_uses_truncated_registry_slot_evidence() -> None:
@@ -1476,6 +2401,36 @@ def test_reference_bm25_ranking_uses_dense_normalized_scores() -> None:
     )
 
 
+def test_reference_slot_index_penalizes_wildcard_absorbing_static_target() -> None:
+    """Carry static target knowledge into query-scoped wildcard ranking."""
+    wildcard = Candidate(
+        text="play search_query",
+        intent_name="HassMediaSearchAndPlay",
+        language="en",
+        metadata={
+            "sentence_template": "play {search_query}",
+            "wildcard_slots": "search_query",
+            "slots": '{"search_query":"search_query"}',
+            "literal_text": "play",
+        },
+    )
+    reference_slot_index = SlotTokenIndex.from_candidate_tokens((frozenset({"vacuum"}),))
+
+    without_reference = rank_candidates(
+        "play vacuum",
+        (wildcard,),
+        language="en",
+    )
+    with_reference = rank_candidates(
+        "play vacuum",
+        (wildcard,),
+        language="en",
+        reference_slot_token_index=reference_slot_index,
+    )
+
+    assert with_reference[0].scores.final_score < without_reference[0].scores.final_score
+
+
 def test_rank_candidates_validates_candidate_slot_token_length() -> None:
     """Reject precomputed slot-token data that does not match the candidate list."""
     candidates = [Candidate(text="turn on kitchen light", intent_name="HassTurnOn")]
@@ -1729,6 +2684,25 @@ def test_rank_candidates_penalizes_numeric_slot_without_query_number() -> None:
     assert ranked[1].candidate is absolute
 
 
+def test_rank_candidates_strongly_penalizes_unspoken_numeric_literal() -> None:
+    """Reject generated numeric text when the user did not supply a number."""
+    generated_speed = Candidate(
+        text="bathroom fan 0",
+        intent_name="HassFanSetSpeed",
+        language="en",
+        metadata={"slots": '{"name":"bathroom fan","percentage":0}'},
+    )
+
+    ranked = rank_candidates(
+        "bathroom fan off",
+        [generated_speed],
+        max_candidates=1,
+        language="en",
+    )
+
+    assert ranked[0].scores.final_score < DEFAULT_MIN_CONFIDENCE
+
+
 def test_rank_candidates_keeps_numeric_slot_with_query_number() -> None:
     """Allow numeric-slot variants to win when the query contains a number."""
     relative = Candidate(
@@ -1753,6 +2727,104 @@ def test_rank_candidates_keeps_numeric_slot_with_query_number() -> None:
 
     assert ranked[0].candidate is absolute
     assert ranked[1].candidate is relative
+
+
+def test_rank_candidates_penalizes_candidate_that_ignores_query_number() -> None:
+    """Prefer a numeric action over a lexically closer candidate that drops the number."""
+    ignores_number = Candidate(
+        text="bedroom window open",
+        intent_name="HassTurnOn",
+        language="en",
+        metadata={
+            "slots": '{"name":"bedroom window"}',
+            "slots_raw": '{"name":"bedroom window"}',
+        },
+    )
+    consumes_number = Candidate(
+        text="bedroom window to 0",
+        intent_name="HassSetPosition",
+        language="en",
+        metadata={
+            "slots": '{"name":"bedroom window","position":0}',
+            "slots_raw": '{"name":"bedroom window","position":"0"}',
+        },
+    )
+
+    ranked = rank_candidates(
+        "bedroom window open 0",
+        [ignores_number, consumes_number],
+        max_candidates=2,
+        language="en",
+    )
+
+    assert ranked[0].candidate is consumes_number
+    assert ranked[1].candidate is ignores_number
+
+
+def test_rank_candidates_penalizes_unspoken_semantic_slot() -> None:
+    """Do not invent a non-target action parameter absent from the query."""
+    turn_on = Candidate(
+        text="turn on living room light",
+        intent_name="HassTurnOn",
+        language="en",
+        metadata={
+            "slots": '{"name":"living room light"}',
+            "slots_raw": '{"name":"living room light"}',
+            "literal_text": "turn on",
+        },
+    )
+    set_white = Candidate(
+        text="turn living room light white",
+        intent_name="HassLightSet",
+        language="en",
+        metadata={
+            "slots": '{"name":"living room light","color":"white"}',
+            "slots_raw": '{"name":"living room light","color":"white"}',
+            "literal_text": "turn",
+        },
+    )
+
+    implicit_ranked = rank_candidates(
+        "turn living room light",
+        [set_white, turn_on],
+        max_candidates=2,
+        language="en",
+    )
+    explicit_ranked = rank_candidates(
+        "turn living room light white",
+        [turn_on, set_white],
+        max_candidates=2,
+        language="en",
+    )
+
+    assert implicit_ranked[0].candidate is turn_on
+    assert explicit_ranked[0].candidate is set_white
+
+
+def test_semantic_slot_anchor_uses_spoken_value_before_output_mapping() -> None:
+    """Anchor multilingual mapped parameters by their raw spoken surface value."""
+    mapped_color = Candidate(
+        text="licht blau",
+        intent_name="HassLightSet",
+        language="de",
+        metadata={
+            "slots": '{"name":"licht","color":"blue"}',
+            "slots_raw": '{"name":"licht","color":"blau"}',
+        },
+    )
+
+    assert not ranking._has_unanchored_semantic_slot(
+        mapped_color,
+        mapped_color.parsed_slots,
+        frozenset(),
+        ("licht", "blau"),
+    )
+    assert ranking._has_unanchored_semantic_slot(
+        mapped_color,
+        mapped_color.parsed_slots,
+        frozenset(),
+        ("licht",),
+    )
 
 
 def test_rank_candidates_uses_intent_context_for_location_slots() -> None:
@@ -1780,6 +2852,79 @@ def test_rank_candidates_uses_intent_context_for_location_slots() -> None:
 
     assert ranked[0].candidate is living_room
     assert ranked[1].candidate is office
+
+
+def test_rank_candidates_explicit_location_overrides_intent_context() -> None:
+    """Do not steer an explicit user location toward the satellite area."""
+    generic = Candidate(
+        text="turn off fans",
+        intent_name="HassTurnOff",
+        language="en",
+        metadata={"slots": '{"domain":"fan"}', "static_slots": "domain"},
+    )
+    bathroom = Candidate(
+        text="turn off bathroom fan",
+        intent_name="HassTurnOff",
+        language="en",
+        metadata={
+            "slots": '{"domain":"fan","area":"Bathroom"}',
+            "static_slots": "domain",
+        },
+    )
+
+    ranked = rank_candidates(
+        "turn off bath",
+        [generic, bathroom],
+        max_candidates=2,
+        language="en",
+        intent_context={"area": "Living Room"},
+    )
+    without_context = rank_candidates(
+        "turn off bath",
+        [generic, bathroom],
+        max_candidates=2,
+        language="en",
+    )
+
+    assert [item.candidate for item in ranked] == [item.candidate for item in without_context]
+    assert [item.scores.final_score for item in ranked] == pytest.approx(
+        [item.scores.final_score for item in without_context]
+    )
+
+
+def test_rank_candidates_explicit_entity_overrides_intent_context() -> None:
+    """Do not boost an area action over an explicitly named entity action."""
+    named = Candidate(
+        text="start the vacuum",
+        intent_name="HassVacuumStart",
+        language="en",
+        metadata={"slots": '{"name":"Vacuum"}', "literal_text": "start"},
+    )
+    context_area = Candidate(
+        text="clean the area",
+        intent_name="HassVacuumCleanArea",
+        language="en",
+        metadata={"context_slots": "area", "literal_text": "clean"},
+    )
+
+    ranked = rank_candidates(
+        "start vacuum",
+        [context_area, named],
+        max_candidates=2,
+        language="en",
+        intent_context={"area": "Living Room"},
+    )
+    without_context = rank_candidates(
+        "start vacuum",
+        [context_area, named],
+        max_candidates=2,
+        language="en",
+    )
+
+    assert [item.candidate for item in ranked] == [item.candidate for item in without_context]
+    assert [item.scores.final_score for item in ranked] == pytest.approx(
+        [item.scores.final_score for item in without_context]
+    )
 
 
 def test_rank_candidates_rewards_context_supplied_slots() -> None:
@@ -1864,6 +3009,39 @@ def test_rank_candidates_penalizes_entity_only_uncovered_query_tokens() -> None:
 
     assert ranked[0].candidate is action_candidate
     assert ranked[1].candidate is entity_only
+
+
+def test_rank_candidates_penalizes_optional_literal_implicit_action() -> None:
+    """Optional determiners must not turn an implicit action into verb evidence."""
+    implicit_turn_on = Candidate(
+        text="the bathroom fan",
+        intent_name="HassTurnOn",
+        language="en",
+        metadata={
+            "slots": orjson.dumps({"name": "bathroom fan"}).decode("utf-8"),
+            "literal_text": "the|my|our",
+            "literal_variants": orjson.dumps([[], ["the"], ["my"], ["our"]]).decode("utf-8"),
+        },
+    )
+    explicit_turn_off = Candidate(
+        text="the bathroom fan off",
+        intent_name="HassTurnOff",
+        language="en",
+        metadata={
+            "slots": orjson.dumps({"area": "bathroom", "domain": "fan"}).decode("utf-8"),
+            "literal_text": "off",
+        },
+    )
+
+    ranked = rank_candidates(
+        "kill the bathroom fan",
+        [implicit_turn_on, explicit_turn_off],
+        max_candidates=2,
+        language="en",
+    )
+
+    assert ranked[0].candidate is explicit_turn_off
+    assert ranked[1].candidate is implicit_turn_on
 
 
 def test_exact_intent_score_supports_alternatives() -> None:
@@ -2104,10 +3282,8 @@ def test_ranking_helpers_and_validation_errors() -> None:
     assert rank_candidates("   !!!   ", candidates) == ()
 
 
-def test_apply_intent_disambiguation_promotes_higher_intent_score_within_margin() -> None:
-    """Top-2 have different intents, close final_score, second has higher intent_score."""
-    margin = ranking.TIEBREAKER_INTENT_MARGIN
-
+def test_apply_intent_disambiguation_promotes_higher_intent_score_for_exact_tie() -> None:
+    """Use intent evidence only after the combined lexical scores tie."""
     first = RankedCandidate(
         candidate=Candidate(text="turn on kitchen light", intent_name="HassTurnOn", language="en"),
         scores=ScoreBreakdown(
@@ -2122,13 +3298,12 @@ def test_apply_intent_disambiguation_promotes_higher_intent_score_within_margin(
         candidate=Candidate(
             text="turn off bedroom light", intent_name="HassTurnOff", language="en"
         ),
-        # final_score is slightly lower than the first but still within the tiebreaker margin
         scores=ScoreBreakdown(
             rapidfuzz_score=0.9,
             char_ngram_score=0.9,
             bm25_score=0.9,
             intent_score=0.9,
-            final_score=1.0 - margin / 2.0,
+            final_score=1.0,
         ),
     )
 
@@ -2141,10 +3316,8 @@ def test_apply_intent_disambiguation_promotes_higher_intent_score_within_margin(
     assert ranked[1] is first
 
 
-def test_apply_intent_disambiguation_does_not_reorder_when_gap_exceeds_margin() -> None:
-    """Top-2 gap exceeds margin: no reordering even if second has higher intent_score."""
-    margin = ranking.TIEBREAKER_INTENT_MARGIN
-
+def test_apply_intent_disambiguation_does_not_promote_lower_final_score() -> None:
+    """Do not double-count intent evidence after final scores are calculated."""
     first = RankedCandidate(
         candidate=Candidate(text="turn on kitchen light", intent_name="HassTurnOn", language="en"),
         scores=ScoreBreakdown(
@@ -2159,13 +3332,12 @@ def test_apply_intent_disambiguation_does_not_reorder_when_gap_exceeds_margin() 
         candidate=Candidate(
             text="turn off bedroom light", intent_name="HassTurnOff", language="en"
         ),
-        # final_score gap exceeds the tiebreaker margin
         scores=ScoreBreakdown(
             rapidfuzz_score=0.9,
             char_ngram_score=0.9,
             bm25_score=0.9,
             intent_score=0.9,
-            final_score=1.0 - (margin * 2.0),
+            final_score=0.999,
         ),
     )
 
@@ -2173,15 +3345,12 @@ def test_apply_intent_disambiguation_does_not_reorder_when_gap_exceeds_margin() 
 
     ranking._apply_intent_disambiguation(ranked)
 
-    # Because the final_score gap exceeds the margin, the ordering should not change
     assert ranked[0] is first
     assert ranked[1] is second
 
 
 def test_apply_intent_disambiguation_keeps_order_for_same_intent() -> None:
-    """Top-2 share the same intent: order is unchanged even within the margin."""
-    margin = ranking.TIEBREAKER_INTENT_MARGIN
-
+    """Top-2 sharing one intent preserve their lexical score order."""
     first = RankedCandidate(
         candidate=Candidate(text="turn on kitchen light", intent_name="HassTurnOn", language="en"),
         scores=ScoreBreakdown(
@@ -2201,7 +3370,7 @@ def test_apply_intent_disambiguation_keeps_order_for_same_intent() -> None:
             char_ngram_score=0.9,
             bm25_score=0.9,
             intent_score=0.9,
-            final_score=1.0 - margin / 2.0,
+            final_score=1.0,
         ),
     )
 
@@ -2216,19 +3385,17 @@ def test_apply_intent_disambiguation_keeps_order_for_same_intent() -> None:
 
 def test_apply_intent_disambiguation_skips_same_intent_variants() -> None:
     """Compare the top candidate with the first genuinely competing intent."""
-    margin = ranking.TIEBREAKER_INTENT_MARGIN
-
     first = RankedCandidate(
         candidate=Candidate(text="turn kitchen light", intent_name="HassTurnOn"),
         scores=ScoreBreakdown(0.9, 0.9, 0.9, 0.5, 1.0),
     )
     same_intent = RankedCandidate(
         candidate=Candidate(text="switch kitchen light", intent_name="HassTurnOn"),
-        scores=ScoreBreakdown(0.9, 0.9, 0.9, 0.6, 1.0 - margin / 4.0),
+        scores=ScoreBreakdown(0.9, 0.9, 0.9, 0.6, 1.0),
     )
     competitor = RankedCandidate(
         candidate=Candidate(text="turn kitchen light off", intent_name="HassTurnOff"),
-        scores=ScoreBreakdown(0.9, 0.9, 0.9, 0.9, 1.0 - margin / 2.0),
+        scores=ScoreBreakdown(0.9, 0.9, 0.9, 0.9, 1.0),
     )
     ranked = [first, same_intent, competitor]
 
@@ -3178,12 +4345,40 @@ def test_multi_wildcard_rehydration() -> None:
     assert slots == {"song": "yesterday", "artist": "the beatles"}
 
 
+def test_adjacent_wildcards_fail_closed_without_a_literal_boundary() -> None:
+    """Do not assign overlapping query spans to inseparable free-text slots."""
+    register_custom_wildcards_from_sources(
+        "en",
+        {"custom": {"lists": {"song": {"wildcard": True}, "artist": {"wildcard": True}}}},
+    )
+    candidate = Candidate(
+        text="play song artist",
+        intent_name="HassPlayMedia",
+        language="en",
+        metadata={
+            "sentence_template": "play {song} {artist}",
+            "wildcard_slots": "song,artist",
+        },
+        slot_values=("song", "artist"),
+    )
+
+    rehydrated_text, slots = get_wildcard_rehydration(
+        candidate,
+        query="play yesterday the beatles",
+    )
+
+    assert rehydrated_text == candidate.text
+    assert slots == {}
+
+
 def test_evaluate_confidence_gates_empty_and_success_states() -> None:
     """Test evaluate_confidence_gates with empty and success candidate states."""
     # Empty sequence should return NO_CANDIDATE fallback reason
-    cand, reason = evaluate_confidence_gates(())
-    assert cand is None
-    assert reason == FallbackReason.NO_CANDIDATE
+    empty_decision = evaluate_confidence_gates(())
+    assert empty_decision.accepted_candidate is None
+    assert empty_decision.rejection_reason == FallbackReason.NO_CANDIDATE
+    assert empty_decision.margin_policy == "no_candidate"
+    assert empty_decision.observed_margin is None
 
     top = RankedCandidate(
         candidate=Candidate(text="turn on kitchen light", intent_name="HassTurnOn", language="en"),
@@ -3196,9 +4391,85 @@ def test_evaluate_confidence_gates_empty_and_success_states() -> None:
         ),
     )
     # Success branch should return None for the reason
-    cand, reason = evaluate_confidence_gates((top,))
-    assert cand is top
-    assert reason is None
+    decision = evaluate_confidence_gates((top,))
+    assert decision.accepted_candidate is top
+    assert decision.rejection_reason is None
+    assert decision.margin_policy == "no_competitor"
+    assert decision.required_margin == 0.0
+    assert decision.as_dict()["top_candidate"]["text_sha256"]
+
+
+@pytest.mark.parametrize(
+    ("lexical_score", "expected_policy", "required_margin"),
+    [(1.0, "exact_lexical", 0.0), (0.99, "high_confidence_relaxation", 0.005)],
+)
+def test_opposing_actions_report_exact_or_high_confidence_relaxation(
+    lexical_score: float,
+    expected_policy: str,
+    required_margin: float,
+) -> None:
+    """Retain calibrated evidence while reporting close on/off competition."""
+    top = RankedCandidate(
+        Candidate(
+            text="turn on kitchen light",
+            intent_name="HassTurnOn",
+            language="en",
+            metadata={"slots": '{"name":"kitchen light"}'},
+        ),
+        ScoreBreakdown(lexical_score, lexical_score, 1.0, 1.0, 0.90),
+    )
+    competitor = RankedCandidate(
+        Candidate(
+            text="turn off kitchen light",
+            intent_name="HassTurnOff",
+            language="en",
+            metadata={"slots": '{"name":"kitchen light"}'},
+        ),
+        ScoreBreakdown(0.99, 0.99, 0.99, 0.99, 0.89),
+    )
+
+    decision = evaluate_confidence_gates((top, competitor), min_margin=DEFAULT_MIN_MARGIN)
+
+    assert decision.accepted_candidate is top
+    assert decision.margin_policy == expected_policy
+    assert decision.required_margin == required_margin
+    assert decision.opposing_action_competition
+    assert decision.relaxation_used
+
+
+def test_base_margin_accepts_equal_boundary_and_rejects_immediately_below() -> None:
+    """Use an inclusive required-margin boundary with explicit evidence."""
+    top = RankedCandidate(
+        Candidate(
+            text="query living room state",
+            intent_name="HassGetState",
+            language="en",
+            metadata={"slots": '{"name":"living room"}'},
+        ),
+        ScoreBreakdown(0.75, 0.75, 0.75, 0.50, 0.75),
+    )
+    equal = RankedCandidate(
+        Candidate(
+            text="query living room weather",
+            intent_name="HassGetWeather",
+            language="en",
+            metadata={"slots": '{"name":"living room"}'},
+        ),
+        ScoreBreakdown(0.70, 0.70, 0.70, 0.50, 0.70),
+    )
+    below = RankedCandidate(
+        equal.candidate,
+        ScoreBreakdown(0.700001, 0.700001, 0.700001, 0.50, 0.700001),
+    )
+
+    equal_decision = evaluate_confidence_gates((top, equal), min_margin=0.05)
+    below_decision = evaluate_confidence_gates((top, below), min_margin=0.05)
+
+    assert equal_decision.accepted
+    assert equal_decision.margin_policy == "base_margin"
+    assert equal_decision.required_margin == 0.05
+    assert not below_decision.accepted
+    assert below_decision.rejection_reason is FallbackReason.LOW_MARGIN
 
 
 def test_clear_ranking_caches() -> None:
@@ -3342,6 +4613,7 @@ def test_ranking_internal_helpers() -> None:
         slot_tokens_by_index={},
         min_confidence=0.5,
         normalized_context={},
+        explicit_context_keys=frozenset(),
         wildcard_passed_set=frozenset(),
         rehydrated_cache={},
         intent_score_cache={},
@@ -3402,6 +4674,7 @@ def test_ranking_internal_helpers() -> None:
         slot_tokens_by_index={},
         min_confidence=0.5,
         normalized_context={},
+        explicit_context_keys=frozenset(),
         wildcard_passed_set=frozenset(),
         rehydrated_cache={},
         intent_score_cache={},

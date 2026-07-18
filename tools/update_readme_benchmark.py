@@ -1,11 +1,8 @@
-"""Script to automatically update benchmark performance in README.md and README.vi.md.
-
-Reads metrics from benchmark/performance_benchmark_report.json and replaces
-marked overall and per-language tables/texts in the README files.
-"""
+"""Update README benchmark tables from the authoritative managed-live report."""
 
 from __future__ import annotations
 
+import argparse
 import re
 import sys
 import traceback
@@ -14,11 +11,22 @@ from typing import Any, Final
 
 import orjson
 
+try:
+    from .benchmark import BENCHMARK_SCHEMA_VERSION
+except ImportError:
+    from benchmark import BENCHMARK_SCHEMA_VERSION
+
 REPO_ROOT: Final[Path] = Path(__file__).resolve().parent.parent
-REPORT_JSON_PATH: Final[Path] = REPO_ROOT / "benchmark" / "performance_benchmark_report.json"
+REPORT_JSON_PATH: Final[Path] = REPO_ROOT / "scratch" / "benchmark" / "managed_live_report.json"
 README_EN_PATH: Final[Path] = REPO_ROOT / "README.md"
 README_VI_PATH: Final[Path] = REPO_ROOT / "README.vi.md"
-BENCHMARK_DEPENDENCIES: Final[tuple[str, ...]] = ("homeassistant", "home-assistant-intents")
+BENCHMARK_DEPENDENCIES: Final[tuple[str, ...]] = (
+    "hassil",
+    "home-assistant-intents",
+    "homeassistant",
+    "python",
+)
+MANAGED_REPORT_SCHEMA_VERSION: Final[int] = BENCHMARK_SCHEMA_VERSION
 
 OVERALL_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"(<!-- BENCHMARK_OVERALL_START -->)(.*?)(<!-- BENCHMARK_OVERALL_END -->)", re.DOTALL
@@ -112,6 +120,22 @@ def _load_report(report_path: Path) -> dict[str, Any]:
 
     if not isinstance(data, dict):
         raise ValueError("Report file must contain a top-level JSON object")
+    if data.get("report_schema_version") != MANAGED_REPORT_SCHEMA_VERSION:
+        raise ValueError(
+            "Report schema is not the current paired managed-live schema: "
+            f"{data.get('report_schema_version')!r}"
+        )
+    if (
+        data.get("authoritative") is not True
+        or data.get("benchmark_mode") != "managed_live"
+        or data.get("execution_tier") != "managed_live"
+    ):
+        raise ValueError("Report is not an authoritative managed-live report")
+    settings = data.get("settings")
+    if not isinstance(settings, dict) or settings.get("hassil_baseline") != (
+        "paired_original_query_to_live_default_agent"
+    ):
+        raise ValueError("Report does not contain the paired direct-HassIL baseline")
 
     return data
 
@@ -155,7 +179,8 @@ def _get_languages(report: dict[str, Any]) -> list[str]:
     Raises:
         KeyError: If the 'languages' section is missing or empty.
     """
-    languages_section = report.get("languages")
+    breakdowns = report.get("breakdowns")
+    languages_section = breakdowns.get("languages") if isinstance(breakdowns, dict) else None
     if not isinstance(languages_section, dict) or not languages_section:
         raise KeyError("Missing or empty 'languages' section in report")
 
@@ -169,11 +194,20 @@ def _get_languages(report: dict[str, Any]) -> list[str]:
 
 def _get_dependency_versions(report: dict[str, Any]) -> dict[str, str]:
     """Return benchmark dependency versions from the report metadata."""
-    raw_versions = report.get("dependency_versions", {})
-    versions = raw_versions if isinstance(raw_versions, dict) else {}
+    environment = report.get("environment")
+    if not isinstance(environment, dict):
+        raise KeyError("Managed-live report environment is missing")
+    raw_dependencies = environment.get("dependencies")
+    dependencies = raw_dependencies if isinstance(raw_dependencies, dict) else {}
     result: dict[str, str] = {}
     for package_name in BENCHMARK_DEPENDENCIES:
-        value = versions.get(package_name)
+        if package_name == "homeassistant":
+            value = environment.get("homeassistant_version")
+        elif package_name == "python":
+            value = environment.get("python_version")
+        else:
+            package = dependencies.get(package_name)
+            value = package.get("version") if isinstance(package, dict) else None
         result[package_name] = value if isinstance(value, str) and value.strip() else "not recorded"
     return result
 
@@ -182,14 +216,20 @@ def _generate_versions_note(report: dict[str, Any], is_vi: bool) -> str:
     """Generate a localized dependency-version note for benchmark results."""
     versions = _get_dependency_versions(report)
     ha_version = versions["homeassistant"]
+    python_version = versions["python"]
+    hassil_version = versions["hassil"]
     intents_version = versions["home-assistant-intents"]
     if is_vi:
         return (
-            f"> Phiên bản phụ thuộc benchmark: `homeassistant` {ha_version}, "
+            f"> Phiên bản phụ thuộc benchmark: `Python` {python_version}, "
+            f"`homeassistant` {ha_version}, "
+            f"`hassil` {hassil_version}, "
             f"`home-assistant-intents` {intents_version}."
         )
     return (
-        f"> Benchmark dependency versions: `homeassistant` {ha_version}, "
+        f"> Benchmark dependency versions: `Python` {python_version}, "
+        f"`homeassistant` {ha_version}, "
+        f"`hassil` {hassil_version}, "
         f"`home-assistant-intents` {intents_version}."
     )
 
@@ -204,47 +244,65 @@ def _generate_overall_section(report: dict[str, Any], is_vi: bool) -> str:
     Returns:
         The formatted markdown snippet for the overall results.
     """
-    overall_summary = report.get("overall", {}).get("summary", {})
-    hassil_stats = overall_summary.get("hassil", {}).get("overall", {})
-    lexical_stats = overall_summary.get("lexical", {}).get("overall", {})
+    summary = report.get("summary")
+    if not isinstance(summary, dict):
+        raise KeyError("Managed-live report summary is missing")
+    accuracy = _get_metric_pct(summary, "canonicalizer_accuracy_pct")
+    hassil_accuracy = _get_metric_pct(summary, "hassil_baseline_accuracy_pct")
+    uplift = _get_metric_pct(summary, "accuracy_uplift_pp")
+    mismatch = _get_metric_pct(summary, "mismatch_rate_pct")
+    fallback = _get_metric_pct(summary, "fallback_rate_pct")
+    latency = summary.get("latency_ms")
+    if not isinstance(latency, dict):
+        raise KeyError("Managed-live latency summary is missing")
+    p50 = _get_metric_pct(latency, "median")
+    p95 = _get_metric_pct(latency, "p95")
 
-    hass_acc = _get_metric_pct(hassil_stats, "intent_slot_accuracy")
-    hass_mis = _get_metric_pct(hassil_stats, "mismatch_rate")
-    hass_fall = _get_metric_pct(hassil_stats, "fallback_rate")
-
-    lex_acc = _get_metric_pct(lexical_stats, "intent_slot_accuracy")
-    lex_mis = _get_metric_pct(lexical_stats, "mismatch_rate")
-    lex_fall = _get_metric_pct(lexical_stats, "fallback_rate")
-
-    hass_err = hass_mis + hass_fall
-    lex_err = lex_mis + lex_fall
-
-    # Common data rows, cell values identical for both languages
     data_rows: list[tuple[str, ...]] = [
-        ("`hassil`", f"{hass_acc:.1f}%", f"{hass_mis:.1f}%", f"{hass_fall:.1f}%"),
-        ("`lexical`", f"**{lex_acc:.1f}%**", f"**{lex_mis:.1f}%**", f"**{lex_fall:.1f}%**"),
+        (
+            "`managed_live`",
+            f"**{accuracy:.1f}%**",
+            f"{hassil_accuracy:.1f}%",
+            f"{uplift:+.1f}",
+            str(summary["recovered_case_count"]),
+            str(summary["regressed_case_count"]),
+            f"{mismatch:.1f}%",
+            f"{fallback:.1f}%",
+            f"{p50:.1f}",
+            f"{p95:.1f}",
+        )
     ]
 
     if is_vi:
-        headers = ("Chế độ", "Đúng Intent/Slot", "Nhận diện sai (Mismatch)", "Dự phòng (Fallback)")
-        summary_sentence = (
-            f"> Độ chính xác nhận diện Intent/Slot tăng từ "
-            f"**{hass_acc:.1f}% lên {lex_acc:.1f}%**. "
-            f"Tổng tỷ lệ lỗi (nhận diện sai + chuyển sang dự phòng) "
-            f"giảm mạnh từ **{hass_err:.1f}% xuống còn {lex_err:.1f}%**."
+        headers = (
+            "Chế độ",
+            "Canonicalizer",
+            "HassIL trực tiếp",
+            "Tăng điểm %",
+            "Khôi phục",
+            "Hồi quy",
+            "Nhận diện sai",
+            "Dự phòng",
+            "P50 ms",
+            "P95 ms",
         )
     else:
-        headers = ("Mode", "Intent/Slot", "Mismatch", "Fallback")
-        summary_sentence = (
-            f"> Intent/slot accuracy jumped from "
-            f"**{hass_acc:.1f}% to {lex_acc:.1f}%**. "
-            f"The combined error rate (mismatch + fallback) "
-            f"dropped from **{hass_err:.1f}% to {lex_err:.1f}%**."
+        headers = (
+            "Mode",
+            "Canonicalizer",
+            "Direct HassIL",
+            "Uplift pp",
+            "Recovered",
+            "Regressed",
+            "Mismatch",
+            "Fallback",
+            "P50 ms",
+            "P95 ms",
         )
 
-    table = _render_md_table(headers, data_rows, alignments="<>")
+    table = _render_md_table(headers, data_rows, alignments="<>>>>>>>>>")
     versions_note = _generate_versions_note(report, is_vi=is_vi)
-    return f"\n\n{versions_note}\n\n{table}\n\n{summary_sentence}\n\n"
+    return f"\n\n{versions_note}\n\n{table}\n\n"
 
 
 def _generate_langs_section(report: dict[str, Any], is_vi: bool) -> str:
@@ -260,53 +318,52 @@ def _generate_langs_section(report: dict[str, Any], is_vi: bool) -> str:
     if is_vi:
         headers = (
             "Ngôn ngữ",
-            "Chế độ",
-            "Đúng Intent/Slot",
-            "Nhận diện sai (Mismatch)",
-            "Dự phòng (Fallback)",
+            "Canonicalizer",
+            "HassIL trực tiếp",
+            "Tăng điểm %",
+            "Khôi phục",
+            "Hồi quy",
+            "Nhận diện sai",
+            "Dự phòng",
+            "P50 ms",
+            "P95 ms",
         )
     else:
-        headers = ("Language", "Mode", "Intent/Slot", "Mismatch", "Fallback")
+        headers = (
+            "Language",
+            "Canonicalizer",
+            "Direct HassIL",
+            "Uplift pp",
+            "Recovered",
+            "Regressed",
+            "Mismatch",
+            "Fallback",
+            "P50 ms",
+            "P95 ms",
+        )
 
     data_rows: list[tuple[str, ...]] = []
 
     languages = _get_languages(report)
     for lang in languages:
-        lang_data = report.get("languages", {}).get(lang, {})
-        lang_summary = lang_data.get("summary", {})
-
-        hassil_stats = lang_summary.get("hassil", {}).get("overall", {})
-        lexical_stats = lang_summary.get("lexical", {}).get("overall", {})
-
-        hass_acc = _get_metric_pct(hassil_stats, "intent_slot_accuracy")
-        hass_mis = _get_metric_pct(hassil_stats, "mismatch_rate")
-        hass_fall = _get_metric_pct(hassil_stats, "fallback_rate")
-
-        lex_acc = _get_metric_pct(lexical_stats, "intent_slot_accuracy")
-        lex_mis = _get_metric_pct(lexical_stats, "mismatch_rate")
-        lex_fall = _get_metric_pct(lexical_stats, "fallback_rate")
-
-        lang_upper = lang.upper()
-
-        data_rows.extend(
+        breakdowns = report["breakdowns"]
+        lang_data = breakdowns["languages"][lang]
+        latency = lang_data["latency_ms"]
+        data_rows.append(
             (
-                (
-                    lang_upper,
-                    "`hassil`",
-                    f"{hass_acc:.1f}%",
-                    f"{hass_mis:.1f}%",
-                    f"{hass_fall:.1f}%",
-                ),
-                (
-                    lang_upper,
-                    "`lexical`",
-                    f"**{lex_acc:.1f}%**",
-                    f"**{lex_mis:.1f}%**",
-                    f"**{lex_fall:.1f}%**",
-                ),
+                lang.upper(),
+                f"**{_get_metric_pct(lang_data, 'canonicalizer_accuracy_pct'):.1f}%**",
+                f"{_get_metric_pct(lang_data, 'hassil_baseline_accuracy_pct'):.1f}%",
+                f"{_get_metric_pct(lang_data, 'accuracy_uplift_pp'):+.1f}",
+                str(lang_data["recovered_case_count"]),
+                str(lang_data["regressed_case_count"]),
+                f"{_get_metric_pct(lang_data, 'mismatch_rate_pct'):.1f}%",
+                f"{_get_metric_pct(lang_data, 'fallback_rate_pct'):.1f}%",
+                f"{_get_metric_pct(latency, 'median'):.1f}",
+                f"{_get_metric_pct(latency, 'p95'):.1f}",
             )
         )
-    table = _render_md_table(headers, data_rows, alignments="<<>")
+    table = _render_md_table(headers, data_rows, alignments="<>>>>>>>>>")
     return "\n\n" + table + "\n\n"
 
 
@@ -345,8 +402,19 @@ def _update_file(file_path: Path, overall_content: str, langs_content: str) -> N
 
 def main() -> None:
     """Main function to run the benchmark update tool."""
+    parser = argparse.ArgumentParser(
+        description="Update README benchmark tables from a managed-live JSON report"
+    )
+    parser.add_argument(
+        "report",
+        nargs="?",
+        type=Path,
+        default=REPORT_JSON_PATH,
+        help="Managed-live JSON report (default: scratch/benchmark/managed_live_report.json)",
+    )
+    args = parser.parse_args()
     try:
-        report = _load_report(REPORT_JSON_PATH)
+        report = _load_report(args.report)
 
         _update_readme_benchmark(report, False, README_EN_PATH)
         _update_readme_benchmark(report, True, README_VI_PATH)

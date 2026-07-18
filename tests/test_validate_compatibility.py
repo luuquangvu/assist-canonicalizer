@@ -7,14 +7,14 @@ import pytest
 
 from tools import validate_compatibility
 
-PINNED_INTENTS = {"home-assistant-intents": "2026.6.1"}
+TEST_DEP_VERSIONS = {"home-assistant-intents": "2026.6.1"}
 
 
-def test_stale_pinned_deps_ignore_unpinned_harness_versions(
+def test_stale_deps_ignore_unpinned_harness_versions(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Only matrix-pinned dependencies should trigger targeted refreshes."""
+    """Only tracked dependencies should trigger targeted refreshes."""
 
     def fake_versions(_python_bin: Path, _pinned_versions: dict[str, str]) -> dict[str, str]:
         return {
@@ -31,9 +31,9 @@ def test_stale_pinned_deps_ignore_unpinned_harness_versions(
         fake_versions,
     )
 
-    refresh_specs = validate_compatibility._stale_pinned_test_deps(
+    refresh_specs = validate_compatibility._stale_test_deps(
         Path("python"),
-        PINNED_INTENTS,
+        TEST_DEP_VERSIONS,
     )
 
     assert refresh_specs == ("home-assistant-intents==2026.6.1",)
@@ -53,6 +53,10 @@ def test_missing_required_deps_request_full_install(
             "hassil": "3.3.0",
             "home-assistant-intents": "2026.6.1",
             "pytest": "8.3.4",
+            "pytest-asyncio": "1.3.0",
+            "pytest-cov": "7.0.0",
+            "pytest-timeout": "2.4.0",
+            "pytest-xdist": "3.8.0",
             "rapidfuzz": "3.14.3",
         }
 
@@ -64,22 +68,26 @@ def test_missing_required_deps_request_full_install(
 
     missing_deps = validate_compatibility._missing_required_test_deps(
         Path("python"),
-        PINNED_INTENTS,
+        TEST_DEP_VERSIONS,
     )
 
     assert missing_deps == ("pytest-homeassistant-custom-component",)
 
 
-def test_missing_pinned_dep_uses_targeted_refresh(
+def test_missing_dep_uses_targeted_refresh(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A missing pinned package should not force a full harness reinstall."""
+    """A missing package should not force a full harness reinstall."""
 
     def fake_versions(_python_bin: Path, _pinned_versions: dict[str, str]) -> dict[str, str]:
         return {
             "hassil": "3.3.0",
             "pytest": "8.3.4",
+            "pytest-asyncio": "1.3.0",
+            "pytest-cov": "7.0.0",
             "pytest-homeassistant-custom-component": "0.13.205",
+            "pytest-timeout": "2.4.0",
+            "pytest-xdist": "3.8.0",
             "rapidfuzz": "3.14.3",
         }
 
@@ -92,18 +100,18 @@ def test_missing_pinned_dep_uses_targeted_refresh(
     assert (
         validate_compatibility._missing_required_test_deps(
             Path("python"),
-            PINNED_INTENTS,
+            TEST_DEP_VERSIONS,
         )
         == ()
     )
-    assert validate_compatibility._stale_pinned_test_deps(
+    assert validate_compatibility._stale_test_deps(
         Path("python"),
-        PINNED_INTENTS,
+        TEST_DEP_VERSIONS,
     ) == ("home-assistant-intents==2026.6.1",)
 
 
-def test_required_deps_use_exact_matrix_intents_pin() -> None:
-    """Pinned home-assistant-intents should be installed at the exact resolved version."""
+def test_required_deps_use_exact_intents_version() -> None:
+    """home-assistant-intents should be installed at the exact resolved version."""
     deps = validate_compatibility._required_test_deps({"home-assistant-intents": "2024.12.4"})
 
     assert "home-assistant-intents==2024.12.4" in deps
@@ -163,7 +171,7 @@ def test_dependency_marker_mismatch_forces_reinstall(
     )
 
     output = capsys.readouterr().out
-    assert "dependency pin marker changed" in output
+    assert "dependency marker changed" in output
 
 
 def test_install_dependencies_resets_before_marker_reinstall(
@@ -196,7 +204,7 @@ def test_install_dependencies_resets_before_marker_reinstall(
         "2026.6.0",
         True,
         (),
-        PINNED_INTENTS,
+        TEST_DEP_VERSIONS,
         py_ver="3.14",
         reset_before_install=True,
     )
@@ -227,8 +235,13 @@ def test_run_tests_resets_before_forced_reinstall(
     monkeypatch.setattr(validate_compatibility, "_ensure_venv", lambda _path, _py: False)
     monkeypatch.setattr(
         validate_compatibility,
-        "_resolve_pinned_test_dependency_versions",
-        lambda _ha, _deps: PINNED_INTENTS,
+        "_verify_python_version_compatibility",
+        lambda _python, _ha: None,
+    )
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_resolve_test_dependency_versions",
+        lambda _ha: TEST_DEP_VERSIONS,
     )
     monkeypatch.setattr(validate_compatibility, "_get_installed_ha_version", lambda _py: "2026.6.0")
     monkeypatch.setattr(
@@ -247,8 +260,8 @@ def test_run_tests_resets_before_forced_reinstall(
         _python_bin: Path,
         _ha_ver: str,
         _needs_install: bool,
-        _pinned_refresh_deps: tuple[str, ...],
-        _pinned_test_dependency_versions: dict[str, str],
+        _refresh_deps: tuple[str, ...],
+        _test_dependency_versions: dict[str, str],
         *,
         py_ver: str,
         reset_before_install: bool = False,
@@ -267,7 +280,6 @@ def test_run_tests_resets_before_forced_reinstall(
         "2026.6.0",
         "3.14",
         True,
-        [],
     )
 
     assert success
@@ -294,7 +306,6 @@ def test_run_tests_reports_latest_lookup_error_as_row_failure(
         "latest",
         "3.14",
         False,
-        [],
     )
 
     assert not success
@@ -311,45 +322,6 @@ def test_compatibility_pytest_args_skip_current_intents_marker() -> None:
     ]
 
 
-def test_matrix_pinned_dependency_list_supports_future_packages() -> None:
-    """Matrix pins should support non-Home Assistant packages without code changes."""
-    pinned_versions = validate_compatibility._parse_pinned_test_dependency_versions(
-        [
-            {
-                "package": "example-dependency",
-                "version": "1.2.3",
-            },
-        ]
-    )
-
-    assert pinned_versions == {
-        "example-dependency": "1.2.3",
-    }
-    assert "example-dependency==1.2.3" in validate_compatibility._required_test_deps(
-        pinned_versions
-    )
-
-
-def test_matrix_specific_dependency_packages_do_not_mutate_required_state() -> None:
-    """Keep future package discovery isolated to the matrix row that requested it."""
-    required_before = validate_compatibility._REQUIRED_TEST_DEPS
-
-    with_extra = validate_compatibility._test_dep_packages({"example-dependency": "1.2.3"})
-    without_extra = validate_compatibility._test_dep_packages({})
-
-    assert with_extra == (*required_before, "example-dependency")
-    assert without_extra == required_before
-    assert validate_compatibility._REQUIRED_TEST_DEPS is required_before
-
-
-def test_matrix_pinned_dependency_list_rejects_homeassistant() -> None:
-    """Home Assistant must be constrained only by the matrix ha_version field."""
-    with pytest.raises(ValueError, match="must not pin package 'homeassistant'"):
-        validate_compatibility._parse_pinned_test_dependency_versions(
-            [{"package": "homeassistant", "version": "2026.6.0"}]
-        )
-
-
 def test_test_matrix_loads_matrix_lazily(monkeypatch: pytest.MonkeyPatch) -> None:
     """Compatibility matrix data should be loaded only when the runtime helper is called."""
     monkeypatch.setattr(
@@ -359,7 +331,6 @@ def test_test_matrix_loads_matrix_lazily(monkeypatch: pytest.MonkeyPatch) -> Non
             {
                 "ha_version": "2026.6.0",
                 "python_version": "3.14",
-                "pinned_test_dependencies": [],
             }
         ],
     )
@@ -368,7 +339,6 @@ def test_test_matrix_loads_matrix_lazily(monkeypatch: pytest.MonkeyPatch) -> Non
         {
             "ha_ver": "2026.6.0",
             "python_ver": "3.14",
-            "pinned_test_dependencies": [],
         }
     ]
 
@@ -390,7 +360,6 @@ def test_test_matrix_validates_version_fields(
     entry: dict[str, object] = {
         "ha_version": "2026.6.0",
         "python_version": "3.14",
-        "pinned_test_dependencies": [],
         field_name: field_value,
     }
     monkeypatch.setattr(validate_compatibility, "_load_matrix_data", lambda: [entry])
@@ -408,27 +377,20 @@ def test_main_preserves_duplicate_ha_python_matrix_rows(
         {
             "ha_ver": "2026.6.0",
             "python_ver": "3.14",
-            "pinned_test_dependencies": [
-                {"package": "home-assistant-intents", "version": "2026.6.1"}
-            ],
         },
         {
             "ha_ver": "2026.6.0",
             "python_ver": "3.14",
-            "pinned_test_dependencies": [
-                {"package": "home-assistant-intents", "version": "2026.6.2"}
-            ],
         },
     ]
-    calls: list[tuple[str, str, bool, object]] = []
+    calls: list[tuple[str, str, bool]] = []
 
     def fake_run_tests(
         ha_ver: str,
         py_ver: str,
         reinstall: bool,
-        pinned_test_dependencies: object,
     ) -> tuple[bool, str]:
-        calls.append((ha_ver, py_ver, reinstall, pinned_test_dependencies))
+        calls.append((ha_ver, py_ver, reinstall))
         return True, ha_ver
 
     monkeypatch.setattr(validate_compatibility, "_test_matrix", lambda: matrix)
@@ -475,40 +437,78 @@ def test_parse_requirements_dependency_version_rejects_missing_version_token() -
         )
 
 
-def test_resolve_pinned_test_dependency_versions_uses_ha_requirements_when_unpinned(
+def test_resolve_test_dependency_versions_uses_ha_requirements(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The compatibility runner should derive unpinned intents from the tested HA version."""
+    """The compatibility runner should derive dependencies from the tested HA version."""
     monkeypatch.setattr(
         validate_compatibility,
         "_get_home_assistant_intents_version",
         lambda _ha_ver: "2024.12.4",
     )
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_get_hassil_version",
+        lambda _ha_ver: "2.0.5",
+    )
 
-    assert validate_compatibility._resolve_pinned_test_dependency_versions(
+    assert validate_compatibility._resolve_test_dependency_versions(
         "2024.12.0",
-        [{"package": "example-dependency", "version": "1.2.3"}],
     ) == {
-        "example-dependency": "1.2.3",
         "home-assistant-intents": "2024.12.4",
+        "hassil": "2.0.5",
     }
 
 
-def test_resolve_pinned_test_dependency_versions_prefers_matrix_intents_pin(
+def test_verify_python_version_compatibility_satisfied(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Matrix pins should override any inferred Home Assistant intents version."""
-
-    def fail_fetch(_ha_ver: str) -> str:
-        raise AssertionError("home-assistant-intents should not be fetched when pinned")
-
+    """Satisfied requires-python constraints should complete without error."""
     monkeypatch.setattr(
         validate_compatibility,
-        "_get_home_assistant_intents_version",
-        fail_fetch,
+        "_fetch_remote_text",
+        lambda _url: '{"info": {"requires_python": ">=3.14.0"}}',
     )
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_get_python_interpreter_version",
+        lambda _bin: "3.14.2",
+    )
+    validate_compatibility._verify_python_version_compatibility(Path("python"), "2026.3.0")
 
-    assert validate_compatibility._resolve_pinned_test_dependency_versions(
-        "2024.12.0",
-        [{"package": "home-assistant-intents", "version": "2026.6.1"}],
-    ) == {"home-assistant-intents": "2026.6.1"}
+
+def test_verify_python_version_compatibility_violated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Incompatible Python interpreter versions should raise ValueError."""
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_fetch_remote_text",
+        lambda _url: '{"info": {"requires_python": ">=3.14.2"}}',
+    )
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_get_python_interpreter_version",
+        lambda _bin: "3.14.0",
+    )
+    with pytest.raises(ValueError, match="does not satisfy"):
+        validate_compatibility._verify_python_version_compatibility(Path("python"), "2026.3.0")
+
+
+def test_verify_python_version_compatibility_raises_fetch_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fetch or network failures should fail compatibility verification."""
+
+    def fake_fetch(_url: str) -> str:
+        raise RuntimeError("DNS resolution disabled in tests")
+
+    monkeypatch.setattr(validate_compatibility, "_fetch_remote_text", fake_fetch)
+    with pytest.raises(
+        ValueError,
+        match="Failed to fetch or verify PyPI requires-python",
+    ):
+        validate_compatibility._verify_python_version_compatibility(
+            Path("python"),
+            "2026.3.0",
+        )

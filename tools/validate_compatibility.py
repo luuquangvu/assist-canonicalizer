@@ -19,12 +19,20 @@ import sys
 import urllib.error
 import urllib.request
 import uuid
-from collections.abc import Generator
+from collections.abc import Generator, Sequence
 from pathlib import Path
 from string import ascii_letters, digits
 from typing import Any, TypedDict
 
 import orjson
+from packaging.specifiers import SpecifierSet
+from packaging.version import Version
+
+try:
+    from .validate import normalize_package_name
+except ImportError:
+    from validate import normalize_package_name
+
 
 _REPO_ROOT = str(Path(__file__).resolve().parent.parent)
 
@@ -32,13 +40,18 @@ _VENVS_ROOT = os.path.join(_REPO_ROOT, ".venvs")
 
 _VENV_DEPENDENCY_MARKER = ".assist_canonicalizer_test_dependencies.json"
 
+_HASSIL_PACKAGE = "hassil"
 _INTENTS_PACKAGE = "home-assistant-intents"
 
 _REQUIRED_TEST_DEPS = (
-    "hassil",
+    _HASSIL_PACKAGE,
     _INTENTS_PACKAGE,
     "pytest",
+    "pytest-asyncio",
+    "pytest-cov",
     "pytest-homeassistant-custom-component",
+    "pytest-timeout",
+    "pytest-xdist",
     "rapidfuzz",
 )
 
@@ -50,24 +63,21 @@ _CLEANUP_TIMEOUT_SECONDS = 30
 _COMPATIBILITY_PYTEST_TIMEOUT_SECONDS = 300
 
 _ALNUM_CHARS = ascii_letters + digits
-_SEP_CHAR = "."
 _ALLOWED_VERSION_CHARS = f"{_ALNUM_CHARS}."
 _ALLOWED_PACKAGE_CHARS = f"{_ALNUM_CHARS}._-"
 
 _VERSION_PATTERN = re.compile(rf"^[{_ALNUM_CHARS}]+(?:\.[{_ALNUM_CHARS}]+)*$")
-_PACKAGE_NAME_PATTERN = re.compile(rf"^[{_ALNUM_CHARS}](?:[{_ALNUM_CHARS}._-]*[{_ALNUM_CHARS}])?$")
+_PACKAGE_NAME_PATTERN = re.compile(
+    rf"^(?:[{_ALNUM_CHARS}]|[{_ALNUM_CHARS}][{_ALNUM_CHARS}._-]*[{_ALNUM_CHARS}])$"
+)
 
 _MATRIX_FILE = os.path.join(_REPO_ROOT, "tools", "compatibility_matrix.json")
 
 _PYPI_HA_JSON_URL = "https://pypi.org/pypi/homeassistant/json"
 
-_HA_REQUIREMENTS_ALL_GITHUB_URL_TEMPLATE = (
-    "https://raw.githubusercontent.com/home-assistant/core/{ha_version}/requirements_all.txt"
-)
+_HA_CONSTRAINTS_GITHUB_URL_TEMPLATE = "https://raw.githubusercontent.com/home-assistant/core/{ha_version}/homeassistant/package_constraints.txt"
 
-_HA_REQUIREMENTS_ALL_CDN_URL_TEMPLATE = (
-    "https://cdn.jsdelivr.net/gh/home-assistant/core@{ha_version}/requirements_all.txt"
-)
+_HA_CONSTRAINTS_CDN_URL_TEMPLATE = "https://cdn.jsdelivr.net/gh/home-assistant/core@{ha_version}/homeassistant/package_constraints.txt"
 
 
 class CompatibilityConfig(TypedDict):
@@ -75,69 +85,73 @@ class CompatibilityConfig(TypedDict):
 
     ha_ver: str
     python_ver: str
-    pinned_test_dependencies: object
 
 
 def _expected_required_test_dep_versions(
-    pinned_test_dependency_versions: dict[str, str],
+    test_dependency_versions: dict[str, str],
 ) -> dict[str, str]:
-    """Return explicitly pinned test dependency versions for a compatibility venv."""
-    return dict(pinned_test_dependency_versions)
+    """Return expected required test dependency versions.
+
+    Keys are canonical normalized package names.
+    """
+    return {normalize_package_name(pkg): ver for pkg, ver in test_dependency_versions.items()}
 
 
-def _required_test_deps(pinned_test_dependency_versions: dict[str, str]) -> list[str]:
+def _required_test_deps(test_dependency_versions: dict[str, str]) -> list[str]:
     """Return install specs for required test dependencies."""
     deps: list[str] = []
+    norm_test_deps = {
+        normalize_package_name(pkg): ver for pkg, ver in test_dependency_versions.items()
+    }
     seen: set[str] = set()
     for package in _REQUIRED_TEST_DEPS:
-        seen.add(package)
-        if package in pinned_test_dependency_versions:
-            deps.append(f"{package}=={pinned_test_dependency_versions[package]}")
+        base_name = normalize_package_name(package)
+        seen.add(base_name)
+        if base_name in norm_test_deps:
+            deps.append(f"{package}=={norm_test_deps[base_name]}")
         else:
             deps.append(package)
     deps.extend(
         f"{package}=={version}"
-        for package, version in sorted(pinned_test_dependency_versions.items())
-        if package not in seen
+        for package, version in sorted(test_dependency_versions.items())
+        if normalize_package_name(package) not in seen
     )
     return deps
 
 
 def _dependency_pin_marker_payload(
-    pinned_test_dependency_versions: dict[str, str],
+    test_dependency_versions: dict[str, str],
 ) -> dict[str, dict[str, str]]:
-    """Return the canonical venv marker payload for resolved test dependency pins."""
-    return {
-        "pinned_test_dependency_versions": dict(sorted(pinned_test_dependency_versions.items()))
-    }
+    """Return the canonical venv marker payload for resolved test dependency versions."""
+    return {"test_dependency_versions": dict(sorted(test_dependency_versions.items()))}
 
 
 def _venv_dependency_marker_matches(
     venv_path: Path,
-    pinned_test_dependency_versions: dict[str, str],
+    test_dependency_versions: dict[str, str],
 ) -> bool:
-    """Return whether a compatibility venv was installed with the same resolved pins."""
+    """Return whether a compatibility venv was installed with the same resolved versions."""
     marker_path = venv_path / _VENV_DEPENDENCY_MARKER
     try:
         parsed = orjson.loads(marker_path.read_bytes())
     except (OSError, orjson.JSONDecodeError):
         return False
-    return parsed == _dependency_pin_marker_payload(pinned_test_dependency_versions)
+    return parsed == _dependency_pin_marker_payload(test_dependency_versions)
 
 
 def _dependency_marker_requires_reinstall(
     created_venv: bool,
     venv_path: Path,
-    pinned_test_dependency_versions: dict[str, str],
+    test_dependency_versions: dict[str, str],
 ) -> bool:
-    """Return whether the resolved pin marker requires a full dependency install."""
+    """Return whether the resolved version marker requires a full dependency install."""
     if created_venv or _venv_dependency_marker_matches(
         venv_path,
-        pinned_test_dependency_versions,
+        test_dependency_versions,
     ):
         return False
     print(
-        "STEP_INFO: dependency pin marker changed; reinstalling test dependencies",
+        "STEP_INFO: dependency marker changed; reinstalling test dependencies",
         flush=True,
     )
     return True
@@ -145,13 +159,13 @@ def _dependency_marker_requires_reinstall(
 
 def _write_venv_dependency_marker(
     venv_path: Path,
-    pinned_test_dependency_versions: dict[str, str],
+    test_dependency_versions: dict[str, str],
 ) -> None:
-    """Persist the resolved dependency pin marker for future venv reuse checks."""
+    """Persist the resolved dependency version marker for future venv reuse checks."""
     marker_path = venv_path / _VENV_DEPENDENCY_MARKER
     marker_path.write_bytes(
         orjson.dumps(
-            _dependency_pin_marker_payload(pinned_test_dependency_versions),
+            _dependency_pin_marker_payload(test_dependency_versions),
             option=orjson.OPT_SORT_KEYS,
         )
     )
@@ -160,11 +174,14 @@ def _write_venv_dependency_marker(
 def _parse_requirements_dependency_version(
     requirements_text: str,
     package_name: str,
+    source_name: str = "package_constraints.txt",
 ) -> str:
     """Return the exact package version from a requirements file."""
     package = _validate_package_name("package_name", package_name)
     for raw_line in requirements_text.splitlines():
         line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
         requirement_name, separator, version_text = line.partition("==")
         if separator != "==":
             continue
@@ -180,16 +197,16 @@ def _parse_requirements_dependency_version(
         version_tokens = version_text.split(";", 1)[0].strip().split()
         if not version_tokens:
             raise ValueError(
-                f"Invalid {package!r} requirement in Home Assistant requirements_all.txt; "
+                f"Invalid {package!r} requirement in Home Assistant {source_name}; "
                 "expected a version after '=='."
             )
         version = version_tokens[0]
         return _validate_version_label(f"{package}_version", version)
-    raise ValueError(f"Could not find {package!r} in Home Assistant requirements_all.txt")
+    raise ValueError(f"Could not find {package!r} in Home Assistant {source_name}")
 
 
-def _fetch_requirements_all_text(url: str) -> str:
-    """Fetch and decode requirements_all.txt from a URL.
+def _fetch_remote_text(url: str) -> str:
+    """Fetch and decode remote text from a URL.
 
     Raises urllib.error.URLError, OSError, or UnicodeDecodeError on failure.
     """
@@ -197,50 +214,62 @@ def _fetch_requirements_all_text(url: str) -> str:
         return response.read().decode("utf-8")
 
 
-def _get_home_assistant_intents_version(ha_ver: str) -> str:
-    """Fetch the exact home-assistant-intents version required by a Home Assistant tag.
+def _get_required_package_version(ha_ver: str, package_name: str) -> str:
+    """Fetch the version for a package required by a Home Assistant tag constraints.
 
-    Tries the jsDelivr CDN mirror first to avoid GitHub raw-content 429 rate
-    limits, then falls back to the canonical GitHub URL.
+    Reads exclusively from Home Assistant package_constraints.txt.
     """
     version = _validate_version_label("ha_ver", ha_ver)
-    cdn_url = _HA_REQUIREMENTS_ALL_CDN_URL_TEMPLATE.format(ha_version=version)
-    github_url = _HA_REQUIREMENTS_ALL_GITHUB_URL_TEMPLATE.format(ha_version=version)
+    package = _validate_package_name("package_name", package_name)
+
+    cdn_url = _HA_CONSTRAINTS_CDN_URL_TEMPLATE.format(ha_version=version)
+    github_url = _HA_CONSTRAINTS_GITHUB_URL_TEMPLATE.format(ha_version=version)
     last_err: Exception | None = None
+
     for url in (cdn_url, github_url):
         try:
-            requirements_text = _fetch_requirements_all_text(url)
-            return _parse_requirements_dependency_version(requirements_text, _INTENTS_PACKAGE)
+            requirements_text = _fetch_remote_text(url)
+            return _parse_requirements_dependency_version(requirements_text, package)
         except (urllib.error.URLError, OSError, ValueError) as err:
             last_err = err
+
     raise ValueError(
-        f"Failed to fetch Home Assistant requirements_all.txt for {version} "
-        f"(tried CDN and GitHub): {last_err}"
+        f"Failed to fetch Home Assistant package constraints for {version} "
+        f"and package {package}: {last_err}"
     ) from last_err
 
 
-def _resolve_pinned_test_dependency_versions(
+def _get_home_assistant_intents_version(ha_ver: str) -> str:
+    """Fetch the exact home-assistant-intents version required by a Home Assistant tag."""
+    return _get_required_package_version(ha_ver, _INTENTS_PACKAGE)
+
+
+def _get_hassil_version(ha_ver: str) -> str:
+    """Fetch the exact hassil version required by a Home Assistant tag."""
+    return _get_required_package_version(ha_ver, _HASSIL_PACKAGE)
+
+
+def _resolve_test_dependency_versions(
     ha_ver: str,
-    pinned_test_dependencies: object,
 ) -> dict[str, str]:
-    """Return matrix pins plus the Home Assistant intents version when unpinned."""
-    pinned_versions = _parse_pinned_test_dependency_versions(pinned_test_dependencies)
-    if _INTENTS_PACKAGE not in pinned_versions:
-        pinned_versions[_INTENTS_PACKAGE] = _get_home_assistant_intents_version(ha_ver)
-    return pinned_versions
+    """Return Home Assistant test dependency versions."""
+    return {
+        _INTENTS_PACKAGE: _get_home_assistant_intents_version(ha_ver),
+        _HASSIL_PACKAGE: _get_hassil_version(ha_ver),
+    }
 
 
-def _test_dep_packages(pinned_test_dependency_versions: dict[str, str]) -> tuple[str, ...]:
-    """Return base and matrix-pinned dependency package names."""
-    return tuple(dict.fromkeys((*_REQUIRED_TEST_DEPS, *pinned_test_dependency_versions)))
+def _test_dep_packages(test_dependency_versions: dict[str, str]) -> tuple[str, ...]:
+    """Return base and resolved test dependency package names."""
+    return tuple(dict.fromkeys((*_REQUIRED_TEST_DEPS, *test_dependency_versions)))
 
 
 def _venv_required_test_dep_versions(
     python_bin: Path,
-    pinned_test_dependency_versions: dict[str, str] | None = None,
+    test_dependency_versions: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Return required test dependency versions installed in a compatibility venv."""
-    packages = _test_dep_packages(pinned_test_dependency_versions or {})
+    packages = _test_dep_packages(test_dependency_versions or {})
     code = (
         "import contextlib, importlib.metadata as md, json\n"
         f"packages = {packages!r}\n"
@@ -277,72 +306,75 @@ def _venv_required_test_dep_versions(
         "            versions[package] = md.version(package)\n"
         "print(json.dumps(versions, sort_keys=True))\n"
     )
-    result = subprocess.run(
-        [
-            "uv",
-            "--no-config",
-            "run",
-            "--no-project",
-            "--python",
-            str(python_bin),
-            "python",
-            "-c",
-            code,
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-        cwd=_REPO_ROOT,
-        timeout=_COMPATIBILITY_METADATA_PROBE_TIMEOUT_SECONDS,
-    )
-    parsed = orjson.loads(result.stdout)
-    if not isinstance(parsed, dict):
+    try:
+        result = subprocess.run(
+            [
+                "uv",
+                "--no-config",
+                "run",
+                "--no-project",
+                "--python",
+                str(python_bin),
+                "python",
+                "-c",
+                code,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd=_REPO_ROOT,
+            timeout=_COMPATIBILITY_METADATA_PROBE_TIMEOUT_SECONDS,
+        )
+        parsed = orjson.loads(result.stdout)
+        if not isinstance(parsed, dict):
+            return {}
+        return {
+            normalize_package_name(str(package)): str(version)
+            for package, version in parsed.items()
+        }
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        orjson.JSONDecodeError,
+        OSError,
+    ) as err:
+        print(f"STEP_INFO: Failed to probe venv metadata for {python_bin}: {err!r}", flush=True)
+        if isinstance(err, subprocess.CalledProcessError):
+            if err.stdout:
+                print(f"STEP_INFO: probe stdout: {err.stdout.strip()}", flush=True)
+            if err.stderr:
+                print(f"STEP_INFO: probe stderr: {err.stderr.strip()}", flush=True)
         return {}
-    return {str(package): str(version) for package, version in parsed.items()}
 
 
 def _missing_required_test_deps(
     python_bin: Path,
-    pinned_test_dependency_versions: dict[str, str],
+    test_dependency_versions: dict[str, str],
 ) -> tuple[str, ...]:
-    """Return required test dependency names that are absent from a compatibility venv."""
-    try:
-        installed = _venv_required_test_dep_versions(python_bin, pinned_test_dependency_versions)
-    except (
-        subprocess.CalledProcessError,
-        subprocess.TimeoutExpired,
-        orjson.JSONDecodeError,
-        OSError,
-    ):
-        return tuple(
-            package
-            for package in _REQUIRED_TEST_DEPS
-            if package not in pinned_test_dependency_versions
-        )
+    """Return required test dependency names that are absent from a compatibility venv.
+
+    Note: Checks unpinned required test dependencies. Required dependencies that are
+    pinned in test_dependency_versions are validated for version drift by _stale_test_deps.
+    """
+    installed = _venv_required_test_dep_versions(python_bin, test_dependency_versions)
+    norm_test_deps = {normalize_package_name(p): v for p, v in test_dependency_versions.items()}
     return tuple(
         package
         for package in _REQUIRED_TEST_DEPS
-        if package not in pinned_test_dependency_versions and package not in installed
+        if normalize_package_name(package) not in norm_test_deps
+        and normalize_package_name(package) not in installed
     )
 
 
-def _stale_pinned_test_deps(
+def _stale_test_deps(
     python_bin: Path,
-    pinned_test_dependency_versions: dict[str, str],
+    test_dependency_versions: dict[str, str],
 ) -> tuple[str, ...]:
-    """Return pinned test dependency install specs that drifted from the matrix."""
-    expected = _expected_required_test_dep_versions(pinned_test_dependency_versions)
+    """Return test dependency install specs that drifted from required versions."""
+    expected = _expected_required_test_dep_versions(test_dependency_versions)
     if not expected:
         return ()
-    try:
-        installed = _venv_required_test_dep_versions(python_bin, pinned_test_dependency_versions)
-    except (
-        subprocess.CalledProcessError,
-        subprocess.TimeoutExpired,
-        orjson.JSONDecodeError,
-        OSError,
-    ):
-        return tuple(f"{package}=={version}" for package, version in expected.items())
+    installed = _venv_required_test_dep_versions(python_bin, test_dependency_versions)
 
     stale = {
         package: (installed.get(package), expected_version)
@@ -354,7 +386,7 @@ def _stale_pinned_test_deps(
             f"{package} {old or 'missing'} -> {new}"
             for package, (old, new) in sorted(stale.items())
         )
-        print(f"STEP_INFO: refreshing pinned test dependencies: {details}", flush=True)
+        print(f"STEP_INFO: refreshing test dependencies: {details}", flush=True)
     return tuple(f"{package}=={version}" for package, (_old, version) in sorted(stale.items()))
 
 
@@ -397,7 +429,6 @@ def _test_matrix() -> list[CompatibilityConfig]:
             CompatibilityConfig(
                 ha_ver=ha_ver,
                 python_ver=py_ver,
-                pinned_test_dependencies=entry.get("pinned_test_dependencies", []),
             )
         )
     return entries
@@ -408,11 +439,6 @@ def _require_str_field(label_name: str, value: object) -> str:
     if not isinstance(value, str):
         raise ValueError(f"Invalid {label_name} value {value!r}; expected a string.")
     return value
-
-
-def _normalize_package_name(package_name: str) -> str:
-    """Normalize a package name to a canonical form."""
-    return re.sub(r"[._-]+", "-", package_name).lower()
 
 
 def _validate_version_label(label_name: str, label_value: str) -> str:
@@ -483,45 +509,7 @@ def _validate_package_name(label_name: str, package_name: object) -> str:
         safe_chars.append(_ALLOWED_PACKAGE_CHARS[idx])
 
     safe_val = "".join(safe_chars)
-    return _normalize_package_name(os.path.basename(safe_val))
-
-
-def _parse_pinned_test_dependency_versions(
-    pinned_test_dependencies: object,
-) -> dict[str, str]:
-    """Return package version pins from a compatibility matrix dependency list."""
-    if pinned_test_dependencies is None:
-        return {}
-    if not isinstance(pinned_test_dependencies, list):
-        raise ValueError("pinned_test_dependencies must be a list")
-
-    versions: dict[str, str] = {}
-    for index, dependency in enumerate(pinned_test_dependencies):
-        if not isinstance(dependency, dict):
-            raise ValueError(f"pinned_test_dependencies[{index}] must be an object")
-        package = _validate_package_name(
-            f"pinned_test_dependencies[{index}].package",
-            dependency.get("package"),
-        )
-        if package == "homeassistant":
-            raise ValueError(
-                "pinned_test_dependencies entries must not pin package "
-                "'homeassistant'; use ha_version instead."
-            )
-        version_value = dependency.get("version")
-        if not isinstance(version_value, str):
-            raise ValueError(
-                f"Invalid pinned_test_dependencies[{index}].version value "
-                f"{version_value!r}; expected a string."
-            )
-        version = _validate_version_label(
-            f"pinned_test_dependencies[{index}].version",
-            version_value,
-        )
-        if package in versions:
-            raise ValueError(f"Duplicate pinned test dependency {package!r}")
-        versions[package] = version
-    return versions
+    return normalize_package_name(os.path.basename(safe_val))
 
 
 def _ensure_within_root(root_path: str, candidate_path: str) -> str:
@@ -603,25 +591,42 @@ def _determine_dependency_actions(
     reinstall: bool,
     created_venv: bool,
     python_bin: Path,
-    pinned_test_dependency_versions: dict[str, str],
+    test_dependency_versions: dict[str, str],
 ) -> tuple[bool, tuple[str, ...]]:
-    """Determine whether dependencies need a full install or just pinned refreshes."""
+    """Determine whether dependencies need a full install or just refreshes."""
     needs_install = reinstall or created_venv
-    pinned_refresh_deps: tuple[str, ...] = ()
+    refresh_deps: tuple[str, ...] = ()
     if not needs_install:
         if missing_deps := _missing_required_test_deps(
             python_bin,
-            pinned_test_dependency_versions,
+            test_dependency_versions,
         ):
             details = ", ".join(sorted(missing_deps))
             print(f"STEP_INFO: installing missing test dependencies: {details}", flush=True)
             needs_install = True
         else:
-            pinned_refresh_deps = _stale_pinned_test_deps(
+            refresh_deps = _stale_test_deps(
                 python_bin,
-                pinned_test_dependency_versions,
+                test_dependency_versions,
             )
-    return needs_install, pinned_refresh_deps
+    return needs_install, refresh_deps
+
+
+def _remove_venv_dir(venv_path: Path) -> None:
+    """Safely remove a virtual environment directory."""
+    if not venv_path.exists():
+        return
+    try:
+        shutil.rmtree(venv_path)
+    except OSError as err:
+        raise RuntimeError(
+            f"Failed to remove virtual environment directory at {venv_path}: {err!r}"
+        ) from err
+
+    if venv_path.exists():
+        raise RuntimeError(
+            f"Virtual environment directory at {venv_path} still exists after removal."
+        )
 
 
 def _ensure_venv(venv_path: Path, py_ver: str) -> bool:
@@ -629,6 +634,9 @@ def _ensure_venv(venv_path: Path, py_ver: str) -> bool:
 
     Returns:
         True if a new virtual environment was created, False otherwise.
+
+    Raises:
+        RuntimeError: If virtual environment creation succeeded but python binary is missing.
     """
     python_bin = venv_path / "bin" / "python"
     pytest_bin = venv_path / "bin" / "pytest"
@@ -636,7 +644,7 @@ def _ensure_venv(venv_path: Path, py_ver: str) -> bool:
         return False
     if venv_path.exists():
         print(f"STEP_INFO: Re-creating incomplete virtual environment at {venv_path}", flush=True)
-        shutil.rmtree(venv_path, ignore_errors=True)
+        _remove_venv_dir(venv_path)
     print(f"STEP_START: uv venv {venv_path} (Python {py_ver})", flush=True)
     subprocess.run(
         [
@@ -655,16 +663,20 @@ def _ensure_venv(venv_path: Path, py_ver: str) -> bool:
         cwd=_REPO_ROOT,
         timeout=_VENV_CREATE_TIMEOUT_SECONDS,
     )
+    if not python_bin.exists():
+        raise RuntimeError(
+            f"Failed to create virtual environment: python binary missing at {python_bin}"
+        )
     print(f"STEP_OK: uv venv {venv_path} (Python {py_ver})", flush=True)
     return True
 
 
-def _reset_venv(venv_path: Path, py_ver: str) -> None:
+def _reset_venv(venv_path: Path, py_ver: str) -> bool:
     """Remove and recreate a compatibility virtual environment."""
     if venv_path.exists():
         print(f"STEP_INFO: Resetting virtual environment at {venv_path}", flush=True)
-        shutil.rmtree(venv_path, ignore_errors=True)
-    _ensure_venv(venv_path, py_ver)
+        _remove_venv_dir(venv_path)
+    return _ensure_venv(venv_path, py_ver)
 
 
 def _install_dependencies(
@@ -672,8 +684,8 @@ def _install_dependencies(
     python_bin: Path,
     ha_ver_to_install: str,
     needs_install: bool,
-    pinned_refresh_deps: tuple[str, ...],
-    pinned_test_dependency_versions: dict[str, str],
+    refresh_deps: tuple[str, ...],
+    test_dependency_versions: dict[str, str],
     *,
     py_ver: str,
     reset_before_install: bool = False,
@@ -682,7 +694,7 @@ def _install_dependencies(
     if needs_install:
         if reset_before_install:
             _reset_venv(venv_path, py_ver)
-        required_test_deps = _required_test_deps(pinned_test_dependency_versions)
+        required_test_deps = _required_test_deps(test_dependency_versions)
         ha_spec = f"homeassistant=={ha_ver_to_install}"
         print(f"STEP_START: uv pip install {ha_spec}", flush=True)
         with _overrides_file(ha_ver_to_install) as overrides_path:
@@ -708,8 +720,8 @@ def _install_dependencies(
             )
         print(f"STEP_OK: uv pip install {ha_spec}", flush=True)
 
-    elif pinned_refresh_deps:
-        refresh_label = " ".join(pinned_refresh_deps)
+    elif refresh_deps:
+        refresh_label = " ".join(refresh_deps)
         print(f"STEP_START: uv pip install {refresh_label}", flush=True)
         with _overrides_file(ha_ver_to_install) as overrides_path:
             subprocess.run(
@@ -723,7 +735,7 @@ def _install_dependencies(
                     overrides_path,
                     "--python",
                     python_bin,
-                    *pinned_refresh_deps,
+                    *refresh_deps,
                 ],
                 check=True,
                 capture_output=True,
@@ -733,7 +745,8 @@ def _install_dependencies(
             )
         print(f"STEP_OK: uv pip install {refresh_label}", flush=True)
 
-    if needs_install or pinned_refresh_deps:
+    if needs_install or refresh_deps:
+        _write_venv_dependency_marker(venv_path, test_dependency_versions)
         print("STEP_START: cleanup __pycache__", flush=True)
         subprocess.run(
             [
@@ -756,7 +769,6 @@ def _install_dependencies(
             timeout=_CLEANUP_TIMEOUT_SECONDS,
         )
         print("STEP_OK: cleanup __pycache__", flush=True)
-        _write_venv_dependency_marker(venv_path, pinned_test_dependency_versions)
 
 
 def _get_installed_ha_version(python_bin: Path) -> str:
@@ -778,7 +790,7 @@ def _get_installed_ha_version(python_bin: Path) -> str:
     return actual_ver
 
 
-def _run_pytest(python_bin: Path, ha_ver_display: str, pytest_args: list[str]) -> None:
+def _run_pytest(python_bin: Path, ha_ver_display: str, pytest_args: Sequence[str]) -> None:
     """Run pytest inside the virtual environment."""
     env = os.environ.copy()
     env["PYTHONPATH"] = _REPO_ROOT
@@ -806,17 +818,67 @@ def _run_pytest(python_bin: Path, ha_ver_display: str, pytest_args: list[str]) -
 
 def _prepare_version_and_deps(
     ha_ver: str,
-    pinned_test_dependencies: object,
 ) -> tuple[str, dict[str, str]]:
-    """Resolve target HA version and retrieve pinned test dependencies."""
+    """Resolve target HA version and retrieve test dependencies."""
     ha_ver_to_install = ha_ver
     if ha_ver_to_install == "latest":
         ha_ver_to_install = _get_latest_ha_version()
-    pinned_test_dependency_versions = _resolve_pinned_test_dependency_versions(
+    test_dependency_versions = _resolve_test_dependency_versions(
         ha_ver_to_install,
-        pinned_test_dependencies,
     )
-    return ha_ver_to_install, pinned_test_dependency_versions
+    return ha_ver_to_install, test_dependency_versions
+
+
+def _get_python_interpreter_version(python_bin: Path) -> str:
+    """Get the Python interpreter version inside the venv."""
+    result = subprocess.run(
+        [
+            "uv",
+            "--no-config",
+            "run",
+            "--no-project",
+            "--python",
+            str(python_bin),
+            "python",
+            "-c",
+            "import sys; print(sys.version.split()[0])",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=_REPO_ROOT,
+        timeout=_COMPATIBILITY_METADATA_PROBE_TIMEOUT_SECONDS,
+    )
+    return result.stdout.strip()
+
+
+def _verify_python_version_compatibility(python_bin: Path, ha_ver_to_install: str) -> None:
+    """Verify that Python interpreter satisfies Home Assistant's requires-python."""
+    try:
+        url = f"https://pypi.org/pypi/homeassistant/{ha_ver_to_install}/json"
+        requirements_text = _fetch_remote_text(url)
+        payload = orjson.loads(requirements_text)
+        requires_python = payload.get("info", {}).get("requires_python")
+        if not requires_python:
+            print(
+                f"STEP_INFO: PyPI metadata for HA {ha_ver_to_install} does not specify "
+                "requires-python; skipping compatibility verification",
+                flush=True,
+            )
+            return
+        actual_py_ver = _get_python_interpreter_version(python_bin)
+        spec = SpecifierSet(requires_python)
+        if Version(actual_py_ver) not in spec:
+            raise ValueError(
+                f"Python interpreter {actual_py_ver} at {python_bin} does not satisfy "
+                f"Home Assistant {ha_ver_to_install} constraint '{requires_python}'"
+            )
+    except ValueError:
+        raise
+    except Exception as err:
+        raise ValueError(
+            f"Failed to fetch or verify PyPI requires-python for HA {ha_ver_to_install}: {err}"
+        ) from err
 
 
 def _prepare_venv_and_install(
@@ -826,12 +888,12 @@ def _prepare_venv_and_install(
     ha_ver_to_install: str,
     py_ver: str,
     reinstall: bool,
-    pinned_test_dependency_versions: dict[str, str],
+    test_dependency_versions: dict[str, str],
 ) -> bool:
     """Ensure the virtual environment is prepared and dependencies are installed.
 
     Returns:
-        bool: True if setup succeeded, False if python binary is missing.
+        bool: True if setup succeeded, False if python binary is missing or incompatible.
     """
     created_venv = _ensure_venv(venv_path, py_ver)
 
@@ -839,11 +901,17 @@ def _prepare_venv_and_install(
         print(f"VALIDATION_ERROR: python not found at {python_bin}", flush=True)
         return False
 
+    try:
+        _verify_python_version_compatibility(python_bin, ha_ver_to_install)
+    except ValueError as err:
+        print(f"VALIDATION_ERROR: {err}", flush=True)
+        return False
+
     installed_ha = _get_installed_ha_version(python_bin)
     marker_requires_reinstall = _dependency_marker_requires_reinstall(
         created_venv,
         venv_path,
-        pinned_test_dependency_versions,
+        test_dependency_versions,
     )
     needs_reinstall = (
         reinstall
@@ -852,11 +920,11 @@ def _prepare_venv_and_install(
         or marker_requires_reinstall
     )
 
-    needs_install, pinned_refresh_deps = _determine_dependency_actions(
+    needs_install, refresh_deps = _determine_dependency_actions(
         needs_reinstall,
         created_venv,
         python_bin,
-        pinned_test_dependency_versions,
+        test_dependency_versions,
     )
 
     _install_dependencies(
@@ -864,8 +932,8 @@ def _prepare_venv_and_install(
         python_bin,
         ha_ver_to_install,
         needs_install,
-        pinned_refresh_deps,
-        pinned_test_dependency_versions,
+        refresh_deps,
+        test_dependency_versions,
         py_ver=py_ver,
         reset_before_install=needs_reinstall and not created_venv,
     )
@@ -882,11 +950,11 @@ def _verify_and_run_tests(
     Returns:
         tuple[bool, str]: (Success status, Installed HA version)
     """
+    ha_ver_display = _get_installed_ha_version(python_bin)
     if not pytest_bin.exists():
         print(f"VALIDATION_ERROR: pytest not found at {pytest_bin}", flush=True)
-        return False, ha_ver_to_install
+        return False, ha_ver_display
 
-    ha_ver_display = _get_installed_ha_version(python_bin)
     if ha_ver_display != ha_ver_to_install:
         print(
             f"VALIDATION_ERROR: expected Home Assistant {ha_ver_to_install}, "
@@ -903,15 +971,13 @@ def _run_tests_for_version(
     ha_ver: str,
     py_ver: str,
     reinstall: bool,
-    pinned_test_dependencies: object,
 ) -> tuple[bool, str]:
     """Run the test suite for a specific Home Assistant version."""
     ha_ver_display = ha_ver
 
     try:
-        ha_ver_to_install, pinned_test_dependency_versions = _prepare_version_and_deps(
+        ha_ver_to_install, test_dependency_versions = _prepare_version_and_deps(
             ha_ver,
-            pinned_test_dependencies,
         )
 
         ha_ver_display = ha_ver_to_install
@@ -928,7 +994,7 @@ def _run_tests_for_version(
             ha_ver_to_install=ha_ver_to_install,
             py_ver=py_ver,
             reinstall=reinstall,
-            pinned_test_dependency_versions=pinned_test_dependency_versions,
+            test_dependency_versions=test_dependency_versions,
         ):
             return False, ha_ver_display
 
@@ -938,7 +1004,7 @@ def _run_tests_for_version(
             ha_ver_to_install=ha_ver_to_install,
         )
 
-    except ValueError as err:
+    except (ValueError, RuntimeError) as err:
         print(f"VALIDATION_ERROR: {err}", flush=True)
         return False, ha_ver_display
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
@@ -994,7 +1060,6 @@ def main() -> None:
                 ha_ver,
                 py_ver,
                 args.reinstall,
-                config["pinned_test_dependencies"],
             )
             results.append(
                 (row_index, ha_ver, py_ver, ha_version, "PASSED" if success else "FAILED")

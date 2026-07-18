@@ -7,7 +7,7 @@
         "data": {
           "fallback_agent_id": "备用对话代理",
           "min_confidence": "最小匹配置信度",
-          "min_margin": "最小置信度裕量"
+          "min_margin": "基准置信度裕量"
         }
       }
     },
@@ -23,7 +23,7 @@
         "data": {
           "fallback_agent_id": "备用对话代理",
           "min_confidence": "最小匹配置信度",
-          "min_margin": "最小置信度裕量"
+          "min_margin": "基准置信度裕量"
         }
       }
     }

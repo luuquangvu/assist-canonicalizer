@@ -3,6 +3,7 @@
 import os
 import sys
 import tempfile
+from collections.abc import Iterator
 from functools import partial
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -14,6 +15,7 @@ from custom_components.assist_canonicalizer.builtin_intents import (
     _json_load,
     _load_built_in_intents,
     _load_custom_sentences,
+    clear_builtin_intents_caches,
     language_variant_for,
     load_language_intent_sources,
 )
@@ -22,6 +24,16 @@ from custom_components.assist_canonicalizer.grammar_loader import (
     build_candidates_from_intent_sources,
 )
 from custom_components.assist_canonicalizer.runtime import CanonicalizerRuntime
+
+
+@pytest.fixture(autouse=True)
+def _clear_builtin_intents_cache() -> Iterator[None]:
+    """Clear cached built-in intent sources before and after each test."""
+    clear_builtin_intents_caches()
+    try:
+        yield
+    finally:
+        clear_builtin_intents_caches()
 
 
 def _config_path_in_tmpdir(tmpdir: str, key: str, lang: str) -> str:

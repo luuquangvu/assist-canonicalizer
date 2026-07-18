@@ -161,6 +161,12 @@ async def test_handle_test_match_entry_none_and_data_fallback() -> None:
     hass_none.data[DOMAIN]["mock_entry_id"]["entry"] = None
     result = await _handle_test_match(hass_none, cast(ServiceCall, call))
     assert result["accepted"] is True
+    assert result["decision_scope"] == "lexical"
+    assert result["candidate_metadata_authoritative"] is False
+    assert result["live_recognition"] == "not_run"
+    assert result["production_decision_path"] == "/api/conversation/process"
+    assert result["confidence_gate"]["accepted"] is True
+    assert result["confidence_gate"]["margin_policy"] == "no_competitor"
 
     # Case 2: entry is not None, options is empty, fallback to data
     entry_data = MockConfigEntry(
@@ -259,6 +265,8 @@ async def test_diagnostics_service() -> None:
     result = await _handle_diagnostics(hass, cast(ServiceCall, call))
     assert "cached_languages" in result
     assert "dynamic_candidate_generation" in result
+    assert "registry_retrieval" in result
+    assert result["registry_retrieval"]["values_scored"] == 0
 
 
 @pytest.mark.asyncio

@@ -861,10 +861,10 @@
       }
     },
     {
-      "query": "wohn zimmerlicht ein",
+      "query": "schalte wohn zimmerlicht ein",
       "language": "de",
       "expected_intent": "HassTurnOn",
-      "expected_canonical": "wohnzimmerlicht ein",
+      "expected_canonical": "schalte wohnzimmerlicht ein",
       "category": "missing_words",
       "expected_slots": {
         "area": "wohnzimmer",
@@ -923,10 +923,10 @@
       }
     },
     {
-      "query": "schlaf zimmerlicht ein",
+      "query": "schalte schlaf zimmerlicht ein",
       "language": "de",
       "expected_intent": "HassTurnOn",
-      "expected_canonical": "schlafzimmerlicht ein",
+      "expected_canonical": "schalte schlafzimmerlicht ein",
       "category": "missing_words",
       "expected_slots": {
         "area": "schlafzimmer",

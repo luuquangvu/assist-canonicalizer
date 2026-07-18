@@ -31,7 +31,7 @@
     - [Xây dựng lại chỉ mục (Rebuild Index)](#xây-dựng-lại-chỉ-mục-rebuild-index)
     - [Xóa chỉ mục (Clear Index)](#xóa-chỉ-mục-clear-index)
     - [Chẩn đoán (Diagnostics)](#chẩn-đoán-diagnostics)
-    - [Xuất danh sách ứng cử viên (Dump Candidates)](#xuất-danh-sách-ứng-cử-viên-dump-candidates)
+    - [Xuất danh sách ứng viên (Dump Candidates)](#xuất-danh-sách-ứng-viên-dump-candidates)
   - [Kiểm soát độ tin cậy & Chuyển tiếp dự phòng (Confidence Gates & Fallback)](#kiểm-soát-độ-tin-cậy--chuyển-tiếp-dự-phòng-confidence-gates--fallback)
   - [Khắc phục sự cố & Gỡ lỗi](#khắc-phục-sự-cố--gỡ-lỗi)
     - [Các sự cố thường gặp](#các-sự-cố-thường-gặp)
@@ -47,14 +47,14 @@
 ## Tính năng nổi bật
 
 - **Tác nhân hội thoại của Home Assistant**: Tích hợp trực tiếp vào Assist như một tác nhân hội thoại. Bộ tích hợp chuẩn hóa yêu cầu đầu vào rồi chuyển câu lệnh đã chọn qua luồng hội thoại tiêu chuẩn của Home Assistant.
-- **Bộ chấm điểm xếp hạng từ vựng đa tín hiệu (Multi-Signal Lexical Ranking Engine)**: Đánh giá và chấm điểm từng câu lệnh ứng cử viên (candidate) dựa trên sự kết hợp của 4 thuật toán bổ trợ: **so khớp mờ RapidFuzz**, **độ tương đồng n-gram Jaccard**, **truy xuất xác suất BM25**, và **so khớp hành động theo miền ý định (intent domain action matching)**. Cơ chế chấm điểm có trọng số này mang lại độ chính xác vượt trội so với việc chỉ sử dụng một thuật toán đơn lẻ.
+- **Bộ chấm điểm xếp hạng từ vựng đa tín hiệu (Multi-Signal Lexical Ranking Engine)**: Đánh giá và chấm điểm từng câu lệnh ứng viên (candidate) dựa trên sự kết hợp của 4 thuật toán bổ trợ: **so khớp mờ RapidFuzz**, **độ tương đồng n-gram Jaccard**, **truy xuất xác suất BM25**, và **so khớp hành động theo miền ý định (intent domain action matching)**. Cơ chế chấm điểm có trọng số này mang lại độ chính xác vượt trội so với việc chỉ sử dụng một thuật toán đơn lẻ.
 - **Tự động xây dựng chỉ mục câu lệnh**: Tự động tạo và cập nhật cơ sở dữ liệu mẫu câu chuẩn hóa từ mọi nguồn hiện có: ý định (intent) mặc định của Home Assistant, các tệp YAML chứa mẫu câu tùy chỉnh, tên thực thể và bí danh (alias), sơ đồ phòng/tầng (area/floor) và các tham số (slot) mở rộng động. Mọi quá trình đều diễn ra tự động mà không cần cấu hình thủ công.
 - **Tối ưu tốc độ tải bằng bộ nhớ đệm**: Lưu trữ chỉ mục câu lệnh đã chuẩn hóa trực tiếp vào phân lớp lưu trữ của Home Assistant. Nhờ vậy, hệ thống có thể bỏ qua bước phân tích cú pháp (parsing) mẫu câu ở các lần khởi động tiếp theo, tối ưu đáng kể thời gian tải.
-- **Bộ lọc độ tin cậy linh hoạt**: Cho phép tinh chỉnh hành vi so khớp qua hai ngưỡng cấu hình: **Độ tin cậy tối thiểu (Minimum Match Confidence)** và **Khoảng cách độ tin cậy (Minimum Confidence Margin)**. Chỉ những câu lệnh đạt đủ điều kiện của cả hai ngưỡng mới được phê duyệt chuẩn hóa và thực thi.
-- **Khôi phục có giới hạn và chuyển tiếp an toàn**: Nếu các ứng cử viên đồng điểm biểu thị những hành động đối nghịch, bộ tích hợp sẽ chuyển sang tác nhân dự phòng thay vì tự suy đoán. Nếu Home Assistant từ chối câu lệnh chuẩn hóa trước khi bắt đầu xử lý intent, bộ tích hợp có thể thử thêm một ứng cử viên khác đã độc lập vượt qua cùng các ngưỡng tin cậy. Trong các trường hợp còn lại, yêu cầu gốc được chuyển tới tác nhân dự phòng đã cấu hình.
+- **Bộ lọc độ tin cậy linh hoạt**: Tinh chỉnh việc phê duyệt kết quả khớp qua các ngưỡng **Độ tin cậy tối thiểu (Minimum Match Confidence)** và **Khoảng cách độ tin cậy cơ sở (Base Confidence Margin)**. Kết quả khớp từ vựng chính xác và các chính sách dựa trên bằng chứng mạnh khác có thể giảm khoảng cách yêu cầu; nếu không có chính sách nới lỏng nào trước đó áp dụng, các hành động cạnh tranh, bao gồm hành động đối nghịch đã biết, phải đạt toàn bộ khoảng cách cấu hình.
+- **Tiền kiểm nhận diện live & Khôi phục có giới hạn**: Xác minh xem câu lệnh chuẩn hóa có khả thi hay không thông qua bộ nhận diện intent mặc định của Home Assistant trước khi thực thi. Hệ thống kiểm tra tối đa ba ứng viên có điểm tin cậy cao trước khi chuyển sang dự phòng, đồng thời hỗ trợ một lần khôi phục nếu lệnh bị từ chối trước khi bộ xử lý intent hoạt động.
 - **Bộ công cụ chẩn đoán chuyên sâu cho nhà phát triển**: Cung cấp 5 hành động (service actions) chuyên dụng bao gồm `test_match`, `rebuild_index`, `clear_index`, `diagnostics`, và `dump_candidates` giúp bạn dễ dàng theo dõi quá trình xếp hạng, kiểm tra dữ liệu chỉ mục và quản lý vòng đời bộ nhớ đệm ngay trên giao diện Home Assistant.
 - **Phân tách cơ sở dữ liệu theo ngôn ngữ**: Quản lý độc lập chỉ mục câu lệnh cho từng ngôn ngữ khác nhau, hỗ trợ tự động nhận diện và ánh xạ theo các biến thể ngôn ngữ của Home Assistant.
-- **Kiểm soát và giới hạn tài nguyên hệ thống**: Tích hợp sẵn cơ chế giới hạn số lượng mẫu câu trên mỗi ngôn ngữ, intent hoặc mỗi lượt xếp hạng nhằm ngăn ngừa tối đa nguy cơ quá tải bộ nhớ (out-of-memory).
+- **Tối ưu hiệu năng & An toàn bộ nhớ**: Giới hạn nghiêm ngặt số lượng ứng viên cho mỗi lượt xếp hạng để tránh quá tải bộ nhớ, kết hợp với cơ chế truy xuất registry thưa tại thời điểm truy vấn. Chỉ mục nhờ đó luôn nhỏ gọn và nhanh chóng trong khi vẫn đảm bảo tên thực thể và bí danh động có thể tìm kiếm được đầy đủ.
 - **Chuẩn hóa cục bộ**: Các bước chuẩn hóa, lập chỉ mục, xếp hạng và kiểm tra khả năng khôi phục đều chạy trong Home Assistant. Bản thân bộ tích hợp không gửi dữ liệu đo từ xa hoặc yêu cầu tới dịch vụ đám mây; việc xử lý bên ngoài, nếu có, phụ thuộc vào tác nhân dự phòng bạn chọn.
 
 ---
@@ -85,8 +85,8 @@
 1. Vào **Cài đặt (Settings)** > **Thiết bị & Dịch vụ (Devices & Services)**.
 2. Chọn **Thêm tích hợp (Add Integration)** và tìm kiếm **Assist Canonicalizer**.
 3. Chọn **Tác nhân hội thoại dự phòng (Fallback Conversation Agent)**. Khi Assist Canonicalizer không thể xử lý yêu cầu một cách an toàn, bộ tích hợp sẽ chuyển nguyên văn yêu cầu tới tác nhân này. Để tăng khả năng khôi phục, hãy chọn một tác nhân có cách diễn giải ngôn ngữ khác, chẳng hạn như tác nhân sử dụng LLM. Tác nhân mặc định của Home Assistant vẫn được hỗ trợ, nhưng có thể gặp lại chính hạn chế đã khiến yêu cầu chuyển sang dự phòng.
-4. Cấu hình **Độ tin cậy tối thiểu (Minimum Match Confidence)**: Yêu cầu câu lệnh ứng cử viên phải đạt điểm số bằng hoặc cao hơn ngưỡng này trên cả 4 thuật toán xếp hạng mới được chấp nhận. Khuyên dùng giữ nguyên cấu hình mặc định ban đầu và sử dụng công cụ **Test Match** để theo dõi điểm số thực tế trước khi tùy biến.
-5. Cấu hình **Khoảng cách độ tin cậy tối thiểu (Minimum Confidence Margin)**: Khoảng cách điểm số tối thiểu giữa ứng cử viên xếp hạng cao nhất và ứng cử viên tiếp theo (thuộc intent khác). Ngưỡng này giúp loại bỏ sự mơ hồ khi câu lệnh đầu vào khớp với nhiều ý định khác nhau có điểm số xấp xỉ nhau.
+4. Cấu hình **Độ tin cậy tối thiểu (Minimum Match Confidence)**: Yêu cầu câu lệnh ứng viên phải đạt điểm số bằng hoặc cao hơn ngưỡng này trên cả 4 thuật toán xếp hạng mới được chấp nhận. Khuyên dùng giữ nguyên cấu hình mặc định ban đầu và sử dụng công cụ **Test Match** để theo dõi điểm số thực tế trước khi tùy biến.
+5. Cấu hình **Khoảng cách độ tin cậy cơ sở (Base Confidence Margin)**: Xác định khoảng cách điểm số thông thường giữa kết quả khớp cao nhất và lựa chọn thay thế tốt thứ hai (thuộc intent khác), tránh thực thi nhầm khi câu lệnh mơ hồ. Kết quả khớp từ vựng chính xác và các chính sách dựa trên bằng chứng mạnh khác có thể giảm hoặc bỏ qua yêu cầu này trước khi hệ thống đánh giá cạnh tranh giữa các hành động. Nếu không có chính sách nới lỏng nào trước đó áp dụng, các hành động cạnh tranh, bao gồm hành động đối nghịch đã biết như bật so với tắt, phải đạt toàn bộ giá trị cấu hình.
 6. Vào **Cài đặt (Settings)** > **Trợ lý giọng nói (Voice assistants)** và mở Assist pipeline của bạn. Tại mục **Tác nhân hội thoại (Conversation agents)**, chọn **Assist Canonicalizer** từ danh sách tác nhân.
 
 > [!IMPORTANT]
@@ -106,19 +106,23 @@ flowchart TD
     B --> C[Tra cứu chỉ mục]
     C --> D[Xếp hạng đa tín hiệu]
     D --> E{Đạt ngưỡng tin cậy?}
-    E -->|Đạt| F[Thực thi qua tác nhân Home Assistant]
+    E -->|Đạt| P{Tiền kiểm nhận diện live}
     E -->|Không đạt| G[Tác nhân dự phòng nhận yêu cầu gốc]
+    P -->|Intent khả thi| F[Thực thi qua tác nhân Home Assistant]
+    P -->|Không hợp lệ hoặc sentence trigger| J{Câu khác đạt lại toàn bộ ngưỡng?}
+    J -->|Có, tối đa 3 văn bản| P
+    J -->|Không| G
     F -->|Thành công| H[Trả về kết quả từ Home Assistant]
     F -->|Bị từ chối| R{Có thể thử lại an toàn?}
     R -->|Không| G
-    R -->|Có| J{Ứng cử viên khác đạt cùng các ngưỡng?}
-    J -->|Có, thử một lần| K[Thực thi ứng cử viên khôi phục]
-    J -->|Không| G
+    R -->|Có| Q{Câu khác đạt ngưỡng và tiền kiểm live?}
+    Q -->|Có, thử một lần| K[Thực thi ứng viên khôi phục]
+    Q -->|Không| G
     K -->|Thành công| H
     K -->|Thất bại| G
 ```
 
-1. **Chuẩn hóa văn bản (Text Normalization)**: Loại bỏ dấu câu, đưa văn bản về chữ thường, loại bỏ các khoảng trắng thừa và chuẩn hóa ký tự theo định dạng NFKC. Quy trình này được áp dụng đồng bộ cho cả câu lệnh đầu vào lẫn các mẫu câu ứng cử viên để đảm bảo tính nhất quán khi so sánh.
+1. **Chuẩn hóa văn bản (Text Normalization)**: Loại bỏ dấu câu, đưa văn bản về chữ thường, loại bỏ các khoảng trắng thừa và chuẩn hóa ký tự theo định dạng NFKC. Quy trình này được áp dụng đồng bộ cho cả câu lệnh đầu vào lẫn các mẫu câu ứng viên để đảm bảo tính nhất quán khi so sánh.
 
 2. **Tra cứu chỉ mục (Index Lookup)**: Câu lệnh đã chuẩn hóa sẽ được tra cứu trong cơ sở dữ liệu mẫu câu đã được xây dựng sẵn cho ngôn ngữ hiện tại, bao gồm:
    - **Intent mặc định**: Toàn bộ câu lệnh cố định và mở rộng template từ cấu hình ngôn ngữ gốc của Home Assistant.
@@ -132,65 +136,70 @@ flowchart TD
    - **Độ liên quan từ khóa (Keyword Relevance)**: Thuật toán BM25 đánh giá mức độ quan trọng và tính đặc trưng của từng từ trong câu lệnh của bạn.
    - **Ngữ cảnh ý định (Intent Context)**: Ưu tiên các kết quả có loại ý định (ví dụ: bật đèn, điều chỉnh nhiệt độ) đồng nhất với các kết quả khớp tốt nhất, nhằm giảm thiểu sai lệch ngữ cảnh.
 
-4. **Kiểm tra ngưỡng độ tin cậy (Confidence Gate)**: Ứng cử viên đứng đầu phải đạt cả hai ngưỡng `min_confidence` và `min_margin`. Nếu hai câu lệnh khác nhau biểu thị các hành động đối nghịch nhưng có cùng điểm số, bộ tích hợp chuyển sang tác nhân dự phòng thay vì chọn tùy ý. Các ứng cử viên tạo ra cùng câu lệnh chuẩn hóa và cùng dữ liệu slot được xem là tương đương, vì vậy chỉ được gửi tới HassIL một lần.
+4. **Kiểm tra ngưỡng độ tin cậy (Confidence Gate)**: Đánh giá ứng viên đứng đầu dựa trên các ngưỡng bạn đã cấu hình:
+   - **Ngưỡng độ tin cậy**: Điểm số cuối cùng của ứng viên phải vượt qua ngưỡng sàn `min_confidence`.
+   - **Khoảng cách độ tin cậy**: Thông thường, ứng viên phải bỏ xa đối thủ có ý nghĩa tiếp theo (ở intent khác) ít nhất một khoảng `min_margin` đã cấu hình. Kết quả khớp từ vựng chính xác có thể bỏ qua khoảng cách này, còn các chính sách dựa trên bằng chứng mạnh khác có thể giảm nó trước khi hệ thống đánh giá cạnh tranh giữa các hành động. Nếu không có chính sách nào trước đó áp dụng, các hành động cạnh tranh, bao gồm các cặp đối nghịch đã biết như bật/tắt, mở/đóng và khóa/mở khóa, phải đạt toàn bộ khoảng cách cấu hình. Quyết định phê duyệt và khoảng cách hiệu dụng có thể xem chi tiết trong chẩn đoán.
 
-5. **Thực thi và khôi phục có giới hạn**: Câu lệnh chuẩn hóa đã chọn được gửi tới tác nhân hội thoại mặc định của Home Assistant (HassIL). Tác nhân này có thể thực thi intent ngay trong lượt gọi, vì vậy cơ chế khôi phục được giới hạn chặt chẽ.
+5. **Tiền kiểm live, thực thi và khôi phục có giới hạn**: Khi ứng viên vượt qua vòng lọc độ tin cậy, hệ thống tiến hành quy trình xác thực và thực thi nhiều giai đoạn:
+   - **Tiền kiểm nhận diện live**: Câu lệnh được chạy thử qua bộ nhận diện intent mặc định của Home Assistant để đảm bảo nó có thể thực thi được. Nếu không hợp lệ (ví dụ: tham chiếu đến khu vực hoặc thiết bị không tồn tại), ứng viên sẽ bị loại bỏ, và hệ thống đánh giá lại danh sách còn lại (thử tối đa ba phương án khác nhau). Nếu không có phương án nào khả thi, hệ thống sẽ chuyển tiếp sang tác nhân dự phòng.
+   - **Thực thi trực tiếp**: Nếu tiền kiểm thành công, câu lệnh được gửi đến tác nhân hội thoại mặc định của Home Assistant (HassIL) để thực thi.
+   - **Khôi phục sau thực thi**: Nếu câu lệnh bị từ chối trước khi bộ xử lý intent thực sự hoạt động (như trả về lỗi `no_intent_match`, hoặc `no_valid_targets` do không tìm thấy thực thể), hệ thống có thể thử khôi phục một lần. Hệ thống sẽ lọc bỏ các lệnh trùng lặp và thử ứng viên tốt tiếp theo đạt ngưỡng tin cậy. Các lỗi xảy ra bên trong bộ xử lý intent sẽ không kích hoạt khôi phục và sẽ chuyển tiếp sang dự phòng.
 
-   Bộ tích hợp chỉ xem xét ứng cử viên khôi phục khi có thể xác nhận câu lệnh đã chọn bị từ chối trước khi bộ xử lý intent được gọi:
-
-   - `no_intent_match` được trả về trước khi xử lý intent, do đó cho phép khôi phục.
-   - `no_valid_targets` chỉ cho phép khôi phục khi lượt kiểm tra nhận diện, không thực thi intent, xác nhận rằng có thực thể không khớp. Nếu không thể xác nhận điều này vì câu lệnh đã khớp đầy đủ hoặc vì lượt kiểm tra không khả dụng hay phát sinh lỗi, bộ tích hợp sẽ chuyển sang tác nhân dự phòng.
-
-   Khi đủ điều kiện khôi phục, hệ thống loại bỏ các câu lệnh không thể sử dụng hoặc bị trùng lặp, sau đó đánh giá lại những ứng cử viên còn lại bằng chính các ngưỡng tin cậy ban đầu. Ứng cử viên khôi phục có thể mang intent hoặc dữ liệu slot khác, nhưng hệ thống chỉ thực thi thêm tối đa một câu lệnh. Lỗi từ bộ xử lý intent, ngoại lệ và mã lỗi không xác định không kích hoạt việc thử ứng cử viên khác.
-
-6. **Chuyển tiếp dự phòng (Fallback)**: Nếu không tìm được ứng cử viên đủ an toàn, không đủ điều kiện khôi phục hoặc quá trình thực thi thất bại, bộ tích hợp chuyển nguyên văn yêu cầu ban đầu tới tác nhân dự phòng đã cấu hình.
+6. **Chuyển tiếp dự phòng (Fallback)**: Nếu không tìm được ứng viên đủ an toàn, không đủ điều kiện khôi phục hoặc quá trình thực thi thất bại, bộ tích hợp chuyển nguyên văn yêu cầu ban đầu tới tác nhân dự phòng đã cấu hình.
 
 ---
 
 ## Hiệu năng đo kiểm (Benchmark Performance)
 
-Công cụ xếp hạng được đo kiểm (benchmark) bằng cách sử dụng các bộ dữ liệu thử nghiệm thực tế trên 5 ngôn ngữ (DE, EN, FR, NL, VI).
+Để đảm bảo độ tin cậy thực tế, bộ tích hợp được đo kiểm đầu-cuối trong một môi trường Home Assistant sạch bằng cách sử dụng toàn bộ các trường hợp thực tế trên 5 ngôn ngữ (DE, EN, FR, NL, VI). Mỗi câu truy vấn gốc được thực thi theo cặp: chạy trực tiếp qua luồng Assist mặc định (HassIL) trước, sau đó qua Assist Canonicalizer. Cả hai lượt chạy được đối chiếu với các câu lệnh chuẩn để đo lường chính xác tỷ lệ nhận diện đúng intent, tham số hành động và thực thể đích.
 
 ### Kết quả tổng quan
 
 <!-- BENCHMARK_OVERALL_START -->
 
-> Phiên bản phụ thuộc benchmark: `homeassistant` 2026.7.2, `home-assistant-intents` 2026.6.24.
+> Phiên bản phụ thuộc benchmark: `Python` 3.14.6, `homeassistant` 2026.7.3, `hassil` 3.8.0, `home-assistant-intents` 2026.6.24.
 
-| Chế độ    | Đúng Intent/Slot | Nhận diện sai (Mismatch) | Dự phòng (Fallback) |
-| :-------- | ---------------: | -----------------------: | ------------------: |
-| `hassil`  |            47.7% |                     0.0% |               52.3% |
-| `lexical` |        **92.8%** |                 **1.3%** |            **5.8%** |
-
-> Độ chính xác nhận diện Intent/Slot tăng từ **47.7% lên 92.8%**. Tổng tỷ lệ lỗi (nhận diện sai + chuyển sang dự phòng) giảm mạnh từ **52.3% xuống còn 7.2%**.
+| Chế độ         | Canonicalizer | HassIL trực tiếp | Tăng điểm % | Khôi phục | Hồi quy | Nhận diện sai | Dự phòng | P50 ms | P95 ms |
+| :------------- | ------------: | ---------------: | ----------: | --------: | ------: | ------------: | -------: | -----: | -----: |
+| `managed_live` |     **88.8%** |            47.9% |       +40.9 |       250 |       5 |          1.3% |     9.8% |  117.9 |  377.4 |
 
 <!-- BENCHMARK_OVERALL_END -->
+
+> Mỗi câu truy vấn thử nghiệm được chạy song song: trực tiếp qua Assist mặc định và qua Assist Canonicalizer. Sự so sánh này đo lường trực tiếp mức tăng độ chính xác (tăng điểm), số lượt khôi phục thành công và số ca hồi quy.
 
 ### Chi tiết theo từng ngôn ngữ
 
 <!-- BENCHMARK_LANGS_START -->
 
-| Ngôn ngữ | Chế độ    | Đúng Intent/Slot | Nhận diện sai (Mismatch) | Dự phòng (Fallback) |
-| :------- | :-------- | ---------------: | -----------------------: | ------------------: |
-| EN       | `hassil`  |            52.7% |                     0.0% |               47.3% |
-| EN       | `lexical` |        **92.2%** |                 **2.3%** |            **5.4%** |
-| DE       | `hassil`  |            48.4% |                     0.0% |               51.6% |
-| DE       | `lexical` |        **94.3%** |                 **0.8%** |            **4.9%** |
-| FR       | `hassil`  |            49.6% |                     0.0% |               50.4% |
-| FR       | `lexical` |        **93.3%** |                 **1.7%** |            **5.0%** |
-| NL       | `hassil`  |            48.8% |                     0.0% |               51.2% |
-| NL       | `lexical` |        **91.5%** |                 **0.8%** |            **7.8%** |
-| VI       | `hassil`  |            37.0% |                     0.0% |               63.0% |
-| VI       | `lexical` |        **93.0%** |                 **1.0%** |            **6.0%** |
+| Ngôn ngữ | Canonicalizer | HassIL trực tiếp | Tăng điểm % | Khôi phục | Hồi quy | Nhận diện sai | Dự phòng | P50 ms | P95 ms |
+| :------- | ------------: | ---------------: | ----------: | --------: | ------: | ------------: | -------: | -----: | -----: |
+| EN       |     **91.5%** |            52.7% |       +38.8 |        51 |       1 |          0.0% |     8.5% |   79.9 |  426.0 |
+| DE       |     **90.2%** |            48.4% |       +41.8 |        52 |       1 |          0.8% |     9.0% |  176.1 |  371.9 |
+| FR       |     **89.1%** |            50.4% |       +38.7 |        47 |       1 |          2.5% |     8.4% |  123.1 |  421.6 |
+| NL       |     **87.6%** |            48.8% |       +38.8 |        51 |       1 |          0.8% |    11.6% |  103.4 |  332.2 |
+| VI       |     **85.0%** |            37.0% |       +48.0 |        49 |       1 |          3.0% |    12.0% |  104.2 |  241.3 |
 
 <!-- BENCHMARK_LANGS_END -->
 
 > [!NOTE]
 > Trong bài kiểm tra hiệu năng này, chúng ta giả định rằng khoảng một nửa số lần các ý định của chúng ta hoạt động với HassIL mặc định. Thực tế có thể khác do thói quen sử dụng của bạn.
 >
-> Độ chính xác, số lượng ứng viên và độ trễ có thể thay đổi tùy thuộc vào môi trường, bao gồm các yếu tố như số lượng thực thể, khu vực, tầng, phiên bản Home Assistant và phần cứng được sử dụng.
+> Kết quả độ chính xác mang tính xác định đối với fixture mẫu (gồm 3 tầng, 12 khu vực và 60 thực thể). Thời gian phản hồi (độ trễ) phụ thuộc vào phần cứng, do đó khi đánh giá hiệu năng nên so sánh các báo cáo managed-live trước/sau trên cùng một thiết bị.
+>
+> Các báo cáo chi tiết và tệp dữ liệu JSON thô được tạo trong thư mục `scratch/` và không được commit vào kho lưu trữ. Điều này giúp tránh các thay đổi (diff) tệp quá lớn trong pull request, vốn có thể tạo ra nhiều nhiễu trong quá trình review mã nguồn bởi AI và các lập trình viên khác.
 
-Tất cả kết quả đo kiểm trên được tạo ra bằng các bộ dữ liệu kiểm thử thực tế tại thư mục [`tests/real_world/`](tests/real_world/). Báo cáo chi tiết có tại thư mục [`benchmark/`](benchmark/). Kết quả thực tế trên hệ thống của bạn sẽ khác biệt tùy thuộc cấu hình thiết bị Home Assistant cụ thể.
+Để tái tạo bài đo kiểm hiệu năng từ [`tests/real_world/`](tests/real_world/), chạy lệnh:
+
+```bash
+uv run tools/benchmark.py
+```
+
+Để biết thông tin chi tiết về fixture đo kiểm, so sánh baseline và định dạng báo cáo, vui lòng xem [`tools/ha_dev/README.md`](tools/ha_dev/README.md). Lưu ý rằng công cụ `tools/benchmark_offline.py` chỉ dành riêng cho chẩn đoán offline và micro-profiling, không được coi là bằng chứng độ chính xác trong production.
+
+Các ngôn ngữ được xác thực theo hai cấp độ:
+
+- **Ngôn ngữ có kiểm thử độ chính xác (Accuracy-Gated)**: Tiếng Đức, Anh, Pháp, Hà Lan và Việt Nam được đảm bảo độ chính xác nhờ bộ dữ liệu thử nghiệm thực tế (corpus) được duy trì liên tục.
+- **Ngôn ngữ kiểm tra tương thích (Compatibility Smoke-Tested)**: Tất cả các ngôn ngữ khác được cung cấp bởi `home-assistant-intents` đều được kiểm tra tự động. Bài kiểm tra này đảm bảo chỉ mục của ngôn ngữ đó được tải chính xác, không phát sinh lỗi cú pháp và hoạt động ổn định trên môi trường chạy thực tế, mặc dù không cam kết về mặt chính xác ngữ nghĩa.
 
 ---
 
@@ -202,7 +211,7 @@ Tất cả các hành động của bộ tích hợp đều có thể truy cập
 
 **Hành động**: `assist_canonicalizer.test_match`
 
-Chạy thử nghiệm toàn bộ luồng xử lý và trả về kết quả chấm điểm chi tiết của các ứng cử viên. Công cụ này rất hữu ích để phân tích lý do câu lệnh được chấp nhận hoặc bị chuyển tiếp dự phòng, từ đó điều chỉnh các ngưỡng lọc cho phù hợp.
+Chạy thử nghiệm toàn bộ luồng xử lý và trả về kết quả chấm điểm chi tiết của các ứng viên. Công cụ này rất hữu ích để phân tích lý do câu lệnh được chấp nhận hoặc bị chuyển tiếp dự phòng, từ đó điều chỉnh các ngưỡng lọc cho phù hợp.
 
 | Trường     | Bắt buộc | Mô tả                                        |
 | ---------- | -------- | -------------------------------------------- |
@@ -212,7 +221,7 @@ Chạy thử nghiệm toàn bộ luồng xử lý và trả về kết quả ch�
 **Kết quả trả về bao gồm**:
 
 - `normalized_text`: Dạng câu lệnh sau khi chuẩn hóa.
-- `top_candidates`: Danh sách ứng cử viên điểm số cao nhất kèm chi tiết điểm từ các thuật toán (`rapidfuzz`, `char_ngram`, `bm25`, `intent`, điểm số cuối cùng `final`).
+- `top_candidates`: Danh sách ứng viên được xếp hạng, trong đó đối tượng `scores` chứa các khóa `rapidfuzz`, `char_ngram`, `bm25`, `intent`, `penalty` và `final`.
 - `selected_candidate`: Câu lệnh được chọn và ý định (intent) tương ứng.
 - `accepted`: Trạng thái duyệt (đã vượt qua các ngưỡng lọc hay chưa).
 
@@ -247,47 +256,47 @@ Trả về thông tin trạng thái hoạt động theo thời gian thực của
 - `last_query_latency_ms`: Thời gian xử lý của câu lệnh gần nhất (ms).
 - `last_fallback_reason`: Lý do câu lệnh gần nhất bị chuyển tiếp dự phòng.
 - `last_error`: Lỗi gần nhất ghi nhận được.
-- `dynamic_candidate_count`: Số lượng ứng cử viên được sinh ra tự động từ các thực thể hệ thống.
+- `dynamic_candidate_count`: Số lượng ứng viên được sinh ra tự động từ các thực thể hệ thống.
 - `cached_languages`: Danh sách ngôn ngữ có dữ liệu chỉ mục lưu trên RAM.
-- `cached_candidate_counts`: Số lượng ứng cử viên của từng ngôn ngữ trên RAM.
+- `cached_candidate_counts`: Số lượng ứng viên của từng ngôn ngữ trên RAM.
 - `pending_rebuild_languages`: Các ngôn ngữ đang trong hàng đợi xây dựng lại chỉ mục.
 - `registry_slot_counts`: Số lượng giá trị đăng ký theo từng thành phần (tên thực thể, phòng,...).
-- `dynamic_candidate_generation`: Trạng thái và giới hạn tài nguyên của tiến trình mở rộng ứng cử viên động.
+- `dynamic_candidate_generation`: Trạng thái và giới hạn tài nguyên của tiến trình mở rộng ứng viên động.
 - `subscribed_intent_source_counts`: Số lượng intent đăng ký nhận dữ liệu từ các tác nhân khác.
 
-### Xuất danh sách ứng cử viên (Dump Candidates)
+### Xuất danh sách ứng viên (Dump Candidates)
 
 **Hành động**: `assist_canonicalizer.dump_candidates`
 
 Trích xuất thông tin chi tiết về cơ cấu chỉ mục của một ngôn ngữ, bao gồm số lượng câu từ các nguồn, thống kê theo intent, số lượng giá trị thực thể và danh sách mẫu câu cụ thể. Hữu ích để kiểm tra xem một câu lệnh đã được đưa vào cơ sở dữ liệu của bộ chuẩn hóa hay chưa.
 
-| Trường     | Bắt buộc | Mô tả                                                                            |
-| ---------- | -------- | -------------------------------------------------------------------------------- |
-| `language` | Không    | Mã ngôn ngữ cần kiểm tra                                                         |
-| `rebuild`  | Không    | Nếu là `true`, sẽ làm mới dữ liệu ứng cử viên trước khi xuất (mặc định: `false`) |
+| Trường     | Bắt buộc | Mô tả                                                                         |
+| ---------- | -------- | ----------------------------------------------------------------------------- |
+| `language` | Không    | Mã ngôn ngữ cần kiểm tra                                                      |
+| `rebuild`  | Không    | Nếu là `true`, sẽ làm mới dữ liệu ứng viên trước khi xuất (mặc định: `false`) |
 
 ---
 
 ## Kiểm soát độ tin cậy & Chuyển tiếp dự phòng (Confidence Gates & Fallback)
 
-Bộ tích hợp sử dụng hai ngưỡng cấu hình để quyết định có chấp nhận ứng cử viên đứng đầu hay không:
+Bộ tích hợp sử dụng hai ngưỡng cấu hình để quyết định có chấp nhận ứng viên đứng đầu hay không:
 
 **Độ tin cậy tối thiểu (Minimum Match Confidence - `min_confidence`)**
-: Điểm số tổng hợp có trọng số của ứng cử viên dẫn đầu phải lớn hơn hoặc bằng giá trị này. Điểm số dao động từ `0.0` (hoàn toàn không khớp) đến `1.0` (khớp tuyệt đối trên cả 4 thuật toán).
+: Điểm số tổng hợp có trọng số của ứng viên dẫn đầu phải lớn hơn hoặc bằng giá trị này. Điểm số dao động từ `0.0` (hoàn toàn không khớp) đến `1.0` (khớp tuyệt đối trên cả 4 thuật toán).
 
-**Khoảng cách độ tin cậy tối thiểu (Minimum Confidence Margin - `min_margin`)**
-: Ứng cử viên dẫn đầu phải có điểm cao hơn ứng cử viên tiếp theo thuộc intent khác ít nhất bằng giá trị này. Nếu các ứng cử viên đồng điểm biểu thị hành động đối nghịch bằng những câu lệnh khác nhau, bộ tích hợp sẽ chuyển sang tác nhân dự phòng. Các ứng cử viên tạo ra cùng câu lệnh chuẩn hóa và cùng dữ liệu slot được xem là tương đương và chỉ gửi tới HassIL một lần.
+**Khoảng cách độ tin cậy cơ sở (Base Confidence Margin - `min_margin`)**
+: Khoảng cách thông thường so với đối thủ có ý nghĩa tiếp theo. Các chính sách khớp từ vựng chính xác, điểm tin cậy cao và bằng chứng an toàn khác được đánh giá trước nên có thể giảm hoặc bỏ qua khoảng cách này ngay cả khi có cạnh tranh giữa các hành động. Nếu không có chính sách nới lỏng nào trước đó áp dụng, các hành động cạnh tranh, bao gồm hành động đối nghịch đã biết, phải đạt toàn bộ khoảng cách cấu hình. Chẩn đoán và **Test Match** hiển thị chính sách hiệu lực; metadata ứng viên không phải bảo đảm thực thi vì nhận diện live chỉ chạy trên luồng hội thoại production.
 
 Khi câu lệnh bị **chuyển tiếp dự phòng (fallback)**, nguyên nhân cụ thể sẽ được lưu lại trong bảng chẩn đoán dưới các mã sau:
 
-| Lý do                  | Ý nghĩa                                                                                                          |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `low_confidence`       | Không có câu lệnh ứng cử viên nào đạt ngưỡng điểm `min_confidence`.                                              |
-| `low_margin`           | Điểm số của ứng cử viên đứng đầu và ứng cử viên tiếp theo (intent khác) quá sát nhau (dưới ngưỡng `min_margin`). |
-| `empty_index`          | Chỉ mục câu lệnh của ngôn ngữ hiện tại chưa được xây dựng.                                                       |
-| `validation_failed`    | Câu lệnh chuẩn hóa đã chọn không thành công. Lần khôi phục duy nhất, nếu đủ điều kiện, cũng thất bại.            |
-| `ranking_failed`       | Xảy ra lỗi xử lý trong bước chấm điểm và xếp hạng.                                                               |
-| `unexpected_exception` | Gặp lỗi nghiêm trọng không xác định trong quá trình thực thi.                                                    |
+| Lý do                  | Ý nghĩa                                                                                                    |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `low_confidence`       | Không có câu lệnh ứng viên nào đạt ngưỡng điểm `min_confidence`.                                           |
+| `low_margin`           | Điểm số của ứng viên đứng đầu và ứng viên tiếp theo (intent khác) quá sát nhau (dưới ngưỡng `min_margin`). |
+| `empty_index`          | Chỉ mục câu lệnh của ngôn ngữ hiện tại chưa được xây dựng.                                                 |
+| `validation_failed`    | Lệnh không vượt qua tiền kiểm, hoặc cả lượt thực thi chính và khôi phục đều thất bại                       |
+| `ranking_failed`       | Xảy ra lỗi xử lý trong bước chấm điểm và xếp hạng.                                                         |
+| `unexpected_exception` | Gặp lỗi nghiêm trọng không xác định trong quá trình thực thi.                                              |
 
 Bạn có thể kiểm tra lý do dự phòng của câu lệnh gần nhất bằng cách chạy hành động **Diagnostics**.
 
@@ -301,7 +310,7 @@ Bạn có thể kiểm tra lý do dự phòng của câu lệnh gần nhất b�
 
 1. Hãy sử dụng hành động **Diagnostics** để kiểm tra `last_fallback_reason`. Nếu lý do là `empty_index`, có nghĩa là chỉ mục chưa được tạo. Chỉ mục sẽ được chủ động làm nóng (warmup) ngay khi khởi động/tải lại cho tất cả ngôn ngữ được cấu hình trong Assist pipeline. Nếu `empty_index` vẫn xuất hiện, quá trình warmup có thể đã bị bỏ qua (không có pipeline nào được cấu hình, không có ngôn ngữ mặc định), hoặc quá trình xây dựng trong nền chưa hoàn tất. Bạn có thể kích hoạt thủ công qua hành động **Rebuild Index**.
 2. Nếu lý do là `low_confidence`, ngưỡng `min_confidence` bạn đặt có thể quá cao. Hãy thử hạ thấp cấu hình này xuống. Bạn nên dùng công cụ **Test Match** để xem điểm số thực tế của các câu lệnh mẫu.
-3. Nếu lý do là `validation_failed`, câu lệnh chuẩn hóa đã chọn không thành công. Lần khôi phục duy nhất, nếu đủ điều kiện, cũng thất bại. Hãy chạy hành động **Dump Candidates** để kiểm tra các câu lệnh, intent và dữ liệu slot đã được xếp hạng.
+3. Nếu lý do là `validation_failed`, câu lệnh được chọn đã thất bại khi tiền kiểm, hoặc cả lượt thực thi chính lẫn khôi phục đều không thành công. Bạn hãy sử dụng công cụ **Test Match** để phân tích cách chấm điểm và **Dump Candidates** để kiểm tra các câu lệnh được đăng ký cho ngôn ngữ đó.
 
 **Mẫu câu tùy chỉnh của tôi không được nhận diện.**
 
@@ -326,8 +335,8 @@ Assist Canonicalizer tự động lắng nghe các sự kiện thay đổi từ 
 
 1. **Kiểm tra trạng thái chung**: Chạy hành động **Diagnostics** để xem tổng số mẫu câu trong chỉ mục, phiên bản dữ liệu hiện tại, độ trễ xử lý và lý do dự phòng của câu lệnh gần nhất.
 2. **Kiểm tra cơ sở dữ liệu**: Chạy **Dump Candidates** với tùy chọn `rebuild: true` để xem chi tiết cơ cấu mẫu câu theo nguồn, mức độ phủ của các intent và danh sách các câu mẫu.
-3. **Phân tích câu lệnh lỗi**: Chạy hành động **Test Match** với chính xác câu lệnh gặp sự cố. Quan sát mảng dữ liệu `top_candidates` để phân tích điểm số chi tiết từ các thuật toán (`rapidfuzz_score`, `char_ngram_score`, `bm25_score`, `intent_score`, `final_score`) nhằm hiểu rõ vì sao mẫu câu đó không vượt qua được các ngưỡng lọc.
-4. **So sánh với tác nhân dự phòng**: Nếu câu lệnh bị chuyển dự phòng, hãy so sánh kết quả xử lý của bộ chuẩn hóa và tác nhân dự phòng qua công cụ **Test Match**. Nếu điểm số của ứng cử viên phù hợp chỉ thấp hơn ngưỡng cấu hình một chút, bạn có thể cân nhắc hạ nhẹ ngưỡng tin cậy. Nếu tác nhân dự phòng cũng xử lý kém, bạn cần bổ sung thêm mẫu câu phù hợp hơn trong tệp cấu hình.
+3. **Phân tích câu lệnh lỗi**: Chạy hành động **Test Match** với chính xác câu lệnh gặp sự cố. Quan sát đối tượng `scores` trong từng phần tử của mảng `top_candidates` (`rapidfuzz`, `char_ngram`, `bm25`, `intent`, `penalty`, `final`) cùng khóa `score` ở cấp cao nhất để hiểu rõ vì sao mẫu câu đó không vượt qua được các ngưỡng lọc.
+4. **So sánh với tác nhân dự phòng**: Nếu câu lệnh bị chuyển dự phòng, hãy so sánh kết quả xử lý của bộ chuẩn hóa và tác nhân dự phòng qua công cụ **Test Match**. Nếu điểm số của ứng viên phù hợp chỉ thấp hơn ngưỡng cấu hình một chút, bạn có thể cân nhắc hạ nhẹ ngưỡng tin cậy. Nếu tác nhân dự phòng cũng xử lý kém, bạn cần bổ sung thêm mẫu câu phù hợp hơn trong tệp cấu hình.
 5. **Tinh chỉnh các ngưỡng lọc**: Dựa trên điểm số phân tích từ **Test Match**, điều chỉnh các tham số `min_confidence` và `min_margin` trong phần cấu hình tích hợp, sau đó chạy lại **Test Match** để kiểm chứng.
 6. **Xem nhật ký hệ thống (Logs)**: Tra cứu các dòng log của Home Assistant liên quan đến miền `assist_canonicalizer` để tìm kiếm thêm thông tin chi tiết lỗi.
 

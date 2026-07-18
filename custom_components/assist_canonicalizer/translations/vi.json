@@ -7,7 +7,7 @@
         "data": {
           "fallback_agent_id": "Tác nhân hội thoại dự phòng",
           "min_confidence": "Độ tin cậy trùng khớp tối thiểu",
-          "min_margin": "Chênh lệch độ tin cậy tối thiểu"
+          "min_margin": "Chênh lệch độ tin cậy cơ sở"
         }
       }
     },
@@ -23,7 +23,7 @@
         "data": {
           "fallback_agent_id": "Tác nhân hội thoại dự phòng",
           "min_confidence": "Độ tin cậy trùng khớp tối thiểu",
-          "min_margin": "Chênh lệch độ tin cậy tối thiểu"
+          "min_margin": "Chênh lệch độ tin cậy cơ sở"
         }
       }
     }

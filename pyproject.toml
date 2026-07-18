@@ -8,9 +8,9 @@ dependencies = ["rapidfuzz>=3.10.0"]
 
 [dependency-groups]
 dev = [
-  "homeassistant>=2026.6.0",
   "hassil",
   "home-assistant-intents",
+  "homeassistant",
   "interrogate",
   "orjson",
   "packaging",
@@ -21,14 +21,28 @@ dev = [
   "pytest-cov",
   "pytest-homeassistant-custom-component",
   "pytest-timeout",
+  "pytest-xdist",
   "ruff",
-  "snakeviz",
   "tomlkit",
   "ty",
 ]
+ha-benchmark = [
+  "colorlog",
+  "ha-ffmpeg",
+  "hassil",
+  "home-assistant-frontend",
+  "home-assistant-intents",
+  "infrared-protocols",
+  "isal",
+  "mutagen",
+  "pymicro-vad",
+  "pyspeex-noise",
+  "pyturbojpeg",
+  "rf-protocols",
+]
 
 [tool.uv]
-override-dependencies = ["homeassistant>=2026.6.0"]
+override-dependencies = ["homeassistant>=2026.7.0"]
 
 [tool.ruff]
 line-length = 100
@@ -75,6 +89,8 @@ markers = [
   "current_intents: tests that assert the current home-assistant-intents corpus or metadata",
 ]
 addopts = [
+  "-n",
+  "auto",
   "--quiet",
   "--cov=custom_components",
   "--cov-fail-under=90",
