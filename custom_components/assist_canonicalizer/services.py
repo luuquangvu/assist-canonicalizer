@@ -29,6 +29,8 @@ from .const import (
     DATA_RUNTIME,
     DEFAULT_MAX_DYNAMIC_CANDIDATES,
     DEFAULT_MAX_DYNAMIC_SLOT_VALUES,
+    DEFAULT_MAX_REGISTRY_VALUES_NOMINATED,
+    DEFAULT_MAX_REGISTRY_VALUES_SCORED_PER_QUERY,
     DOMAIN,
     SERVICE_CLEAR_INDEX,
     SERVICE_DIAGNOSTICS,
@@ -38,7 +40,7 @@ from .const import (
 )
 from .indexer import CanonicalIndex
 from .normalization import normalize_text
-from .ranking import RankedCandidate, accepted_candidate
+from .ranking import RankedCandidate, evaluate_confidence_gates
 from .rehydration import get_wildcard_rehydration
 from .runtime import CanonicalizerRuntime
 from .utils import elapsed_ms, normalize_language, resolve_entry_thresholds
@@ -185,11 +187,14 @@ async def _handle_test_match(hass: Any, call: ServiceCall) -> dict[str, Any]:
         text,
     )
 
-    selected = accepted_candidate(
+    decision = evaluate_confidence_gates(
         ranked,
         min_confidence=min_confidence,
         min_margin=min_margin,
+        query=text,
+        language=language,
     )
+    selected = decision.accepted_candidate
 
     return {
         ATTR_LANGUAGE: language,
@@ -197,6 +202,11 @@ async def _handle_test_match(hass: Any, call: ServiceCall) -> dict[str, Any]:
         ATTR_CANDIDATE_COUNT: index.candidate_count,
         "index_cached": True,
         "dynamic_candidate_count": runtime.diagnostics.dynamic_candidate_count,
+        "decision_scope": "lexical",
+        "candidate_metadata_authoritative": False,
+        "live_recognition": "not_run",
+        "production_decision_path": "/api/conversation/process",
+        "confidence_gate": decision.as_dict(),
         ATTR_ACCEPTED: selected is not None,
         ATTR_SELECTED_CANDIDATE: (
             _ranked_candidate_response(selected, query=text) if selected else None
@@ -252,6 +262,10 @@ async def _handle_diagnostics(hass: Any, call: ServiceCall) -> dict[str, Any]:
                 "enabled": True,
                 "max_slot_values_per_slot": DEFAULT_MAX_DYNAMIC_SLOT_VALUES,
                 "max_candidates_per_query": DEFAULT_MAX_DYNAMIC_CANDIDATES,
+                "max_registry_values_nominated_per_slot": (DEFAULT_MAX_REGISTRY_VALUES_NOMINATED),
+                "max_registry_values_scored_per_query": (
+                    DEFAULT_MAX_REGISTRY_VALUES_SCORED_PER_QUERY
+                ),
             },
             "subscribed_intent_source_counts": runtime.subscribed_source_counts(),
         }

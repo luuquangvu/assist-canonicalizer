@@ -4,7 +4,7 @@ import asyncio
 import contextlib
 import inspect
 import sys
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -31,6 +31,10 @@ from custom_components.assist_canonicalizer.conversation import (
 )
 from custom_components.assist_canonicalizer.indexer import CanonicalIndex, build_index
 from custom_components.assist_canonicalizer.ranking import RankedCandidate, ScoreBreakdown
+from custom_components.assist_canonicalizer.recognition import (
+    RecognitionKind,
+    RecognitionObservation,
+)
 from custom_components.assist_canonicalizer.runtime import CanonicalizerRuntime
 from custom_components.assist_canonicalizer.utils import wildcard_slot_names
 
@@ -93,6 +97,43 @@ async def _executor_job_returning_empty_build_index(target: Any, *args: Any, **k
     if getattr(target, "__name__", None) == "build_index":
         return build_index("vi", [])
     return target(*args, **kwargs)
+
+
+def _active_pipeline_data(context: Context, pipeline: Any) -> SimpleNamespace:
+    """Return Home Assistant pipeline-run state matching one request context."""
+    run = SimpleNamespace(context=context, pipeline=pipeline)
+    return SimpleNamespace(pipeline_runs=SimpleNamespace(_pipeline_runs={"pipeline": {"run": run}}))
+
+
+def _mock_assist_pipeline_const(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Provide the Assist Pipeline domain without importing optional integration dependencies."""
+    package_name = "homeassistant.components.assist_pipeline"
+    package_module = ModuleType(package_name)
+    const_module = ModuleType(f"{package_name}.const")
+    package_attrs = cast(Any, package_module)
+    const_attrs = cast(Any, const_module)
+    package_attrs.__path__ = []
+    package_attrs.const = const_module
+    const_attrs.DOMAIN = "assist_pipeline"
+    monkeypatch.setitem(sys.modules, package_name, package_module)
+    monkeypatch.setitem(sys.modules, f"{package_name}.const", const_module)
+
+
+@pytest.fixture(autouse=True)
+def _default_live_recognition(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep existing conversation tests focused while preflight has dedicated coverage."""
+
+    async def observe(_hass: Any, _user_input: Any, _text: str) -> RecognitionObservation:
+        """Return a default executable live-recognition observation."""
+        return RecognitionObservation(
+            kind=RecognitionKind.INTENT,
+            intent_name="HassTurnOn",
+        )
+
+    monkeypatch.setattr(
+        "custom_components.assist_canonicalizer.conversation.async_observe_delegated_text",
+        observe,
+    )
 
 
 @pytest.mark.asyncio
@@ -599,7 +640,7 @@ async def test_validation_only_delegates_accepted_candidate() -> None:
     entry.options = {"min_confidence": 0.60, "min_margin": 0.05}
     entry.entry_id = "test_entry"
     runtime = CanonicalizerRuntime()
-    runtime.indexes["en"] = MagicMock(candidate_count=2)
+    runtime.indexes["en"] = MagicMock(candidate_count=3)
     entity = AssistCanonicalizerConversationEntity(entry, runtime)
     hass = MagicMock()
     hass.async_add_executor_job = AsyncMock(side_effect=lambda target, *args: target(*args))
@@ -752,7 +793,6 @@ async def test_no_intent_match_reranks_cross_intent_candidate() -> None:
             AsyncMock(side_effect=[no_match, success]),
         ) as delegate,
         patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw")) as raw,
-        patch("custom_components.assist_canonicalizer.conversation.async_get_agent") as get_agent,
     ):
         result = await entity._async_process_with_runtime(user_input)
 
@@ -763,12 +803,11 @@ async def test_no_intent_match_reranks_cross_intent_candidate() -> None:
     ]
     assert all(call.kwargs == {"primary": True} for call in delegate.await_args_list)
     raw.assert_not_awaited()
-    get_agent.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_no_intent_match_reranks_candidate_with_different_slots() -> None:
-    """Recover a lower-ranked candidate with independently re-gated slots."""
+async def test_query_supported_target_replaces_unsupported_higher_rank() -> None:
+    """Execute the query-supported target without trying an unsupported leader."""
     entry = MagicMock()
     entry.options = {"min_confidence": 0.60, "min_margin": 0.05}
     entry.entry_id = "test_entry"
@@ -803,8 +842,6 @@ async def test_no_intent_match_reranks_candidate_with_different_slots() -> None:
         ),
         scores=ScoreBreakdown(0.8, 0.8, 0.8, 1.0, 0.8),
     )
-    no_match = MagicMock()
-    no_match.response.error_code = intent.IntentResponseErrorCode.NO_INTENT_MATCH
     success = MagicMock()
     success.response.error_code = None
     user_input = MockConversationInput("set kitchen light to 50", "en")
@@ -815,10 +852,19 @@ async def test_no_intent_match_reranks_candidate_with_different_slots() -> None:
             "rank_with_dynamic_candidates",
             return_value=(selected, correct_target, compatible_target),
         ),
+        patch(
+            "custom_components.assist_canonicalizer.conversation.async_observe_delegated_text",
+            AsyncMock(
+                return_value=RecognitionObservation(
+                    kind=RecognitionKind.INTENT,
+                    intent_name="HassLightSet",
+                )
+            ),
+        ),
         patch.object(
             entity,
             "_delegate_text",
-            AsyncMock(side_effect=[no_match, success]),
+            AsyncMock(return_value=success),
         ) as delegate,
         patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw")) as raw,
     ):
@@ -826,7 +872,6 @@ async def test_no_intent_match_reranks_candidate_with_different_slots() -> None:
 
     assert result == success
     assert [call.args[0] for call in delegate.await_args_list] == [
-        "set office light to 20",
         "set kitchen light to 50",
     ]
     raw.assert_not_awaited()
@@ -864,11 +909,28 @@ async def test_no_valid_targets_recovers_after_unmatched_entity_recognition() ->
     no_targets.response.error_code = intent.IntentResponseErrorCode.NO_VALID_TARGETS
     success = MagicMock()
     success.response.error_code = None
-    recognize_intent = AsyncMock(
-        return_value=SimpleNamespace(unmatched_entities={"name": object()})
-    )
-    default_agent = SimpleNamespace(async_recognize_intent=recognize_intent)
     user_input = MockConversationInput("turn on living room light", "en")
+    observations = iter(
+        (
+            RecognitionObservation(
+                kind=RecognitionKind.INTENT,
+                intent_name="HassLightSet",
+            ),
+            RecognitionObservation(
+                kind=RecognitionKind.UNMATCHED_TARGET,
+                intent_name="HassLightSet",
+                unmatched_entities=("name",),
+            ),
+            RecognitionObservation(
+                kind=RecognitionKind.INTENT,
+                intent_name="HassTurnOn",
+            ),
+        )
+    )
+
+    async def observe(*_args: Any) -> RecognitionObservation:
+        """Return the next recognition observation in the recovery sequence."""
+        return next(observations)
 
     with (
         patch.object(
@@ -883,9 +945,9 @@ async def test_no_valid_targets_recovers_after_unmatched_entity_recognition() ->
         ) as delegate,
         patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw")) as raw,
         patch(
-            "custom_components.assist_canonicalizer.conversation.async_get_agent",
-            return_value=default_agent,
-        ) as get_agent,
+            "custom_components.assist_canonicalizer.conversation.async_observe_delegated_text",
+            side_effect=observe,
+        ) as observe_live,
     ):
         result = await entity._async_process_with_runtime(user_input)
 
@@ -895,16 +957,7 @@ async def test_no_valid_targets_recovers_after_unmatched_entity_recognition() ->
         "turn on living room light",
     ]
     raw.assert_not_awaited()
-    get_agent.assert_called_once_with(hass, HOME_ASSISTANT_AGENT)
-    recognize_intent.assert_awaited_once()
-    assert recognize_intent.await_args is not None
-    recognition_input = recognize_intent.await_args.args[0]
-    assert recognition_input is not user_input
-    assert recognition_input.text == "set kitchen light to 50"
-    assert recognition_input.context is user_input.context
-    assert recognition_input.conversation_id == user_input.conversation_id
-    assert recognition_input.language == user_input.language
-    assert recognition_input.agent_id == HOME_ASSISTANT_AGENT
+    assert observe_live.await_count == 3
     assert user_input.text == "turn on living room light"
 
 
@@ -930,8 +983,6 @@ async def test_no_valid_targets_falls_back_after_handler_target_failure() -> Non
     )
     no_targets = MagicMock()
     no_targets.response.error_code = intent.IntentResponseErrorCode.NO_VALID_TARGETS
-    recognize_intent = AsyncMock(return_value=SimpleNamespace(unmatched_entities={}))
-    default_agent = SimpleNamespace(async_recognize_intent=recognize_intent)
     user_input = MockConversationInput("turn on the light", "en")
 
     with (
@@ -943,15 +994,26 @@ async def test_no_valid_targets_falls_back_after_handler_target_failure() -> Non
         patch.object(entity, "_delegate_text", AsyncMock(return_value=no_targets)) as delegate,
         patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw")) as raw,
         patch(
-            "custom_components.assist_canonicalizer.conversation.async_get_agent",
-            return_value=default_agent,
-        ),
+            "custom_components.assist_canonicalizer.conversation.async_observe_delegated_text",
+            AsyncMock(
+                side_effect=(
+                    RecognitionObservation(
+                        kind=RecognitionKind.INTENT,
+                        intent_name="HassTurnOn",
+                    ),
+                    RecognitionObservation(
+                        kind=RecognitionKind.INTENT,
+                        intent_name="HassTurnOn",
+                    ),
+                )
+            ),
+        ) as observe_live,
     ):
         result = await entity._async_process_with_runtime(user_input)
 
     assert result == "raw"
     delegate.assert_awaited_once_with("turn on kitchen light", user_input, primary=True)
-    recognize_intent.assert_awaited_once()
+    assert observe_live.await_count == 2
     raw.assert_awaited_once_with(user_input)
 
 
@@ -962,33 +1024,18 @@ async def test_unmatched_entity_provenance_check_fails_closed(
     """Treat unavailable or failed side-effect-free recognition as indeterminate."""
     user_input = MockConversationInput("turn on the light", "en")
 
-    with patch(
-        "custom_components.assist_canonicalizer.conversation.async_get_agent",
-        return_value=None,
+    for observation in (
+        RecognitionObservation(kind=RecognitionKind.ERROR, error_category="agent_unavailable"),
+        RecognitionObservation(kind=RecognitionKind.ERROR, error_category="recognition_failed"),
+        RecognitionObservation(kind=RecognitionKind.NO_MATCH),
     ):
-        assert not await conversation_entity._async_has_unmatched_entities(
-            "turn on kitchen light", user_input
-        )
-
-    recognize_intent = AsyncMock(side_effect=RuntimeError("recognition failed"))
-    default_agent = SimpleNamespace(async_recognize_intent=recognize_intent)
-    with patch(
-        "custom_components.assist_canonicalizer.conversation.async_get_agent",
-        return_value=default_agent,
-    ):
-        assert not await conversation_entity._async_has_unmatched_entities(
-            "turn on kitchen light", user_input
-        )
-
-    recognize_intent = AsyncMock(return_value=None)
-    default_agent = SimpleNamespace(async_recognize_intent=recognize_intent)
-    with patch(
-        "custom_components.assist_canonicalizer.conversation.async_get_agent",
-        return_value=default_agent,
-    ):
-        assert not await conversation_entity._async_has_unmatched_entities(
-            "turn on kitchen light", user_input
-        )
+        with patch(
+            "custom_components.assist_canonicalizer.conversation.async_observe_delegated_text",
+            AsyncMock(return_value=observation),
+        ):
+            assert not await conversation_entity._async_has_unmatched_entities(
+                "turn on kitchen light", user_input
+            )
 
 
 @pytest.mark.parametrize(
@@ -1092,6 +1139,61 @@ async def test_candidate_recovery_is_capped_at_one_additional_hassil_call() -> N
 
 
 @pytest.mark.asyncio
+async def test_recovery_handler_error_routes_to_fallback_agent() -> None:
+    """Route the original query to the fallback agent after recovery fails."""
+    entry = MagicMock(entry_id="test_entry")
+    entry.options = {
+        "min_confidence": 0.60,
+        "min_margin": 0.05,
+        CONF_FALLBACK_AGENT_ID: "llm_agent",
+    }
+    runtime = CanonicalizerRuntime()
+    runtime.indexes["en"] = MagicMock(candidate_count=2)
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    entity.hass = MagicMock(
+        async_add_executor_job=AsyncMock(side_effect=lambda target, *args: target(*args))
+    )
+    ranked = (
+        RankedCandidate(
+            Candidate(text="turn on kitchen light", intent_name="HassTurnOn"),
+            ScoreBreakdown(0.9, 0.9, 0.9, 1.0, 0.9),
+        ),
+        RankedCandidate(
+            Candidate(text="turn on kitchen lamp", intent_name="HassTurnOn"),
+            ScoreBreakdown(0.8, 0.8, 0.8, 1.0, 0.8),
+        ),
+    )
+    no_match = MagicMock()
+    no_match.response.error_code = intent.IntentResponseErrorCode.NO_INTENT_MATCH
+    failed = MagicMock()
+    failed.response.error_code = intent.IntentResponseErrorCode.FAILED_TO_HANDLE
+    fallback_result = MagicMock()
+    fallback_result.response.error_code = None
+    user_input = MockConversationInput("turn kitchen light", "en")
+
+    with (
+        patch.object(CanonicalizerRuntime, "rank_with_dynamic_candidates", return_value=ranked),
+        patch(
+            "homeassistant.components.conversation.async_converse",
+            AsyncMock(side_effect=[no_match, failed, fallback_result]),
+        ) as converse,
+    ):
+        result = await entity._async_process_with_runtime(user_input)
+
+    assert result is fallback_result
+    assert [call.args[1] for call in converse.await_args_list] == [
+        "turn on kitchen light",
+        "turn on kitchen lamp",
+        user_input.text,
+    ]
+    assert [call.kwargs["agent_id"] for call in converse.await_args_list] == [
+        HOME_ASSISTANT_AGENT,
+        HOME_ASSISTANT_AGENT,
+        "llm_agent",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_candidate_recovery_skips_normalized_duplicate_text(
     conversation_entity: AssistCanonicalizerConversationEntity,
 ) -> None:
@@ -1123,6 +1225,219 @@ async def test_candidate_recovery_skips_normalized_duplicate_text(
     assert recovery is not None
     assert recovery[0] is distinct
     assert recovery[1] == "switch on kitchen light"
+
+
+@pytest.mark.asyncio
+async def test_live_preflight_skips_duplicate_text_and_allows_metadata_divergence() -> None:
+    """Execute a lower distinct text when live recognition rejects the lexical winner."""
+    entry = MagicMock(entry_id="test_entry")
+    entry.options = {"min_confidence": 0.60, "min_margin": 0.05}
+    runtime = CanonicalizerRuntime()
+    runtime.indexes["en"] = MagicMock(candidate_count=3)
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    entity.hass = MagicMock(
+        async_add_executor_job=AsyncMock(side_effect=lambda target, *args: target(*args))
+    )
+    top = RankedCandidate(
+        Candidate(text="turn on ghost lamp", intent_name="IntentGeneratedTop"),
+        ScoreBreakdown(0.90, 0.90, 0.90, 0.90, 0.90),
+    )
+    duplicate = RankedCandidate(
+        Candidate(text="Turn on ghost lamp!", intent_name="IntentDuplicateMetadata"),
+        ScoreBreakdown(0.85, 0.85, 0.85, 0.85, 0.85),
+    )
+    lower = RankedCandidate(
+        Candidate(
+            text="turn on living room lamp",
+            intent_name="IntentGeneratedLower",
+            metadata={"slots": '{"name":"generated name"}'},
+        ),
+        ScoreBreakdown(0.80, 0.80, 0.80, 0.80, 0.80),
+    )
+    observations = (
+        RecognitionObservation(kind=RecognitionKind.NO_MATCH),
+        RecognitionObservation(
+            kind=RecognitionKind.INTENT,
+            intent_name="HassTurnOn",
+            slots=(("name", "Living Room Lamp"),),
+        ),
+    )
+    success = MagicMock()
+    success.response.error_code = None
+    user_input = MockConversationInput("turn teh lamp on", "en")
+
+    with (
+        patch.object(
+            CanonicalizerRuntime,
+            "rank_with_dynamic_candidates",
+            return_value=(top, duplicate, lower),
+        ),
+        patch(
+            "custom_components.assist_canonicalizer.conversation.async_observe_delegated_text",
+            AsyncMock(side_effect=observations),
+        ) as observe,
+        patch.object(entity, "_delegate_text", AsyncMock(return_value=success)) as delegate,
+        patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw")) as raw,
+    ):
+        result = await entity._async_process_with_runtime(user_input)
+
+    assert result is success
+    assert [call.args[2] for call in observe.await_args_list] == [
+        "turn on ghost lamp",
+        "turn on living room lamp",
+    ]
+    delegate.assert_awaited_once_with("turn on living room lamp", user_input, primary=True)
+    raw.assert_not_awaited()
+    assert runtime.diagnostics.preflight_attempt_count == 2
+    assert runtime.diagnostics.metadata_diverged
+    assert runtime.diagnostics.metadata_divergence_reason == "intent_and_slots"
+    assert runtime.diagnostics.recognition_intent == "HassTurnOn"
+
+
+@pytest.mark.asyncio
+async def test_live_preflight_prefers_same_intent_surface_with_aligned_recognition() -> None:
+    """Prefer an alternate wording when it preserves and validates the ranked intent."""
+    entry = MagicMock(entry_id="test_entry")
+    entry.options = {"min_confidence": 0.60, "min_margin": 0.05}
+    runtime = CanonicalizerRuntime()
+    runtime.indexes["en"] = MagicMock(candidate_count=3)
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    entity.hass = MagicMock(
+        async_add_executor_job=AsyncMock(side_effect=lambda target, *args: target(*args))
+    )
+    ambiguous_surface = RankedCandidate(
+        Candidate(text="bedroom light on", intent_name="HassTurnOn"),
+        ScoreBreakdown(0.90, 0.90, 0.90, 0.90, 0.90),
+    )
+    unrelated_intent = RankedCandidate(
+        Candidate(text="turn off bedroom light", intent_name="HassTurnOff"),
+        ScoreBreakdown(0.84, 0.84, 0.84, 0.84, 0.84),
+    )
+    explicit_surface = RankedCandidate(
+        Candidate(text="turn on bedroom light", intent_name="HassTurnOn"),
+        ScoreBreakdown(0.82, 0.82, 0.82, 0.82, 0.82),
+    )
+    observations = (
+        RecognitionObservation(
+            kind=RecognitionKind.INTENT,
+            intent_name="HassLightSet",
+        ),
+        RecognitionObservation(
+            kind=RecognitionKind.INTENT,
+            intent_name="HassTurnOn",
+        ),
+    )
+    success = MagicMock()
+    success.response.error_code = None
+    user_input = MockConversationInput("turn bedrom light", "en")
+
+    with (
+        patch.object(
+            CanonicalizerRuntime,
+            "rank_with_dynamic_candidates",
+            return_value=(ambiguous_surface, unrelated_intent, explicit_surface),
+        ),
+        patch(
+            "custom_components.assist_canonicalizer.conversation.async_observe_delegated_text",
+            AsyncMock(side_effect=observations),
+        ) as observe,
+        patch.object(entity, "_delegate_text", AsyncMock(return_value=success)) as delegate,
+        patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw")) as raw,
+    ):
+        result = await entity._async_process_with_runtime(user_input)
+
+    assert result is success
+    assert [call.args[2] for call in observe.await_args_list] == [
+        "bedroom light on",
+        "turn on bedroom light",
+    ]
+    delegate.assert_awaited_once_with("turn on bedroom light", user_input, primary=True)
+    raw.assert_not_awaited()
+    assert runtime.diagnostics.preflight_attempt_count == 2
+    assert not runtime.diagnostics.metadata_diverged
+    assert runtime.diagnostics.recognition_intent == "HassTurnOn"
+
+
+@pytest.mark.asyncio
+async def test_live_preflight_stops_after_three_distinct_texts() -> None:
+    """Fail closed after the configured three-text recognition budget."""
+    entry = MagicMock(entry_id="test_entry")
+    entry.options = {"min_confidence": 0.60, "min_margin": 0.05}
+    runtime = CanonicalizerRuntime()
+    runtime.indexes["en"] = MagicMock(candidate_count=4)
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    entity.hass = MagicMock(
+        async_add_executor_job=AsyncMock(side_effect=lambda target, *args: target(*args))
+    )
+    ranked = tuple(
+        RankedCandidate(
+            Candidate(text=f"command {index}", intent_name="IntentSame"),
+            ScoreBreakdown(score, score, score, score, score),
+        )
+        for index, score in enumerate((0.90, 0.85, 0.80, 0.75), start=1)
+    )
+    user_input = MockConversationInput("raw original", "en")
+
+    with (
+        patch.object(
+            CanonicalizerRuntime,
+            "rank_with_dynamic_candidates",
+            return_value=ranked,
+        ),
+        patch(
+            "custom_components.assist_canonicalizer.conversation.async_observe_delegated_text",
+            AsyncMock(return_value=RecognitionObservation(kind=RecognitionKind.NO_MATCH)),
+        ) as observe,
+        patch.object(entity, "_delegate_text", AsyncMock()) as delegate,
+        patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw")) as raw,
+    ):
+        result = await entity._async_process_with_runtime(user_input)
+
+    assert result == "raw"
+    assert observe.await_count == 3
+    delegate.assert_not_awaited()
+    raw.assert_awaited_once_with(user_input)
+    assert runtime.diagnostics.preflight_attempt_count == 3
+
+
+@pytest.mark.asyncio
+async def test_live_preflight_sentence_trigger_uses_raw_fallback() -> None:
+    """Never execute a fuzzy rewrite that newly matches a sentence trigger."""
+    entry = MagicMock(entry_id="test_entry")
+    entry.options = {"min_confidence": 0.60, "min_margin": 0.05}
+    runtime = CanonicalizerRuntime()
+    runtime.indexes["en"] = MagicMock(candidate_count=1)
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    entity.hass = MagicMock(
+        async_add_executor_job=AsyncMock(side_effect=lambda target, *args: target(*args))
+    )
+    ranked = (
+        RankedCandidate(
+            Candidate(text="start bedtime", intent_name="GeneratedIntent"),
+            ScoreBreakdown(0.90, 0.90, 0.90, 0.90, 0.90),
+        ),
+    )
+    user_input = MockConversationInput("stert bedtime", "en")
+
+    with (
+        patch.object(
+            CanonicalizerRuntime,
+            "rank_with_dynamic_candidates",
+            return_value=ranked,
+        ),
+        patch(
+            "custom_components.assist_canonicalizer.conversation.async_observe_delegated_text",
+            AsyncMock(return_value=RecognitionObservation(kind=RecognitionKind.SENTENCE_TRIGGER)),
+        ),
+        patch.object(entity, "_delegate_text", AsyncMock()) as delegate,
+        patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw")) as raw,
+    ):
+        result = await entity._async_process_with_runtime(user_input)
+
+    assert result == "raw"
+    delegate.assert_not_awaited()
+    raw.assert_awaited_once_with(user_input)
+    assert runtime.diagnostics.recognition_kind == "sentence_trigger"
 
 
 @pytest.mark.asyncio
@@ -1358,28 +1673,23 @@ async def test_async_process_prefer_local_intents_shortcut(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test prefer_local_intents shortcut behavior when it is False."""
+    _mock_assist_pipeline_const(monkeypatch)
 
     class DummyPipeline:
         """Dummy pipeline class for testing."""
 
         prefer_local_intents = False
 
-    mock_pipeline_module = MagicMock()
-    mock_pipeline_module.async_get_pipeline = MagicMock(return_value=DummyPipeline())
-
-    monkeypatch.setitem(
-        sys.modules,
-        "homeassistant.components.assist_pipeline.pipeline",
-        mock_pipeline_module,
-    )
-
-    entry = MagicMock()
+    entry = MagicMock(entry_id="test-entry")
+    entry.options = {}
+    entry.data = {}
     runtime = CanonicalizerRuntime()
     entity = AssistCanonicalizerConversationEntity(entry, runtime)
     entity.hass = MagicMock()
-    entity.hass.data = {"assist_pipeline": MagicMock()}
-
     user_input = MockConversationInput("tắt đèn bếp", "vi")
+    entity.hass.data = {
+        "assist_pipeline": _active_pipeline_data(user_input.context, DummyPipeline())
+    }
     validation_ok_res = MagicMock()
     validation_ok_res.response.error_code = None
 
@@ -1404,29 +1714,25 @@ async def test_async_process_prefer_local_intents_true_no_shortcut(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test prefer_local_intents behavior when it is True (should not run shortcut)."""
+    _mock_assist_pipeline_const(monkeypatch)
 
     class DummyPipeline:
         """Dummy pipeline class for testing."""
 
         prefer_local_intents = True
 
-    mock_pipeline_module = MagicMock()
-    mock_pipeline_module.async_get_pipeline = MagicMock(return_value=DummyPipeline())
-
-    monkeypatch.setitem(
-        sys.modules,
-        "homeassistant.components.assist_pipeline.pipeline",
-        mock_pipeline_module,
-    )
-
-    entry = MagicMock()
+    entry = MagicMock(entry_id="test-entry")
+    entry.options = {}
+    entry.data = {}
     runtime = CanonicalizerRuntime()
     entity = AssistCanonicalizerConversationEntity(entry, runtime)
     entity.hass = MagicMock()
-    entity.hass.data = {"assist_pipeline": MagicMock()}
     entity.hass.async_add_executor_job = AsyncMock(side_effect=lambda target, *args: target(*args))
 
     user_input = MockConversationInput("tắt đèn bếp", "vi")
+    entity.hass.data = {
+        "assist_pipeline": _active_pipeline_data(user_input.context, DummyPipeline())
+    }
     validation_ok_res = MagicMock()
     validation_ok_res.response.error_code = None
 
@@ -1461,22 +1767,16 @@ async def test_async_process_shortcut_restores_chat_log(
     simulate_exception: bool,
 ) -> None:
     """Test that the chat log is restored if the shortcut path fails or raises an exception."""
+    _mock_assist_pipeline_const(monkeypatch)
 
     class DummyPipeline:
         """Dummy pipeline class for testing."""
 
         prefer_local_intents = False
 
-    mock_pipeline_module = MagicMock()
-    mock_pipeline_module.async_get_pipeline = MagicMock(return_value=DummyPipeline())
-
-    monkeypatch.setitem(
-        sys.modules,
-        "homeassistant.components.assist_pipeline.pipeline",
-        mock_pipeline_module,
-    )
-
-    entry = MagicMock()
+    entry = MagicMock(entry_id="test-entry")
+    entry.options = {}
+    entry.data = {}
     runtime = CanonicalizerRuntime()
     mock_index = MagicMock()
     mock_index.language = "vi"
@@ -1491,12 +1791,12 @@ async def test_async_process_shortcut_restores_chat_log(
     mock_chat_log = MagicMock()
     mock_chat_log.content = [mock_user_message]
 
-    entity.hass.data = {
-        "assist_pipeline": MagicMock(),
-    }
     entity.hass.async_add_executor_job = AsyncMock(side_effect=lambda target, *args: target(*args))
 
     user_input = MockConversationInput("tắt đèn bếp", "vi", conversation_id="conv-1")
+    entity.hass.data = {
+        "assist_pipeline": _active_pipeline_data(user_input.context, DummyPipeline())
+    }
 
     # Shortcut result has an error
     shortcut_res = MagicMock()
@@ -1902,11 +2202,7 @@ async def test_async_process_fallback_missing(
         "homeassistant.components.conversation.async_converse",
         side_effect=mock_converse,
     )
-    rank_patch = patch(
-        "custom_components.assist_canonicalizer.conversation.evaluate_confidence_gates",
-        return_value=(None, FallbackReason.LOW_CONFIDENCE),
-    )
-    with converse_patch, rank_patch:
+    with converse_patch:
         user_input = MockConversationInput("hello", "en")
         res = await conversation_entity.async_process(user_input)
         # Should return a default error response when fallback completely fails

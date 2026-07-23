@@ -38,13 +38,19 @@ from custom_components.assist_canonicalizer.ranking import (
     RankedCandidate,
     ScoreBreakdown,
 )
-from tools import benchmark
+from tools import benchmark_offline as benchmark
+from tools.benchmark_language_smoke import ACCURACY_GATED_LANGUAGES
 
 benchmark._bootstrap_project_imports()
 
 DATASET_DIR = Path("tests/real_world")
 _LANGUAGES: tuple[str, ...] | None = None
 _UNCAPPED_STATIC_CANDIDATE_LIMIT = 1_000_000
+
+
+def test_every_accuracy_gated_language_has_a_tracked_corpus() -> None:
+    """Do not allow corpus deletion to silently weaken the managed accuracy gate."""
+    assert set(_discover_languages()) >= ACCURACY_GATED_LANGUAGES
 
 
 def _discover_languages() -> tuple[str, ...]:
@@ -594,7 +600,7 @@ def test_real_world_expected_slots_align_with_hassil(
     assert not failures, (
         f"{dataset_context.language}: expected_slots mismatch HassIL: {failures}. "
         "If this is due to upstream grammar updates, please run: "
-        "uv run tools/benchmark.py --regenerate-expectations"
+        "uv run tools/benchmark_offline.py --regenerate-expectations"
     )
 
 

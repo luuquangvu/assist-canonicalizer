@@ -5,15 +5,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+import hashlib
 import logging
 import time
 from collections.abc import Callable, Iterator, Sequence
-from copy import copy
+from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal
 
 from homeassistant.components import conversation
-from homeassistant.components.conversation.agent_manager import async_get_agent
 from homeassistant.components.conversation.const import HOME_ASSISTANT_AGENT
 from homeassistant.components.conversation.models import (
     AbstractConversationAgent,
@@ -24,7 +24,6 @@ from homeassistant.const import MATCH_ALL
 from homeassistant.helpers import intent
 
 if TYPE_CHECKING:
-    from homeassistant.components.conversation.default_agent import DefaultAgent
     from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from homeassistant.helpers import area_registry, device_registry, entity_registry
@@ -33,12 +32,18 @@ from .const import (
     CONF_FALLBACK_AGENT_ID,
     DATA_RUNTIME,
     DEFAULT_MAX_CANDIDATES,
+    DEFAULT_MAX_PREFLIGHT_ATTEMPTS,
     DOMAIN,
     NAME,
     FallbackReason,
 )
 from .normalization import normalize_text
-from .ranking import RankedCandidate, evaluate_confidence_gates
+from .ranking import ConfidenceGateDecision, RankedCandidate, evaluate_confidence_gates
+from .recognition import (
+    RecognitionObservation,
+    async_observe_delegated_text,
+    metadata_matches_observation,
+)
 from .rehydration import get_wildcard_rehydration
 from .runtime import CanonicalizerRuntime
 from .utils import (
@@ -49,6 +54,18 @@ from .utils import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class _PreflightSelection:
+    """One live-valid candidate selected after bounded preflight."""
+
+    ranked_candidate: RankedCandidate
+    delegated_text: str
+    observation: RecognitionObservation
+    decision: ConfidenceGateDecision
+    attempt_count: int
+    attempted_text_keys: frozenset[str]
 
 
 async def async_setup_entry(
@@ -141,9 +158,12 @@ class AssistCanonicalizerConversationEntity(
     async def async_process(self, user_input: ConversationInput) -> ConversationResult:
         """Process a conversation request."""
         started_at = time.monotonic()
+        request_id = user_input.conversation_id or getattr(user_input.context, "id", None)
         self._runtime.update_diagnostics(
             clear_last_fallback_reason=True,
             clear_last_error=True,
+            clear_request_trace=True,
+            last_request_id=request_id,
         )
         try:
             result = await self._async_process_with_runtime(user_input)
@@ -177,13 +197,16 @@ class AssistCanonicalizerConversationEntity(
     async def _async_try_assist_pipeline_shortcut(
         self, user_input: ConversationInput
     ) -> ConversationResult | None:
-        """Attempt to delegate text directly via the assist pipeline shortcut path if allowed."""
+        """Try the local shortcut, continuing normal routing after any failure.
+
+        A shortcut error is not terminal: canonical matching and, ultimately, the
+        user-configured fallback agent must remain available for the original text.
+        """
         chat_log = self._get_active_chat_log()
         old_len = len(chat_log.content) if chat_log is not None else None
 
         try:
             from homeassistant.components.assist_pipeline.const import DOMAIN as PIPELINE_DOMAIN
-            from homeassistant.components.assist_pipeline.pipeline import async_get_pipeline
 
             pipeline_data = self.hass.data.get(PIPELINE_DOMAIN)
             current_pipeline = None
@@ -200,8 +223,7 @@ class AssistCanonicalizerConversationEntity(
                     if current_pipeline:
                         break
 
-            pipeline = current_pipeline or async_get_pipeline(self.hass)
-            if not pipeline or getattr(pipeline, "prefer_local_intents", False):
+            if current_pipeline is None or getattr(current_pipeline, "prefer_local_intents", False):
                 return None
 
             shortcut_result = await self._delegate_with_capture(
@@ -266,6 +288,11 @@ class AssistCanonicalizerConversationEntity(
         diagnostics to clear the last error and return immediately. Note that early
         returns from this shortcut bypass the canonicalization index matching, meaning
         error diagnostics from failed canonicalizations will not be populated.
+
+        The configured fallback agent is the semantic authority for every unsuccessful
+        local path and may itself be an LLM. Error provenance may restrict execution of
+        another local canonical candidate, but must never suppress forwarding the
+        untouched original text to that fallback agent.
         """
         if shortcut_result := await self._async_try_assist_pipeline_shortcut(user_input):
             return shortcut_result
@@ -301,11 +328,14 @@ class AssistCanonicalizerConversationEntity(
                 user_input.text,
                 DEFAULT_MAX_CANDIDATES,
             )
-            selected, fallback_reason = evaluate_confidence_gates(
+            decision = evaluate_confidence_gates(
                 ranked,
                 min_confidence=min_confidence,
                 min_margin=min_margin,
+                query=user_input.text,
+                language=language,
             )
+            self._runtime.update_diagnostics(confidence_gate=decision.as_dict())
         except Exception as err:
             self._runtime.update_diagnostics(
                 last_fallback_reason=FallbackReason.RANKING_FAILED,
@@ -313,20 +343,38 @@ class AssistCanonicalizerConversationEntity(
             )
             return await self._delegate_raw_text(user_input)
 
-        if selected is None:
+        if decision.accepted_candidate is None:
             self._runtime.update_diagnostics(
-                last_fallback_reason=fallback_reason or FallbackReason.LOW_CONFIDENCE
+                last_fallback_reason=decision.rejection_reason or FallbackReason.LOW_CONFIDENCE,
+                execution_result="raw_fallback",
             )
             return await self._delegate_raw_text(user_input)
 
-        delegated_text = self._candidate_delegation_text(selected, user_input)
+        preflight = await self._async_preflight_ranked_candidates(
+            ranked,
+            user_input,
+            min_confidence,
+            min_margin,
+        )
+        if preflight is None:
+            self._runtime.update_diagnostics(
+                last_fallback_reason=FallbackReason.VALIDATION_FAILED,
+                execution_result="raw_fallback",
+            )
+            return await self._delegate_raw_text(user_input)
+
+        selected = preflight.ranked_candidate
+        delegated_text = preflight.delegated_text
         execution_result = await self._async_execute_ranked_candidate(
             selected,
             user_input,
             delegated_text,
         )
         if execution_result is not None and not self._result_has_error(execution_result):
-            self._runtime.update_diagnostics(clear_last_error=True)
+            self._runtime.update_diagnostics(
+                clear_last_error=True,
+                execution_result="success",
+            )
             return execution_result
 
         error_code = self._result_error_code(execution_result)
@@ -338,19 +386,33 @@ class AssistCanonicalizerConversationEntity(
             min_confidence,
             min_margin,
             user_input,
+            excluded_delegated_keys=preflight.attempted_text_keys,
         )
         if recovery is not None:
-            recovery_candidate, recovery_text = recovery
+            recovery_candidate, recovery_text, recovery_observation = recovery
+            self._record_recognition_diagnostics(
+                recovery_candidate,
+                recovery_text,
+                recovery_observation,
+                preflight.attempt_count + 1,
+            )
+            self._runtime.update_diagnostics(recovery_used=True)
             recovery_result = await self._async_execute_ranked_candidate(
                 recovery_candidate,
                 user_input,
                 recovery_text,
             )
             if recovery_result is not None and not self._result_has_error(recovery_result):
-                self._runtime.update_diagnostics(clear_last_error=True)
+                self._runtime.update_diagnostics(
+                    clear_last_error=True,
+                    execution_result="success_after_execution_recovery",
+                )
                 return recovery_result
 
-        self._runtime.update_diagnostics(last_fallback_reason=FallbackReason.VALIDATION_FAILED)
+        self._runtime.update_diagnostics(
+            last_fallback_reason=FallbackReason.VALIDATION_FAILED,
+            execution_result=error_code or "candidate_execution_failed",
+        )
         return await self._delegate_raw_text(user_input)
 
     def _intent_context_from_user_input(
@@ -405,6 +467,165 @@ class AssistCanonicalizerConversationEntity(
             return None
         return rehydrated
 
+    async def _async_preflight_ranked_candidates(
+        self,
+        ranked: Sequence[RankedCandidate],
+        user_input: ConversationInput,
+        min_confidence: float,
+        min_margin: float,
+    ) -> _PreflightSelection | None:
+        """Return a distinct, fully re-gated, live-valid delegated text.
+
+        An executable parse whose intent disagrees with candidate metadata is
+        retained as a safe fallback. Within the bounded attempt budget, prefer
+        a lower-ranked surface form of that same intended intent when live
+        recognition confirms the metadata. This changes wording, not the
+        lexical intent decision, and preserves the original executable result
+        when no consistent alternative exists.
+        """
+        remaining = list(ranked)
+        attempted_texts: set[str] = set()
+        intent_divergent_fallback: _PreflightSelection | None = None
+        while remaining and len(attempted_texts) < DEFAULT_MAX_PREFLIGHT_ATTEMPTS:
+            decision = evaluate_confidence_gates(
+                remaining,
+                min_confidence=min_confidence,
+                min_margin=min_margin,
+                query=user_input.text,
+                language=normalize_language(user_input.language),
+            )
+            self._runtime.update_diagnostics(confidence_gate=decision.as_dict())
+            selected = decision.accepted_candidate
+            if selected is None:
+                break
+            delegated_text = self._candidate_delegation_text(selected, user_input)
+            if delegated_text is None:
+                remaining = [candidate for candidate in remaining if candidate is not selected]
+                continue
+            delegated_key = normalize_text(delegated_text)
+            if not delegated_key or delegated_key in attempted_texts:
+                remaining = self._remaining_distinct_candidates(
+                    remaining,
+                    user_input,
+                    delegated_key,
+                )
+                continue
+
+            attempted_texts.add(delegated_key)
+            observation = await async_observe_delegated_text(
+                self.hass,
+                user_input,
+                delegated_text,
+            )
+            self._record_recognition_diagnostics(
+                selected,
+                delegated_text,
+                observation,
+                len(attempted_texts),
+            )
+            if observation.executable:
+                selection = _PreflightSelection(
+                    ranked_candidate=selected,
+                    delegated_text=delegated_text,
+                    observation=observation,
+                    decision=decision,
+                    attempt_count=len(attempted_texts),
+                    attempted_text_keys=frozenset(attempted_texts),
+                )
+                if observation.intent_name == selected.candidate.intent_name:
+                    return selection
+                if intent_divergent_fallback is None:
+                    intent_divergent_fallback = selection
+            remaining = self._remaining_distinct_candidates(
+                remaining,
+                user_input,
+                delegated_key,
+            )
+            if intent_divergent_fallback is not None:
+                intended_intent = intent_divergent_fallback.ranked_candidate.candidate.intent_name
+                remaining = [
+                    candidate
+                    for candidate in remaining
+                    if candidate.candidate.intent_name == intended_intent
+                ]
+
+        if intent_divergent_fallback is None:
+            return None
+        self._record_recognition_diagnostics(
+            intent_divergent_fallback.ranked_candidate,
+            intent_divergent_fallback.delegated_text,
+            intent_divergent_fallback.observation,
+            len(attempted_texts),
+        )
+        return _PreflightSelection(
+            ranked_candidate=intent_divergent_fallback.ranked_candidate,
+            delegated_text=intent_divergent_fallback.delegated_text,
+            observation=intent_divergent_fallback.observation,
+            decision=intent_divergent_fallback.decision,
+            attempt_count=len(attempted_texts),
+            attempted_text_keys=frozenset(attempted_texts),
+        )
+
+    def _remaining_distinct_candidates(
+        self,
+        ranked: Sequence[RankedCandidate],
+        user_input: ConversationInput,
+        attempted_key: str,
+    ) -> list[RankedCandidate]:
+        """Remove every candidate that delegates the attempted normalized text."""
+        remaining: list[RankedCandidate] = []
+        for candidate in ranked:
+            candidate_text = self._candidate_delegation_text(candidate, user_input)
+            if candidate_text is None or normalize_text(candidate_text) == attempted_key:
+                continue
+            remaining.append(candidate)
+        return remaining
+
+    def _record_recognition_diagnostics(
+        self,
+        ranked_candidate: RankedCandidate,
+        delegated_text: str,
+        observation: RecognitionObservation,
+        attempt_count: int,
+    ) -> None:
+        """Publish bounded live-recognition and metadata-divergence evidence."""
+        intent_matches, slots_match = metadata_matches_observation(
+            ranked_candidate.candidate.intent_name,
+            ranked_candidate.candidate.parsed_slots,
+            observation,
+        )
+        metadata_diverged = observation.executable and not (intent_matches and slots_match)
+        if not observation.executable or (
+            (intent_matches or slots_match) and intent_matches and slots_match
+        ):
+            divergence_reason = None
+        elif not intent_matches and not slots_match:
+            divergence_reason = "intent_and_slots"
+        elif not intent_matches:
+            divergence_reason = "intent"
+        else:
+            divergence_reason = "slots"
+        self._runtime.update_diagnostics(
+            clear_recognition_trace=True,
+            selected_delegated_text_hash=hashlib.sha256(
+                normalize_text(delegated_text).encode()
+            ).hexdigest(),
+            selected_candidate_source=ranked_candidate.candidate.source.value,
+            recognition_kind=observation.kind.value,
+            recognition_intent=observation.intent_name,
+            recognition_unmatched_count=len(observation.unmatched_entities),
+            recognition_latency_ms=observation.latency_ms,
+            preflight_attempt_count=attempt_count,
+            metadata_diverged=metadata_diverged,
+            metadata_intent_matches_observed=(intent_matches if observation.executable else None),
+            metadata_slots_match_observed=(slots_match if observation.executable else None),
+            metadata_divergence_reason=divergence_reason,
+            recovery_used=attempt_count > 1,
+            selected_from_fuzzy_registry=(
+                ranked_candidate.candidate.metadata.get("registry_retrieval") == "fuzzy"
+            ),
+        )
+
     async def _async_execute_ranked_candidate(
         self,
         ranked_candidate: RankedCandidate,
@@ -415,7 +636,8 @@ class AssistCanonicalizerConversationEntity(
 
         Wildcard placeholders (e.g. ``shopping_list_item``) in candidate text
         are rehydrated from the original query before delegation so that the
-        downstream agent receives real free-text values.
+        downstream agent receives real free-text values. Delegate exceptions return
+        ``None`` so the caller can preserve the configured fallback-agent contract.
         """
         chat_log = self._get_active_chat_log()
         old_len = len(chat_log.content) if chat_log is not None else None
@@ -440,7 +662,12 @@ class AssistCanonicalizerConversationEntity(
         return execution_result
 
     async def _delegate_raw_text(self, user_input: ConversationInput) -> ConversationResult:
-        """Delegate the original user text to the configured fallback path."""
+        """Send untouched user text to the configured fallback conversation agent.
+
+        This boundary must remain reachable after every unsuccessful local path,
+        including handler errors and delegate exceptions. The configured agent may be
+        an LLM and must not be bypassed based on assumptions about local side effects.
+        """
         return await self._delegate_text(user_input.text, user_input, primary=False)
 
     async def _async_error_allows_candidate_recovery(
@@ -449,7 +676,11 @@ class AssistCanonicalizerConversationEntity(
         delegated_text: str | None,
         user_input: ConversationInput,
     ) -> bool:
-        """Return whether a primary error proves that one recovery is safe."""
+        """Return whether an error permits another local canonical-candidate attempt.
+
+        This gate controls only local recovery. It must never be used to decide whether
+        the original text reaches the user-configured fallback conversation agent.
+        """
         if error_code == intent.IntentResponseErrorCode.NO_INTENT_MATCH.value:
             return True
         if (
@@ -468,7 +699,9 @@ class AssistCanonicalizerConversationEntity(
         min_confidence: float,
         min_margin: float,
         user_input: ConversationInput,
-    ) -> tuple[RankedCandidate, str] | None:
+        *,
+        excluded_delegated_keys: frozenset[str] = frozenset(),
+    ) -> tuple[RankedCandidate, str, RecognitionObservation] | None:
         """Return at most one fully re-gated, error-compatible recovery candidate."""
         if not await self._async_error_allows_candidate_recovery(
             error_code, delegated_text, user_input
@@ -483,18 +716,25 @@ class AssistCanonicalizerConversationEntity(
             candidate_text = self._candidate_delegation_text(candidate, user_input)
             if candidate_text is None:
                 continue
-            if delegated_key is not None and normalize_text(candidate_text) == delegated_key:
+            candidate_key = normalize_text(candidate_text)
+            if candidate_key in excluded_delegated_keys or (
+                delegated_key is not None and candidate_key == delegated_key
+            ):
                 continue
             remaining.append((candidate, candidate_text))
 
-        accepted, _reason = evaluate_confidence_gates(
+        decision = evaluate_confidence_gates(
             tuple(candidate for candidate, _text in remaining),
             min_confidence=min_confidence,
             min_margin=min_margin,
+            query=user_input.text,
+            language=normalize_language(user_input.language),
         )
+        self._runtime.update_diagnostics(confidence_gate=decision.as_dict())
+        accepted = decision.accepted_candidate
         if accepted is None:
             return None
-        return next(
+        selected_pair = next(
             (
                 (candidate, candidate_text)
                 for candidate, candidate_text in remaining
@@ -502,6 +742,17 @@ class AssistCanonicalizerConversationEntity(
             ),
             None,
         )
+        if selected_pair is None:
+            return None
+        candidate, candidate_text = selected_pair
+        observation = await async_observe_delegated_text(
+            self.hass,
+            user_input,
+            candidate_text,
+        )
+        if not observation.executable:
+            return None
+        return candidate, candidate_text, observation
 
     async def _async_has_unmatched_entities(
         self,
@@ -509,28 +760,12 @@ class AssistCanonicalizerConversationEntity(
         user_input: ConversationInput,
     ) -> bool:
         """Return whether side-effect-free HassIL recognition has unmatched entities."""
-        try:
-            recognition_input = copy(user_input)
-            recognition_input.text = delegated_text
-            recognition_input.agent_id = HOME_ASSISTANT_AGENT
-            default_agent = cast(
-                "DefaultAgent | None",
-                async_get_agent(self.hass, HOME_ASSISTANT_AGENT),
-            )
-            if default_agent is None:
-                return False
-            recognition_result = await default_agent.async_recognize_intent(recognition_input)
-        except Exception as err:
-            _LOGGER.debug(
-                "Unable to classify no_valid_targets recovery provenance: %s",
-                err,
-            )
-            return False
-
-        return bool(
-            recognition_result is not None
-            and getattr(recognition_result, "unmatched_entities", None)
+        observation = await async_observe_delegated_text(
+            self.hass,
+            user_input,
+            delegated_text,
         )
+        return bool(observation.unmatched_entities)
 
     async def _delegate_text(
         self,

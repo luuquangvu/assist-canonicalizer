@@ -113,6 +113,166 @@ def test_registry_slot_index_skips_inverted_cache_for_scoped_records() -> None:
     assert id(scoped_records) not in index._inverted_cache
 
 
+def test_domain_scoped_registry_retrieval_reaches_tail_records() -> None:
+    """Search the complete domain index while keeping query-time scoring bounded."""
+    values = (
+        *(f"Hallway light {position}" for position in range(gl.DEFAULT_MAX_CANDIDATES_PER_INTENT)),
+        "Garden beacon",
+    )
+    index = build_registry_slot_index({"name:light": values}, "en")
+    records = gl._scoped_registry_slot_records("name", ("light",), index, {})
+    stats = gl.RegistryRetrievalStats()
+    query = normalize_text("turn on the Garden becon")
+
+    relevant = gl._query_relevant_precomputed_slot_values(
+        records,
+        query,
+        frozenset(query.split()),
+        registry_slot_index=index,
+        retrieval_stats=stats,
+    )
+
+    assert records is index["name:light"]
+    assert relevant == ("Garden beacon",)
+    assert stats.values_scored <= gl.DEFAULT_MAX_REGISTRY_VALUES_SCORED_PER_QUERY
+
+
+def test_multi_domain_registry_scope_reuses_complete_sparse_index() -> None:
+    """Cache merged domain records and their postings across query-local scopes."""
+    index = build_registry_slot_index(
+        {
+            "name:light": ("Shared target", "Kitchen light"),
+            "name:switch": ("Shared target", "Garden beacon"),
+        },
+        "en",
+    )
+
+    first = gl._scoped_registry_slot_records("name", ("light", "switch"), index, {})
+    lookup = index.get_inverted_for_records(first)
+    second = gl._scoped_registry_slot_records("name", ("light", "switch"), index, {})
+
+    assert tuple(record.text for record in first) == (
+        "Shared target",
+        "Kitchen light",
+        "Garden beacon",
+    )
+    assert second is first
+    assert lookup["garden"][0].text == "Garden beacon"
+    assert id(first) in index._inverted_cache
+
+
+def test_registry_slot_index_recovers_bounded_multitoken_typos() -> None:
+    """Retrieve a registry target when every query target token has one edit."""
+    index = build_registry_slot_index(
+        {"name": ("Bedroom Window", "Bedroom Light")},
+        "en",
+    )
+    query = normalize_text("turn off the bedrom windw")
+
+    relevant = gl._query_relevant_precomputed_slot_values(
+        index["name"],
+        query,
+        frozenset(query.split()),
+        registry_slot_index=index,
+    )
+
+    assert relevant == ("Bedroom Window",)
+
+
+def test_registry_slot_index_matches_spaced_typo_to_compound_alias() -> None:
+    """Align a spaced query phrase with a one-edit compound registry alias."""
+    index = build_registry_slot_index(
+        {"name": ("Badkamerventilator", "Woonkamerventilator")},
+        "nl",
+    )
+    query = normalize_text("badkamer ventillator uitzetten")
+
+    relevant = gl._query_relevant_precomputed_slot_values(
+        index["name"],
+        query,
+        frozenset(query.split()),
+        registry_slot_index=index,
+    )
+
+    assert relevant == ("Badkamerventilator",)
+
+
+def test_registry_slot_index_does_not_expand_past_fully_anchored_value() -> None:
+    """Keep fuzzy neighbors from disturbing an already complete registry match."""
+    index = build_registry_slot_index(
+        {"name": ("Light Salon", "Bright Salon")},
+        "en",
+    )
+    query = normalize_text("make light salon brigt")
+
+    relevant = gl._query_relevant_precomputed_slot_values(
+        index["name"],
+        query,
+        frozenset(query.split()),
+        registry_slot_index=index,
+    )
+
+    assert relevant == ("Light Salon",)
+
+
+def test_registry_slot_index_does_not_treat_exact_generic_alias_as_specific() -> None:
+    """Let a one-token generic alias coexist with a longer fuzzy target."""
+    index = build_registry_slot_index(
+        {"name": ("Quạt", "Quạt phòng tắm")},
+        "vi",
+    )
+    query = normalize_text("tắt quạt phòg tắh")
+
+    relevant = gl._query_relevant_precomputed_slot_values(
+        index["name"],
+        query,
+        frozenset(query.split()),
+        registry_slot_index=index,
+    )
+
+    assert relevant == ("Quạt", "Quạt phòng tắm")
+
+
+def test_registry_slot_index_requires_full_token_boundaries_for_exact_precedence() -> None:
+    """Do not let a partial-token substring suppress a complete fuzzy target."""
+    index = build_registry_slot_index(
+        {"name": ("Room Vent", "Bedroom Vant")},
+        "en",
+    )
+    query = normalize_text("turn off bedroom vent")
+
+    relevant = gl._query_relevant_precomputed_slot_values(
+        index["name"],
+        query,
+        frozenset(query.split()),
+        registry_slot_index=index,
+    )
+
+    assert relevant == ("Bedroom Vant",)
+
+
+def test_query_registry_candidates_render_fuzzy_registry_target() -> None:
+    """Generate the correct action candidate for a typoed registry entity."""
+    slots = {"name": ("Bedroom Window", "Bedroom Light")}
+    sources = {
+        "builtin": {
+            "intents": {
+                "HassTurnOff": {"data": [{"sentences": ["turn off {name}"]}]},
+            }
+        }
+    }
+
+    candidates = build_query_registry_candidates(
+        "en",
+        sources,
+        slots,
+        "turn off the bedrom windw",
+        registry_slot_index=build_registry_slot_index(slots, "en"),
+    )
+
+    assert any(candidate.text == "turn off Bedroom Window" for candidate in candidates)
+
+
 def test_is_fixed_sentence_rejects_hassil_templates() -> None:
     """Reject sentence templates that need slot expansion."""
     assert is_fixed_sentence("turn on kitchen light")
@@ -1574,6 +1734,31 @@ def test_query_registry_candidates_build_mixed_entity_area_dynamically() -> None
     assert slots["area"] == "kitchen"
 
 
+def test_query_registry_candidates_do_not_fuzzy_nominate_short_aliases() -> None:
+    """Avoid a one-character registry rewrite for four-character aliases."""
+    candidates = build_query_registry_candidates(
+        "en",
+        {
+            "builtin": {
+                "intents": {
+                    "HassTurnOn": {
+                        "data": [
+                            {
+                                "sentences": ["turn on {name}"],
+                                "requires_context": {"domain": "light"},
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+        {"name": ("Hall",), "name:light": ("Hall",)},
+        "turn on hell",
+    )
+
+    assert candidates == ()
+
+
 def test_query_registry_candidates_global_cap_keeps_later_exact_match() -> None:
     """Keep the best dynamic candidate even when earlier templates fill the cap."""
     candidates = build_query_registry_candidates(
@@ -2063,6 +2248,241 @@ def test_query_registry_candidates_keep_compact_script_exact_entity() -> None:
     assert orjson.loads(candidates[0].metadata["slots"]) == {"name": "一楼主卧室床头阅读灯"}
 
 
+@pytest.mark.parametrize(
+    ("sentence", "expected_prefix", "expected_suffix"),
+    [
+        ("打开{name}", "打开", ""),
+        ("включи {name}", "включи ", ""),
+        ("{name}をつけて", "", "をつけて"),
+    ],
+)
+def test_compile_slot_anchor_patterns_preserves_template_boundaries(
+    sentence: str,
+    expected_prefix: str,
+    expected_suffix: str,
+) -> None:
+    """Compile exact literal boundaries without discarding meaningful spaces."""
+    compiled = compile_dynamic_registry_intents(
+        {
+            "builtin": {
+                "intents": {
+                    "HassTurnOn": {"data": [{"sentences": [sentence]}]},
+                }
+            }
+        },
+        "ru",
+    )
+
+    patterns = compiled[0].templates[0].slot_anchor_patterns["name"]
+
+    assert [(pattern.prefix, pattern.suffix) for pattern in patterns] == [
+        (expected_prefix, expected_suffix)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("language", "sentence", "query", "entity"),
+    [
+        ("ru", "включи{name}", "включисвет", "свет"),
+        ("ar", "شغل{name}", "شغلالضوء", "الضوء"),
+        ("ja", "{name}をつけて", "ライトをつけて", "ライト"),
+        ("xx", "打开{name}", "打开café灯", "café灯"),
+    ],
+)
+def test_query_registry_candidates_use_language_agnostic_slot_anchors(
+    language: str,
+    sentence: str,
+    query: str,
+    entity: str,
+) -> None:
+    """Use the grammar's literal boundaries instead of a script allowlist."""
+    stats = gl.RegistryRetrievalStats()
+    candidates = build_query_registry_candidates(
+        language,
+        {
+            "builtin": {
+                "intents": {
+                    "HassTurnOn": {"data": [{"sentences": [sentence]}]},
+                }
+            }
+        },
+        {"name": (entity,)},
+        query,
+        retrieval_stats=stats,
+    )
+
+    assert [candidate.normalized_text for candidate in candidates] == [normalize_text(query)]
+    assert orjson.loads(candidates[0].metadata["slots"]) == {"name": entity}
+    assert candidates[0].metadata["registry_retrieval"] == "anchored"
+    assert stats.anchored_dynamic_candidates == 1
+
+
+def test_query_registry_candidates_keep_required_anchor_whitespace() -> None:
+    """Do not reinterpret an explicitly spaced grammar as a joined command."""
+    candidates = build_query_registry_candidates(
+        "ru",
+        {
+            "builtin": {
+                "intents": {
+                    "HassTurnOn": {"data": [{"sentences": ["включи {name}"]}]},
+                }
+            }
+        },
+        {"name": ("свет",)},
+        "включисвет",
+    )
+
+    assert candidates == ()
+
+
+def test_query_registry_candidates_require_whole_anchored_slot_window() -> None:
+    """Reject an entity that occupies only a substring of the isolated slot span."""
+    candidates = build_query_registry_candidates(
+        "zh",
+        {
+            "builtin": {
+                "intents": {
+                    "HassTurnOn": {"data": [{"sentences": ["打开{name}"]}]},
+                }
+            }
+        },
+        {"name": ("卧室灯",)},
+        "打开卧室灯状态",
+    )
+
+    assert candidates == ()
+
+
+def test_query_registry_candidates_bound_fuzzy_matching_to_anchored_window() -> None:
+    """Allow one bounded entity typo after the grammar isolates the complete span."""
+    stats = gl.RegistryRetrievalStats()
+    candidates = build_query_registry_candidates(
+        "ru",
+        {
+            "builtin": {
+                "intents": {
+                    "HassTurnOn": {"data": [{"sentences": ["включи{name}"]}]},
+                }
+            }
+        },
+        {"name": ("лампа",)},
+        "включиламба",
+        retrieval_stats=stats,
+    )
+
+    assert [candidate.text for candidate in candidates] == ["включилампа"]
+    assert candidates[0].metadata["registry_retrieval"] == "fuzzy"
+    assert stats.anchored_dynamic_candidates == 1
+    assert stats.fuzzy_dynamic_candidates == 1
+
+
+def test_anchored_registry_retrieval_reaches_tail_with_bounded_scoring() -> None:
+    """Find a tail entity through its whole slot window without scanning the registry."""
+    values = (
+        *(f"устройство {position}" for position in range(gl.DEFAULT_MAX_CANDIDATES_PER_INTENT)),
+        "свет",
+    )
+    slots = {"name": values}
+    sources = {
+        "builtin": {
+            "intents": {
+                "HassTurnOn": {"data": [{"sentences": ["включи{name}"]}]},
+            }
+        }
+    }
+    stats = gl.RegistryRetrievalStats()
+
+    candidates = build_query_registry_candidates(
+        "ru",
+        sources,
+        slots,
+        "включисвет",
+        registry_slot_index=build_registry_slot_index(slots, "ru"),
+        compiled_intents=compile_dynamic_registry_intents(sources, "ru"),
+        retrieval_stats=stats,
+    )
+
+    assert [candidate.text for candidate in candidates] == ["включисвет"]
+    assert stats.values_scored <= gl.DEFAULT_MAX_REGISTRY_VALUES_SCORED_PER_QUERY
+
+
+def test_query_registry_candidates_retain_unanchored_spaced_filler_fallback() -> None:
+    """Preserve ordinary token retrieval when conversational filler shifts an anchor."""
+    candidates = build_query_registry_candidates(
+        "en",
+        {
+            "builtin": {
+                "intents": {
+                    "HassTurnOn": {"data": [{"sentences": ["turn on {name}"]}]},
+                }
+            }
+        },
+        {"name": ("kitchen light",)},
+        "please turn on kitchen light",
+    )
+
+    assert [candidate.text for candidate in candidates] == ["turn on kitchen light"]
+    assert "registry_retrieval" not in candidates[0].metadata
+
+
+def test_query_registry_candidates_retain_multislot_compact_fallback() -> None:
+    """Keep the bounded compact-script fallback when one slot window is ambiguous."""
+    candidates = build_query_registry_candidates(
+        "zh",
+        {
+            "builtin": {
+                "intents": {
+                    "HassTurnOn": {"data": [{"sentences": ["打开{area}{name}"]}]},
+                }
+            }
+        },
+        {"area": ("卧室",), "name": ("床头灯",)},
+        "打开卧室床头灯",
+    )
+
+    assert [candidate.text for candidate in candidates] == ["打开卧室床头灯"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "打开灯",
+        "ライトをつけて",
+        "거실등켜줘",
+        "เปิดไฟ",
+        "ເປີດໄຟ",
+        "បើកភ្លើង",
+        "မီးဖွင့်",
+    ],
+)
+def test_compact_script_detection_keeps_no_space_scripts(text: str) -> None:
+    """Enable bounded substring spans only for scripts that commonly need them."""
+    assert gl._uses_compact_non_latin_script(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "включисвет",
+        "άναψεφως",
+        "شغلالضوء",
+        "הדלקאור",
+        "बत्तीजलाओ",
+        "միացրուլույսը",
+        "ჩართეშუქი",
+    ],
+)
+def test_compact_script_detection_rejects_space_delimited_scripts(text: str) -> None:
+    """Do not allow arbitrary substrings in scripts with lexical word boundaries."""
+    assert not gl._uses_compact_non_latin_script(text)
+
+
+def test_compact_phrase_matching_respects_script_word_boundaries() -> None:
+    """Keep Han substring support without extending it to Cyrillic words."""
+    assert gl._normalized_phrase_occurs_in_query("卧室灯", "打开卧室灯")
+    assert not gl._normalized_phrase_occurs_in_query("свет", "включисвет")
+
+
 def test_registry_slot_values_for_slots_preserves_requested_order() -> None:
     """Deduplicate requested slots without losing deterministic insertion order."""
     selected = gl._registry_slot_values_for_slots(
@@ -2404,6 +2824,28 @@ def test_query_registry_candidates_include_literal_only_templates_without_regist
     assert candidates[0].text == "timer for 1 second"
     slots = orjson.loads(candidates[0].metadata["slots"])
     assert slots == {"seconds": 1}
+
+
+def test_query_registry_candidates_skip_non_wildcard_literal_rescue_work() -> None:
+    """Avoid expanding base-list templates during wildcard-only runtime rescue."""
+    candidates = build_query_registry_candidates(
+        "en",
+        {
+            "builtin": {
+                "lists": {"color": {"values": ["white"]}},
+                "intents": {
+                    "HassLightSet": {
+                        "data": [{"sentences": ["turn lights {color}"]}],
+                    }
+                },
+            }
+        },
+        {},
+        "turn lights",
+        literal_only_wildcards_only=True,
+    )
+
+    assert candidates == ()
 
 
 def test_query_registry_candidates_excludes_floor_only_when_disabled() -> None:

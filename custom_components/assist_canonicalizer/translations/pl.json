@@ -7,7 +7,7 @@
         "data": {
           "fallback_agent_id": "Zapasowy agent konwersacyjny",
           "min_confidence": "Minimalna pewność dopasowania",
-          "min_margin": "Minimalny margines pewności"
+          "min_margin": "Bazowy margines pewności"
         }
       }
     },
@@ -23,7 +23,7 @@
         "data": {
           "fallback_agent_id": "Zapasowy agent konwersacyjny",
           "min_confidence": "Minimalna pewność dopasowania",
-          "min_margin": "Minimalny margines pewności"
+          "min_margin": "Bazowy margines pewności"
         }
       }
     }

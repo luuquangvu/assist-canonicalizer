@@ -7,9 +7,10 @@ import contextlib
 import hashlib
 import inspect
 import logging
+import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence, Set
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any
 from uuid import uuid4
@@ -18,7 +19,7 @@ import orjson
 from homeassistant.helpers import storage
 
 from .bm25 import clear_bm25_caches
-from .builtin_intents import load_language_intent_sources
+from .builtin_intents import clear_builtin_intents_caches, load_language_intent_sources
 from .candidate import Candidate, CandidateSource
 from .const import (
     DEFAULT_MAX_CANDIDATES,
@@ -30,6 +31,7 @@ from .const import (
 from .diagnostics import CanonicalizerDiagnostics
 from .grammar_loader import (
     DynamicRegistryIntent,
+    RegistryRetrievalStats,
     RegistrySlotIndex,
     build_candidates_from_intent_sources,
     build_query_registry_candidates,
@@ -42,13 +44,15 @@ from .normalization import char_ngrams_normalized, clear_normalization_caches, n
 from .ranking import (
     CharNGramIndex,
     RankedCandidate,
-    accepted_candidate,
+    _limit_ranked_candidates,
     clear_ranking_caches,
+    evaluate_confidence_gates,
     rank_candidates,
 )
 from .rehydration import clear_rehydration_caches
 from .utils import (
     clear_utils_caches,
+    elapsed_ms,
     normalize_language,
     register_custom_wildcards_from_sources,
 )
@@ -61,7 +65,7 @@ with contextlib.suppress(Exception):
     sig = inspect.signature(storage.Store.__init__)
     _STORE_HAS_SERIALIZE_IN_EVENT_LOOP = "serialize_in_event_loop" in sig.parameters
 _INDEX_STORE_VERSION = 1
-_INDEX_BUILD_VERSION = 4
+_INDEX_BUILD_VERSION = 5
 _INDEX_STORE_PREFIX = f"{DOMAIN}.index_"
 _INDEX_MANIFEST_KEY = f"{DOMAIN}.index_manifest"
 _INDEX_MANIFEST_VERSION = 1
@@ -407,14 +411,19 @@ class CanonicalizerRuntime:
         registry_slot_values, registry_slot_index = self._registry_slot_snapshot_for_language(
             language
         )
-        static_accepted = accepted_candidate(
+        static_decision = evaluate_confidence_gates(
             ranked,
             min_confidence=min_confidence,
             min_margin=min_margin,
+            query=query,
+            language=language,
         )
+        static_accepted = static_decision.accepted_candidate
         numeric_literal_rescue = _query_needs_literal_only_dynamic(query)
         wildcard_literal_rescue = static_accepted is None and not numeric_literal_rescue
         include_literal_only_templates = numeric_literal_rescue or wildcard_literal_rescue
+        retrieval_stats = RegistryRetrievalStats(record_count=registry_slot_index.record_count)
+        retrieval_started_at = time.monotonic()
         dynamic_candidates = build_query_registry_candidates(
             language,
             intent_sources,
@@ -424,6 +433,16 @@ class CanonicalizerRuntime:
             compiled_intents=self._dynamic_registry_intents_for_query(language),
             include_literal_only_templates=include_literal_only_templates,
             include_area_only_templates=False,
+            literal_only_wildcards_only=wildcard_literal_rescue,
+            retrieval_stats=retrieval_stats,
+        )
+        self.update_diagnostics(
+            registry_record_count=retrieval_stats.record_count,
+            registry_postings_consulted=retrieval_stats.postings_consulted,
+            registry_values_nominated=retrieval_stats.values_nominated,
+            registry_values_scored=retrieval_stats.values_scored,
+            fuzzy_dynamic_candidates=retrieval_stats.fuzzy_dynamic_candidates,
+            registry_retrieval_latency_ms=elapsed_ms(retrieval_started_at),
         )
         if wildcard_literal_rescue:
             dynamic_candidates = tuple(
@@ -456,20 +475,13 @@ class CanonicalizerRuntime:
             reference_bm25_index=index.bm25_index,
             candidate_char_index=dynamic_char_index,
             exact_normalized_lookup=exact_normalized_lookup,
+            positional_literal_tokens=index.positional_literal_tokens,
             language=language,
+            reference_slot_token_index=index.slot_token_index,
             slot_preferences=slot_preferences,
             intent_context=intent_context,
             min_confidence=min_confidence,
         )
-        if _is_perfect_rank_result(dynamic_ranked):
-            return dynamic_ranked
-        if (
-            static_accepted is not None
-            and dynamic_ranked
-            and ranked
-            and dynamic_ranked[0].scores.final_score - ranked[0].scores.final_score < min_margin
-        ):
-            return ranked
         return _merge_ranked_candidates(ranked, dynamic_ranked, max_candidates)
 
     def clear_index(self, language: str | None = None) -> None:
@@ -511,6 +523,13 @@ class CanonicalizerRuntime:
         self.registry_slot_index = build_registry_slot_index(updated_values)
         self.registry_slot_indexes.clear()
         self._invalidate_source_dependent_indexes(clear_sources=False)
+        self.update_diagnostics(
+            registry_record_count=self.registry_slot_index.record_count,
+            registry_generation=self.source_generation,
+            registry_fingerprint=hashlib.sha256(
+                orjson.dumps(_canonical_fingerprint_value(updated_values))
+            ).hexdigest(),
+        )
 
     def update_intent_sources(self, intents_update: Mapping[Any, Mapping[str, Any]]) -> None:
         """Merge changed Home Assistant conversation intent sources."""
@@ -786,6 +805,7 @@ class CanonicalizerRuntime:
         clear_utils_caches()
         clear_grammar_loader_caches()
         clear_ranking_caches()
+        clear_builtin_intents_caches()
 
     def update_diagnostics(
         self,
@@ -796,38 +816,119 @@ class CanonicalizerRuntime:
         last_fallback_reason: FallbackReason | str | None = None,
         last_error: str | None = None,
         dynamic_candidate_count: int | None = None,
+        last_request_id: str | None = None,
+        selected_delegated_text_hash: str | None = None,
+        selected_candidate_source: str | None = None,
+        confidence_gate: Mapping[str, Any] | None = None,
+        execution_result: str | None = None,
+        recognition_kind: str | None = None,
+        recognition_intent: str | None = None,
+        recognition_unmatched_count: int | None = None,
+        recognition_latency_ms: float | None = None,
+        preflight_attempt_count: int | None = None,
+        metadata_diverged: bool | None = None,
+        metadata_intent_matches_observed: bool | None = None,
+        metadata_slots_match_observed: bool | None = None,
+        metadata_divergence_reason: str | None = None,
+        recovery_used: bool | None = None,
+        registry_record_count: int | None = None,
+        registry_generation: int | None = None,
+        registry_fingerprint: str | None = None,
+        registry_postings_consulted: int | None = None,
+        registry_values_nominated: int | None = None,
+        registry_values_scored: int | None = None,
+        fuzzy_dynamic_candidates: int | None = None,
+        registry_retrieval_latency_ms: float | None = None,
+        selected_from_fuzzy_registry: bool | None = None,
         clear_last_fallback_reason: bool = False,
         clear_last_error: bool = False,
+        clear_request_trace: bool = False,
+        clear_recognition_trace: bool = False,
     ) -> None:
         """Update the diagnostics snapshot."""
-        self.diagnostics = CanonicalizerDiagnostics(
-            candidate_count=(
-                self.diagnostics.candidate_count if candidate_count is None else candidate_count
-            ),
-            index_version=self.diagnostics.index_version
-            if index_version is None
-            else index_version,
-            last_query_latency_ms=(
-                self.diagnostics.last_query_latency_ms
-                if last_query_latency_ms is None
-                else last_query_latency_ms
-            ),
-            last_fallback_reason=_updated_optional_text(
-                current=self.diagnostics.last_fallback_reason,
-                value=last_fallback_reason,
-                clear=clear_last_fallback_reason,
-            ),
-            last_error=_updated_optional_text(
-                current=self.diagnostics.last_error,
-                value=last_error,
-                clear=clear_last_error,
-            ),
-            dynamic_candidate_count=(
-                self.diagnostics.dynamic_candidate_count
-                if dynamic_candidate_count is None
-                else dynamic_candidate_count
-            ),
+        diagnostics = self.diagnostics
+        if clear_request_trace:
+            diagnostics = replace(
+                diagnostics,
+                last_request_id=None,
+                selected_delegated_text_hash=None,
+                selected_candidate_source=None,
+                confidence_gate=None,
+                execution_result=None,
+                recognition_kind=None,
+                recognition_intent=None,
+                recognition_unmatched_count=0,
+                recognition_latency_ms=None,
+                preflight_attempt_count=0,
+                metadata_diverged=False,
+                metadata_intent_matches_observed=None,
+                metadata_slots_match_observed=None,
+                metadata_divergence_reason=None,
+                recovery_used=False,
+                registry_postings_consulted=0,
+                registry_values_nominated=0,
+                registry_values_scored=0,
+                fuzzy_dynamic_candidates=0,
+                registry_retrieval_latency_ms=None,
+                selected_from_fuzzy_registry=False,
+            )
+        elif clear_recognition_trace:
+            diagnostics = replace(
+                diagnostics,
+                recognition_kind=None,
+                recognition_intent=None,
+                recognition_unmatched_count=0,
+                recognition_latency_ms=None,
+                metadata_diverged=False,
+                metadata_intent_matches_observed=None,
+                metadata_slots_match_observed=None,
+                metadata_divergence_reason=None,
+            )
+        updates: dict[str, Any] = {
+            key: value
+            for key, value in {
+                "candidate_count": candidate_count,
+                "index_version": index_version,
+                "last_query_latency_ms": last_query_latency_ms,
+                "dynamic_candidate_count": dynamic_candidate_count,
+                "last_request_id": last_request_id,
+                "selected_delegated_text_hash": selected_delegated_text_hash,
+                "selected_candidate_source": selected_candidate_source,
+                "confidence_gate": dict(confidence_gate) if confidence_gate is not None else None,
+                "execution_result": execution_result,
+                "recognition_kind": recognition_kind,
+                "recognition_intent": recognition_intent,
+                "recognition_unmatched_count": recognition_unmatched_count,
+                "recognition_latency_ms": recognition_latency_ms,
+                "preflight_attempt_count": preflight_attempt_count,
+                "metadata_diverged": metadata_diverged,
+                "metadata_intent_matches_observed": metadata_intent_matches_observed,
+                "metadata_slots_match_observed": metadata_slots_match_observed,
+                "metadata_divergence_reason": metadata_divergence_reason,
+                "recovery_used": recovery_used,
+                "registry_record_count": registry_record_count,
+                "registry_generation": registry_generation,
+                "registry_fingerprint": registry_fingerprint,
+                "registry_postings_consulted": registry_postings_consulted,
+                "registry_values_nominated": registry_values_nominated,
+                "registry_values_scored": registry_values_scored,
+                "fuzzy_dynamic_candidates": fuzzy_dynamic_candidates,
+                "registry_retrieval_latency_ms": registry_retrieval_latency_ms,
+                "selected_from_fuzzy_registry": selected_from_fuzzy_registry,
+            }.items()
+            if value is not None
+        }
+        updates["last_fallback_reason"] = _updated_optional_text(
+            current=diagnostics.last_fallback_reason,
+            value=last_fallback_reason,
+            clear=clear_last_fallback_reason,
         )
+        updates["last_error"] = _updated_optional_text(
+            current=diagnostics.last_error,
+            value=last_error,
+            clear=clear_last_error,
+        )
+        self.diagnostics = replace(diagnostics, **updates)
 
 
 async def _run_rebuild(
@@ -1125,7 +1226,7 @@ def _merge_ranked_candidates(
         key=_ranked_candidate_sort_key,
         reverse=True,
     )
-    return tuple(ranked[:max_candidates])
+    return _limit_ranked_candidates(ranked, max_candidates)
 
 
 def _is_perfect_rank_result(ranked: tuple[RankedCandidate, ...]) -> bool:

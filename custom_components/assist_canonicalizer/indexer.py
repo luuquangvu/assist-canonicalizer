@@ -15,7 +15,13 @@ from .const import (
     DEFAULT_MIN_CONFIDENCE,
 )
 from .normalization import char_ngrams_normalized, literal_tokens_list
-from .ranking import CharNGramIndex, RankedCandidate, WildcardVariantGroup, rank_candidates
+from .ranking import (
+    CharNGramIndex,
+    RankedCandidate,
+    SlotTokenIndex,
+    WildcardVariantGroup,
+    rank_candidates,
+)
 from .rehydration import WildcardVariantAnalysis, wildcard_variants_analysis
 
 
@@ -30,6 +36,7 @@ class _CanonicalIndexData:
     wildcard_variant_analyses: dict[int, tuple[WildcardVariantAnalysis, ...]]
     wildcard_variant_groups: tuple[WildcardVariantGroup, ...]
     candidate_slot_tokens: tuple[frozenset[str], ...]
+    slot_token_index: SlotTokenIndex
 
 
 def _build_index_state(candidates: tuple[Candidate, ...]) -> _CanonicalIndexData:
@@ -63,6 +70,7 @@ def _build_index_state(candidates: tuple[Candidate, ...]) -> _CanonicalIndexData
         slot_tokens = candidate.slot_tokens_set
         candidate_slot_tokens.append(slot_tokens)
 
+    frozen_candidate_slot_tokens = tuple(candidate_slot_tokens)
     return _CanonicalIndexData(
         positional_literal_tokens=frozenset(all_tokens),
         exact_normalized_lookup=exact_normalized,
@@ -80,7 +88,8 @@ def _build_index_state(candidates: tuple[Candidate, ...]) -> _CanonicalIndexData
             )
             for variants, indices in wildcard_group_indices.items()
         ),
-        candidate_slot_tokens=tuple(candidate_slot_tokens),
+        candidate_slot_tokens=frozen_candidate_slot_tokens,
+        slot_token_index=SlotTokenIndex.from_candidate_tokens(frozen_candidate_slot_tokens),
     )
 
 
@@ -114,6 +123,7 @@ class CanonicalIndex:
     _candidate_slot_tokens: tuple[frozenset[str], ...] = field(
         init=False, repr=False, compare=False, default_factory=tuple
     )
+    _slot_token_index: SlotTokenIndex = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Prebuild reusable lexical ranking structures."""
@@ -137,6 +147,16 @@ class CanonicalIndex:
     def bm25_index(self) -> BM25Index:
         """Return the BM25 index."""
         return self._bm25_index
+
+    @property
+    def positional_literal_tokens(self) -> frozenset[str]:
+        """Return normalized literal tokens known across the static corpus."""
+        return self._positional_literal_tokens
+
+    @property
+    def slot_token_index(self) -> SlotTokenIndex:
+        """Return the static target-token posting index."""
+        return self._slot_token_index
 
     def rank(
         self,
@@ -166,6 +186,7 @@ class CanonicalIndex:
             wildcard_variant_analyses=self._wildcard_variant_analyses,
             wildcard_variant_groups=self._wildcard_variant_groups,
             candidate_slot_tokens=self._candidate_slot_tokens,
+            slot_token_index=self._slot_token_index,
             slot_preferences=slot_preferences,
             intent_context=intent_context,
             min_confidence=min_confidence,

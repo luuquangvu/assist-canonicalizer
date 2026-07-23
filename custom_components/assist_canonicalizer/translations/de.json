@@ -7,7 +7,7 @@
         "data": {
           "fallback_agent_id": "Fallback-Konversationsagent",
           "min_confidence": "Minimale Übereinstimmungs-Konfidenz",
-          "min_margin": "Minimale Konfidenzmarge"
+          "min_margin": "Basis-Konfidenzmarge"
         }
       }
     },
@@ -23,7 +23,7 @@
         "data": {
           "fallback_agent_id": "Fallback-Konversationsagent",
           "min_confidence": "Minimale Übereinstimmungs-Konfidenz",
-          "min_margin": "Minimale Konfidenzmarge"
+          "min_margin": "Basis-Konfidenzmarge"
         }
       }
     }

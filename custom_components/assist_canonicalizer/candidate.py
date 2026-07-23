@@ -69,6 +69,9 @@ class Candidate:
     _literal_variants: tuple[frozenset[str], ...] | None = field(
         default=None, init=False, repr=False, compare=False
     )
+    _has_implicit_literal_variant: bool | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
     _normalized_text_sorted: str | None = field(default=None, init=False, repr=False, compare=False)
     _total_unique_literal_tokens: int | None = field(
         default=None, init=False, repr=False, compare=False
@@ -77,6 +80,9 @@ class Candidate:
         default=None, init=False, repr=False, compare=False
     )
     _parsed_slots: dict[str, Any] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _parsed_raw_slots: dict[str, Any] | None = field(
         default=None, init=False, repr=False, compare=False
     )
 
@@ -190,6 +196,16 @@ class Candidate:
         return val
 
     @property
+    def has_implicit_literal_variant(self) -> bool:
+        """Return whether the grammar permits this intent without literal evidence."""
+        val = self._has_implicit_literal_variant
+        if val is None:
+            variants = self.literal_variants
+            val = not variants or not all(variants)
+            object.__setattr__(self, "_has_implicit_literal_variant", val)
+        return val
+
+    @property
     def total_unique_literal_tokens(self) -> int:
         """Return the total number of unique literal tokens."""
         val = self._total_unique_literal_tokens
@@ -247,6 +263,15 @@ class Candidate:
         if val is None:
             val = candidate_slot_map(self)
             object.__setattr__(self, "_parsed_slots", val)
+        return val
+
+    @property
+    def parsed_raw_slots(self) -> dict[str, Any]:
+        """Return decoded raw-slot metadata, cached after the first access."""
+        val = self._parsed_raw_slots
+        if val is None:
+            val = candidate_raw_slot_map(self)
+            object.__setattr__(self, "_parsed_raw_slots", val)
         return val
 
 

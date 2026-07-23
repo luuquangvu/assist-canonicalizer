@@ -7,7 +7,7 @@
         "data": {
           "fallback_agent_id": "Agente di conversazione di fallback",
           "min_confidence": "Confidenza minima di corrispondenza",
-          "min_margin": "Margine minimo di confidenza"
+          "min_margin": "Margine di confidenza di base"
         }
       }
     },
@@ -23,7 +23,7 @@
         "data": {
           "fallback_agent_id": "Agente di conversazione di fallback",
           "min_confidence": "Confidenza minima di corrispondenza",
-          "min_margin": "Margine minimo di confidenza"
+          "min_margin": "Margine di confidenza di base"
         }
       }
     }

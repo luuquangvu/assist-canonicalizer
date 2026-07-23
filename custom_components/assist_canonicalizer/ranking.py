@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from functools import lru_cache, partial
 from heapq import nlargest, nsmallest
@@ -13,7 +14,7 @@ from typing import Any, NamedTuple
 from rapidfuzz import fuzz
 
 from .bm25 import BM25Index
-from .candidate import Candidate, candidate_raw_slot_map
+from .candidate import Candidate
 from .const import (
     BM25_WEIGHT,
     CHAR_NGRAM_WEIGHT,
@@ -23,6 +24,7 @@ from .const import (
     DEFAULT_MIN_CONFIDENCE,
     DEFAULT_MIN_MARGIN,
     DEFAULT_RAPIDFUZZ_PREFILTER_CANDIDATES,
+    DEFAULT_SLOT_PREFILTER_RESCUE_CANDIDATES,
     ENTITY_ONLY_UNCOVERED_QUERY_PENALTY,
     ENTITY_SLOT_NAME_SET,
     HIGH_CONFIDENCE_RELAXED_MIN_MARGIN,
@@ -30,6 +32,7 @@ from .const import (
     INTENT_ACTION_WEIGHT,
     LOCATION_SLOT_NAME_SET,
     NON_ENTITY_PENALTY_BLEND,
+    NUMERIC_LITERAL_WITHOUT_QUERY_PENALTY,
     NUMERIC_SLOT_MISMATCH_PENALTY,
     NUMERIC_SLOT_WITHOUT_QUERY_PENALTY,
     POSITIONAL_FUZZY_TOKEN_MAX_LENGTH_RATIO,
@@ -38,6 +41,7 @@ from .const import (
     POSITIONAL_SIMILARITY_PARTIAL_CREDIT,
     POSITIONAL_SIMILARITY_SHORT_3_THRESHOLD,
     POSITIONAL_SIMILARITY_VERY_SHORT_THRESHOLD,
+    QUERY_NUMBER_WITHOUT_CANDIDATE_PENALTY,
     RAPIDFUZZ_WEIGHT,
     SAFE_EMPTY_SLOT_RELAXED_MIN_MARGIN,
     SAFE_EMPTY_SLOT_RELAXED_MIN_SCORE,
@@ -48,8 +52,8 @@ from .const import (
     SLOT_TOKEN_MATCH_THRESHOLD,
     STATIC_ENTITY_UNCOVERED_QUERY_PENALTY,
     STATIC_SLOT_QUERY_CONFLICT_PENALTY,
-    TIEBREAKER_INTENT_MARGIN,
     UNANCHORED_ENTITY_SLOT_PENALTY,
+    UNANCHORED_SEMANTIC_SLOT_PENALTY,
     WILDCARD_KNOWN_SLOT_TOKEN_PENALTY,
     WILDCARD_LENGTH_PENALTY_FACTOR,
     ZERO_INTENT_EVIDENCE_MAX_MARGIN,
@@ -95,6 +99,47 @@ class WildcardVariantGroup(NamedTuple):
     candidate_indices: tuple[int, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class SlotTokenIndex:
+    """Candidate postings for exact and one-edit registry slot tokens.
+
+    The deletion-neighborhood map keeps query-time lookup proportional to the
+    query token lengths instead of scanning every entity/location token in a
+    large language index. Candidate membership is validated by the bounded
+    slot matcher before it can affect ranking.
+    """
+
+    candidate_count: int
+    candidate_indices_by_token: dict[str, tuple[int, ...]]
+    tokens_by_deletion: dict[str, tuple[str, ...]]
+
+    @classmethod
+    def from_candidate_tokens(
+        cls,
+        candidate_slot_tokens: Sequence[frozenset[str]],
+    ) -> SlotTokenIndex:
+        """Build reusable slot-token and deletion-neighborhood postings."""
+        candidate_indices_by_token: defaultdict[str, list[int]] = defaultdict(list)
+        for index, slot_tokens in enumerate(candidate_slot_tokens):
+            for token in slot_tokens:
+                candidate_indices_by_token[token].append(index)
+
+        tokens_by_deletion: defaultdict[str, list[str]] = defaultdict(list)
+        for token in candidate_indices_by_token:
+            for deletion in _single_character_deletions(token):
+                tokens_by_deletion[deletion].append(token)
+
+        return cls(
+            candidate_count=len(candidate_slot_tokens),
+            candidate_indices_by_token={
+                token: tuple(indices) for token, indices in candidate_indices_by_token.items()
+            },
+            tokens_by_deletion={
+                deletion: tuple(tokens) for deletion, tokens in tokens_by_deletion.items()
+            },
+        )
+
+
 _KNOWN_OPPOSING_INTENT_TIE_PAIRS: tuple[tuple[str, str], ...] = (
     ("HassTurnOn", "HassTurnOff"),
     ("HassMediaUnpause", "HassMediaPause"),
@@ -110,6 +155,11 @@ _KNOWN_OPPOSING_INTENT_TIE_PREFERENCES: Mapping[frozenset[str], Mapping[str, int
     }
     for preferred_intent, other_intent in _KNOWN_OPPOSING_INTENT_TIE_PAIRS
 }
+_EQUIVALENT_INTENT_GROUPS: Sequence[frozenset[str]] = (
+    frozenset(("HassListAddItem", "HassShoppingListAddItem")),
+    frozenset(("HassListCompleteItem", "HassShoppingListCompleteItem")),
+    frozenset(("HassListRemoveItem", "HassShoppingListCompleteItem")),
+)
 _STRUCTURAL_TIE_ABS_TOLERANCE = 1e-12
 _NUMERIC_MATCH_ABS_TOLERANCE = 1e-5
 
@@ -141,6 +191,67 @@ class RankedCandidate:
 
     candidate: Candidate
     scores: ScoreBreakdown
+
+
+@dataclass(frozen=True, slots=True)
+class ConfidenceGateDecision:
+    """Complete, serializable evidence for one confidence-gate decision."""
+
+    configured_min_confidence: float
+    configured_base_margin: float
+    top_candidate: RankedCandidate | None
+    meaningful_competitor: RankedCandidate | None
+    observed_margin: float | None
+    required_margin: float
+    margin_policy: str
+    relaxation_used: bool
+    opposing_action_competition: bool
+    action_incompatible_competition: bool
+    target_incompatible_competition: bool
+    accepted_candidate: RankedCandidate | None
+    rejection_reason: FallbackReason | None
+
+    @property
+    def accepted(self) -> bool:
+        """Return whether the decision accepts a candidate."""
+        return self.accepted_candidate is not None
+
+    def __iter__(self) -> Iterator[RankedCandidate | FallbackReason | None]:
+        """Yield the historical candidate/reason pair during caller migration."""
+        yield self.accepted_candidate
+        yield self.rejection_reason
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return bounded evidence without delegated or registry text."""
+
+        def candidate_evidence(
+            ranked_candidate: RankedCandidate | None,
+        ) -> dict[str, Any] | None:
+            if ranked_candidate is None:
+                return None
+            candidate = ranked_candidate.candidate
+            return {
+                "intent_name": candidate.intent_name,
+                "source": candidate.source.value,
+                "text_sha256": hashlib.sha256(candidate.normalized_text.encode()).hexdigest(),
+                "score": ranked_candidate.scores.final_score,
+            }
+
+        return {
+            "configured_min_confidence": self.configured_min_confidence,
+            "configured_base_margin": self.configured_base_margin,
+            "top_candidate": candidate_evidence(self.top_candidate),
+            "meaningful_competitor": candidate_evidence(self.meaningful_competitor),
+            "observed_margin": self.observed_margin,
+            "required_margin": self.required_margin,
+            "margin_policy": self.margin_policy,
+            "relaxation_used": self.relaxation_used,
+            "opposing_action_competition": self.opposing_action_competition,
+            "action_incompatible_competition": self.action_incompatible_competition,
+            "target_incompatible_competition": self.target_incompatible_competition,
+            "accepted": self.accepted,
+            "reason": self.rejection_reason.value if self.rejection_reason else None,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -469,6 +580,11 @@ def _is_fuzzy_slot_token_match(slot_token: str, query_token: str) -> bool:
             and slot_token[differences[1]] == query_token[differences[0]]
         )
     return _is_fuzzy_literal_token_match(slot_token, query_token)
+
+
+def _single_character_deletions(token: str) -> frozenset[str]:
+    """Return unique strings formed by deleting one character from *token*."""
+    return frozenset(token[:index] + token[index + 1 :] for index in range(len(token)))
 
 
 def _precompute_literal_analysis(
@@ -1060,6 +1176,85 @@ def _query_slot_tokens_from_active(
     return frozenset(matched_tokens)
 
 
+def _slot_index_query_matches(
+    query_tokens: frozenset[str],
+    slot_token_index: SlotTokenIndex,
+    fuzzy_excluded_tokens: frozenset[str] | None = None,
+) -> frozenset[str]:
+    """Return indexed slot tokens that exactly or fuzzily match the query.
+
+    Exact postings and deletion neighborhoods cover one insertion, deletion,
+    substitution, or adjacent transposition. The final bounded matcher rejects
+    signature collisions and preserves the slot-token length safeguards.
+    """
+    token_postings = slot_token_index.candidate_indices_by_token
+    deletion_postings = slot_token_index.tokens_by_deletion
+    matched_tokens = {query_token for query_token in query_tokens if query_token in token_postings}
+
+    for query_token in query_tokens:
+        if query_token in matched_tokens or (
+            fuzzy_excluded_tokens is not None and query_token in fuzzy_excluded_tokens
+        ):
+            continue
+        possible_tokens = set(deletion_postings.get(query_token, ()))
+        for deletion in _single_character_deletions(query_token):
+            if deletion in token_postings:
+                possible_tokens.add(deletion)
+            possible_tokens.update(deletion_postings.get(deletion, ()))
+        matched_tokens.update(
+            slot_token
+            for slot_token in possible_tokens
+            if _is_fuzzy_slot_token_match(slot_token, query_token)
+        )
+    return frozenset(matched_tokens)
+
+
+def _top_additional_slot_indices(
+    query_tokens: frozenset[str],
+    candidate_slot_tokens: tuple[frozenset[str], ...],
+    slot_token_index: SlotTokenIndex,
+    top_indices: Sequence[int],
+    prefilter_keys: Sequence[float],
+    limit: int = DEFAULT_SLOT_PREFILTER_RESCUE_CANDIDATES,
+    fuzzy_excluded_tokens: frozenset[str] | None = None,
+) -> list[int]:
+    """Return a bounded set of fully query-anchored slot candidates.
+
+    A candidate is eligible only when every one of its non-static slot tokens
+    is present in the query within the bounded one-edit matcher. This prevents a
+    shared area token from rescuing a conflicting entity while restoring target
+    families that the general lexical prefilter omitted.
+    """
+    if limit <= 0:
+        return []
+    matched_slot_tokens = _slot_index_query_matches(
+        query_tokens,
+        slot_token_index,
+        fuzzy_excluded_tokens,
+    )
+    if not matched_slot_tokens:
+        return []
+
+    possible_indices = {
+        index
+        for token in matched_slot_tokens
+        for index in slot_token_index.candidate_indices_by_token[token]
+    }
+    selected_indices = set(top_indices)
+    eligible_indices = (
+        index
+        for index in possible_indices
+        if index not in selected_indices
+        and candidate_slot_tokens[index]
+        and candidate_slot_tokens[index].issubset(matched_slot_tokens)
+    )
+    return nsmallest(
+        limit,
+        eligible_indices,
+        key=lambda index: (-len(candidate_slot_tokens[index]), prefilter_keys[index], index),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Slot/context conflict detection helpers
 # ---------------------------------------------------------------------------
@@ -1094,6 +1289,14 @@ def _context_slot_names(candidate: Candidate) -> frozenset[str]:
     return frozenset(slot for slot in context_slots_text.split(",") if slot)
 
 
+def _wildcard_slot_names(candidate: Candidate) -> frozenset[str]:
+    """Return slot names represented by free-text wildcard placeholders."""
+    wildcard_slots_text = candidate.metadata.get("wildcard_slots", "")
+    if not isinstance(wildcard_slots_text, str) or not wildcard_slots_text:
+        return frozenset()
+    return frozenset(slot for slot in wildcard_slots_text.split(",") if slot)
+
+
 def _context_key_aliases(slot_name: str) -> frozenset[str]:
     """Return context keys equivalent to a candidate slot name."""
     if slot_name in LOCATION_SLOT_NAME_SET:
@@ -1101,10 +1304,66 @@ def _context_key_aliases(slot_name: str) -> frozenset[str]:
     return frozenset({slot_name})
 
 
+def _slot_value_has_query_anchor(
+    slot_value: Any,
+    query_tokens: tuple[str, ...],
+) -> bool:
+    """Return whether every token in a slot value is present in the query.
+
+    Bounded fuzzy matching preserves explicit-location precedence for normal
+    spelling mistakes without treating a shared token such as ``room`` as
+    sufficient evidence for a different multi-token location.
+    """
+    slot_tokens = normalized_slot_value_tokens(slot_value)
+    return bool(slot_tokens) and all(
+        any(
+            slot_token == query_token
+            or _is_fuzzy_slot_token_match(slot_token, query_token)
+            or _cached_fuzz_ratio(slot_token, query_token) >= SLOT_TOKEN_MATCH_THRESHOLD
+            for query_token in query_tokens
+        )
+        for slot_token in slot_tokens
+    )
+
+
+def _explicit_context_keys_from_query(
+    candidates: Sequence[Candidate],
+    candidate_indices: Sequence[int],
+    normalized_context: NormalizedIntentContext,
+    query_tokens: tuple[str, ...],
+) -> frozenset[str]:
+    """Return context keys for location values explicitly stated by the user."""
+    if not normalized_context:
+        return frozenset()
+    explicit: set[str] = set()
+    for candidate_index in candidate_indices:
+        for slot_name, slot_value in candidates[candidate_index].parsed_slots.items():
+            if not _slot_value_has_query_anchor(slot_value, query_tokens):
+                continue
+            if slot_name in ENTITY_SLOT_NAME_SET:
+                # An explicit entity is also stronger target evidence than a
+                # device/satellite location. The delegated text retains live
+                # context, so genuinely generic entities still resolve there.
+                explicit.update(
+                    context_name
+                    for context_name in normalized_context
+                    if context_name in LOCATION_SLOT_NAME_SET
+                )
+            explicit.update(
+                context_name
+                for context_name in normalized_context
+                if context_name in _context_key_aliases(slot_name)
+            )
+        if len(explicit) == len(normalized_context):
+            break
+    return frozenset(explicit)
+
+
 def _context_slot_adjustment(
     slots: Mapping[str, Any],
     context_slot_names: frozenset[str],
     normalized_context: NormalizedIntentContext,
+    explicit_context_keys: frozenset[str],
 ) -> float:
     """Return a language-neutral score adjustment from intent context.
 
@@ -1118,6 +1377,10 @@ def _context_slot_adjustment(
 
     score = 0.0
     for context_name, context_tokens in normalized_context.items():
+        if context_name in explicit_context_keys:
+            # An explicit user location takes precedence over satellite/device
+            # context. Context is only a disambiguator when the query omits it.
+            continue
         if candidate_values := [
             slot_value
             for slot_name, slot_value in slots.items()
@@ -1174,6 +1437,13 @@ def _has_unanchored_numeric_slot(
     )
 
 
+def _has_unanchored_numeric_literal(candidate: Candidate, *, query_has_number: bool) -> bool:
+    """Return whether generated candidate text adds a number absent from the query."""
+    return not query_has_number and any(
+        parse_float(token) is not None for token in candidate.normalized_tokens
+    )
+
+
 def _query_numeric_values(query_tokens: frozenset[str]) -> set[float]:
     """Extract all numeric values from query tokens."""
     vals = set()
@@ -1203,7 +1473,7 @@ def _has_numeric_slot_mismatch(
     if not query_numbers:
         return False
 
-    raw_slots_dict = candidate_raw_slot_map(candidate)
+    raw_slots_dict = candidate.parsed_raw_slots
     dynamic_numeric_values = []
     for name, value in slots_dict.items():
         if name in static_slots:
@@ -1230,6 +1500,50 @@ def _has_numeric_slot_mismatch(
         )
         for val in dynamic_numeric_values
     )
+
+
+def _has_unconsumed_query_number(
+    candidate_tokens: frozenset[str],
+    query_numbers: set[float],
+) -> bool:
+    """Return whether a numeric query is paired with a candidate containing no number."""
+    return bool(query_numbers) and all(parse_float(token) is None for token in candidate_tokens)
+
+
+def _has_unanchored_semantic_slot(
+    candidate: Candidate,
+    slots: Mapping[str, Any],
+    static_slots: frozenset[str],
+    query_tokens: tuple[str, ...],
+) -> bool:
+    """Return whether a spoken non-target parameter is absent from the query.
+
+    ``slots_raw`` contains the surface value before HassIL output mappings, so
+    mapped multilingual synonyms remain anchored by what the user actually
+    said. Candidates without raw evidence are left unchanged rather than
+    guessing whether an output value was implicit or transformed.
+    """
+    raw_slots = candidate.parsed_raw_slots
+    if not raw_slots:
+        return False
+    excluded_slots = (
+        static_slots
+        | _context_slot_names(candidate)
+        | _wildcard_slot_names(candidate)
+        | ENTITY_SLOT_NAME_SET
+        | LOCATION_SLOT_NAME_SET
+    )
+    for slot_name, raw_value in raw_slots.items():
+        if slot_name in excluded_slots or slot_name not in slots:
+            continue
+        output_value = slots[slot_name]
+        if _is_numeric_slot_value(raw_value) or _is_numeric_slot_value(output_value):
+            continue
+        if not normalized_slot_value_tokens(raw_value):
+            continue
+        if not _slot_value_has_query_anchor(raw_value, query_tokens):
+            return True
+    return False
 
 
 def _has_unanchored_entity_slot(
@@ -1269,8 +1583,14 @@ def _has_entity_only_uncovered_query_tokens(
     slots: Mapping[str, Any],
     static_slots: frozenset[str],
 ) -> bool:
-    """Return whether an entity-only candidate leaves query words unexplained."""
-    if candidate.literal_variants or not query_tokens:
+    """Return whether an action-implicit target candidate leaves query words unexplained.
+
+    A template with an empty literal variant can express its intent using only
+    target text, even when other variants add optional determiners. Treating
+    those determiners as action evidence lets unrelated query verbs explain an
+    implicit state-changing intent.
+    """
+    if not candidate.has_implicit_literal_variant or not query_tokens:
         return False
     if all(slot_name in static_slots for slot_name in slots):
         return False
@@ -1414,6 +1734,7 @@ class _ScoringContext:
     slot_tokens_by_index: dict[int, frozenset[str]]
     min_confidence: float
     normalized_context: NormalizedIntentContext
+    explicit_context_keys: frozenset[str]
     wildcard_passed_set: frozenset[int] | set[int]
     rehydrated_cache: dict[int, tuple[str, dict[str, str]]]
     intent_score_cache: dict[tuple[frozenset[str], ...], float]
@@ -1590,22 +1911,37 @@ def _apply_candidate_slot_penalties(
     context: _ScoringContext,
     score: float,
 ) -> float:
-    """Apply numeric, entity, and static slot mismatch penalties to the score."""
+    """Apply query/slot consistency penalties to the score."""
+    if _has_unconsumed_query_number(candidate_tokens, context.query_numbers):
+        score *= QUERY_NUMBER_WITHOUT_CANDIDATE_PENALTY
+
     slots = candidate.parsed_slots
     if not slots:
         return score
 
     static_slots = _static_slot_names(candidate)
-    if _has_unanchored_numeric_slot(
+    if _unanchored_numeric_slot := _has_unanchored_numeric_slot(
         slots,
         static_slots,
         query_has_number=context.query_has_number,
     ):
         score *= NUMERIC_SLOT_WITHOUT_QUERY_PENALTY
+        if _has_unanchored_numeric_literal(
+            candidate,
+            query_has_number=context.query_has_number,
+        ):
+            score *= NUMERIC_LITERAL_WITHOUT_QUERY_PENALTY
     if _has_numeric_slot_mismatch(candidate, slots, context.query_numbers, static_slots):
         score *= NUMERIC_SLOT_MISMATCH_PENALTY
     if _has_unanchored_entity_slot(slots, static_slots, context.query_tokens_tuple):
         score *= UNANCHORED_ENTITY_SLOT_PENALTY
+    if _has_unanchored_semantic_slot(
+        candidate,
+        slots,
+        static_slots,
+        context.query_tokens_tuple,
+    ):
+        score *= UNANCHORED_SEMANTIC_SLOT_PENALTY
     if _has_entity_only_uncovered_query_tokens(
         context.query_tokens,
         candidate_tokens,
@@ -1819,6 +2155,7 @@ def _score_single_candidate(
         slots,
         _context_slot_names(candidate),
         context.normalized_context,
+        context.explicit_context_keys,
     )
     if context_adjustment > 0.0:
         combined = min(1.0, combined + (CONTEXT_SLOT_MATCH_BOOST * context_adjustment))
@@ -1866,6 +2203,8 @@ def rank_candidates(
     wildcard_min_required_by_index: dict[int, int] | None = None,
     wildcard_variant_groups: tuple[WildcardVariantGroup, ...] | None = None,
     candidate_slot_tokens: tuple[frozenset[str], ...] | None = None,
+    slot_token_index: SlotTokenIndex | None = None,
+    reference_slot_token_index: SlotTokenIndex | None = None,
     slot_preferences: set[tuple[str, str]] | None = None,
     intent_context: Mapping[str, Any] | None = None,
     min_confidence: float = DEFAULT_MIN_CONFIDENCE,
@@ -1880,6 +2219,8 @@ def rank_candidates(
     and scores the supplied candidates through its dense path instead.
     ``intent_context`` accepts HassIL-style context mappings and is normalized
     by ``utils.normalize_intent_context``.
+    ``reference_slot_token_index`` contributes known target tokens from a
+    separate static corpus without assuming index alignment with ``candidates``.
     """
     if max_candidates < 1:
         raise ValueError("max_candidates must be positive")
@@ -1894,6 +2235,8 @@ def rank_candidates(
         raise ValueError("candidate_char_index length must match candidates")
     if candidate_slot_tokens is not None and len(candidate_slot_tokens) != len(candidates):
         raise ValueError("candidate_slot_tokens length must match candidates")
+    if slot_token_index is not None and slot_token_index.candidate_count != len(candidates):
+        raise ValueError("slot_token_index length must match candidates")
     if (
         reference_bm25_index is None
         and bm25_index is not None
@@ -1967,6 +2310,18 @@ def rank_candidates(
     )
     top_indices = _top_prefilter_indices(prefilter_keys, prefilter_limit)
 
+    if candidate_slot_tokens is not None and slot_token_index is not None:
+        top_indices.extend(
+            _top_additional_slot_indices(
+                query_tokens,
+                candidate_slot_tokens,
+                slot_token_index,
+                top_indices,
+                prefilter_keys,
+                fuzzy_excluded_tokens=positional_literal_tokens,
+            )
+        )
+
     wildcard_passed_set = _prefilter_wildcard_candidates(
         candidates,
         query_tokens,
@@ -1995,6 +2350,12 @@ def rank_candidates(
         if positional_literal_tokens
         else {}
     )
+    explicit_context_keys = _explicit_context_keys_from_query(
+        candidates,
+        top_indices,
+        normalized_context,
+        query_tokens_tuple,
+    )
 
     if candidate_slot_tokens is None:
         slot_tokens_by_index = {idx: candidates[idx].slot_tokens_set for idx in top_indices}
@@ -2008,6 +2369,12 @@ def rank_candidates(
             query_tokens,
             top_indices,
             candidate_slot_tokens,
+            positional_literal_tokens,
+        )
+    if reference_slot_token_index is not None:
+        query_slot_tokens |= _slot_index_query_matches(
+            query_tokens,
+            reference_slot_token_index,
             positional_literal_tokens,
         )
 
@@ -2035,6 +2402,7 @@ def rank_candidates(
         slot_tokens_by_index=slot_tokens_by_index,
         min_confidence=min_confidence,
         normalized_context=normalized_context,
+        explicit_context_keys=explicit_context_keys,
         wildcard_passed_set=wildcard_passed_set,
         rehydrated_cache=_rehydrated_cache,
         intent_score_cache=intent_score_cache,
@@ -2078,6 +2446,10 @@ def rank_candidates(
         ),
         reverse=True,
     )
+    bounded_ranked_tuples = _limit_ranked_items(
+        ranked_tuples,
+        disambiguation_limit,
+    )
     ranked = [
         RankedCandidate(
             candidate=item.candidate,
@@ -2090,7 +2462,7 @@ def rank_candidates(
                 penalty=item.penalty,
             ),
         )
-        for item in ranked_tuples[:disambiguation_limit]
+        for item in bounded_ranked_tuples
     ]
     _apply_intent_disambiguation(ranked)
     return tuple(ranked[:max_candidates])
@@ -2110,6 +2482,534 @@ def _candidate_slot_tokens_at(
     if candidate_slot_tokens is not None:
         return candidate_slot_tokens[index]
     return slot_tokens_by_index.get(index, frozenset())
+
+
+def _candidate_surface_slot_tokens(candidate: Candidate) -> frozenset[str]:
+    """Return non-static slot tokens in the language spoken by the user.
+
+    ``slots`` contains executable values after HassIL output mappings, whereas
+    ``slots_raw`` retains the localized surface form. Ambiguity checks compare
+    the latter when available so mapped values such as ``window`` do not make a
+    Vietnamese ``cửa sổ`` target appear unrelated.
+    """
+    slots = candidate.parsed_slots
+    raw_slots = candidate.parsed_raw_slots
+    static_slots = _static_slot_names(candidate)
+    return frozenset(
+        token
+        for slot_name, slot_value in slots.items()
+        if slot_name not in static_slots
+        for token in normalized_slot_value_tokens(raw_slots.get(slot_name, slot_value))
+    )
+
+
+def _candidate_concrete_surface_slot_tokens(candidate: Candidate) -> frozenset[str]:
+    """Return localized non-static slot tokens excluding free-text wildcards."""
+    slots = candidate.parsed_slots
+    raw_slots = candidate.parsed_raw_slots
+    excluded_slots = _static_slot_names(candidate) | _wildcard_slot_names(candidate)
+    return frozenset(
+        token
+        for slot_name, slot_value in slots.items()
+        if slot_name not in excluded_slots
+        for token in normalized_slot_value_tokens(raw_slots.get(slot_name, slot_value))
+    )
+
+
+def _payload_tokens_have_query_anchor(
+    payload_tokens: frozenset[str],
+    query_tokens: tuple[str, ...],
+    query_tokens_no_diacritics: frozenset[str],
+    language: str | None,
+) -> bool:
+    """Return whether every distinguishing payload token is query-supported."""
+    if not payload_tokens:
+        return False
+    for payload_token in payload_tokens:
+        payload_token_no_diacritics = normalize_text_no_diacritics(payload_token, language)
+        if (
+            payload_token in query_tokens
+            or payload_token_no_diacritics in query_tokens_no_diacritics
+            or any(
+                _is_fuzzy_slot_token_match(payload_token, query_token)
+                or _has_bounded_shared_stem(payload_token, query_token)
+                or _cached_fuzz_ratio(payload_token, query_token) >= SLOT_TOKEN_MATCH_THRESHOLD
+                for query_token in query_tokens
+            )
+        ):
+            continue
+        return False
+    return True
+
+
+def _candidate_has_supported_literal_variant(
+    candidate: Candidate,
+    query_tokens: tuple[str, ...],
+    query_tokens_no_diacritics: frozenset[str],
+    language: str | None,
+) -> bool:
+    """Return whether a complete grammar literal variant is query-supported."""
+    variants = candidate.literal_variants
+    if not variants or not all(variants):
+        return True
+    return any(
+        _payload_tokens_have_query_anchor(
+            variant,
+            query_tokens,
+            query_tokens_no_diacritics,
+            language,
+        )
+        for variant in variants
+    )
+
+
+def _candidate_has_explicit_supported_literal_variant(
+    candidate: Candidate,
+    query_tokens: tuple[str, ...],
+    query_tokens_no_diacritics: frozenset[str],
+    language: str | None,
+) -> bool:
+    """Return whether the query supports one non-empty grammar literal variant."""
+    return any(
+        variant
+        and _payload_tokens_have_query_anchor(
+            variant,
+            query_tokens,
+            query_tokens_no_diacritics,
+            language,
+        )
+        for variant in candidate.literal_variants
+    )
+
+
+def _candidate_covers_query_tokens(
+    candidate: Candidate,
+    query_tokens: tuple[str, ...],
+    language: str | None,
+) -> bool:
+    """Return whether candidate text explains every query token."""
+    candidate_tokens = candidate.normalized_tokens
+    candidate_tokens_no_diacritics = frozenset(candidate.normalized_text_no_diacritics.split())
+    return _payload_tokens_have_query_anchor(
+        frozenset(query_tokens),
+        candidate_tokens,
+        candidate_tokens_no_diacritics,
+        language,
+    )
+
+
+def _wildcard_absorbs_supported_concrete_target(
+    candidate: Candidate,
+    other: Candidate,
+    query_tokens: tuple[str, ...] | None,
+    query_tokens_no_diacritics: frozenset[str],
+    language: str | None,
+) -> bool:
+    """Return whether free text consumed a query-supported concrete target."""
+    if query_tokens is None or not candidate.has_wildcard or other.has_wildcard:
+        return False
+    if _candidate_concrete_surface_slot_tokens(candidate):
+        return False
+    concrete_target = _candidate_concrete_surface_slot_tokens(other)
+    return _payload_tokens_have_query_anchor(
+        concrete_target,
+        query_tokens,
+        query_tokens_no_diacritics,
+        language,
+    )
+
+
+def _has_bounded_shared_stem(token: str, query_token: str) -> bool:
+    """Return whether two long tokens share a substantial leading stem.
+
+    This is intentionally bounded to long words and requires the common prefix
+    to cover at least two thirds of the shorter token. It captures productive
+    morphological variants without accepting short same-prefix words.
+    """
+    shorter_length = min(len(token), len(query_token))
+    if shorter_length < 6:
+        return False
+    common_prefix_length = 0
+    for token_char, query_char in zip(token, query_token, strict=False):
+        if token_char != query_char:
+            break
+        common_prefix_length += 1
+    return common_prefix_length >= 4 and common_prefix_length * 3 >= shorter_length * 2
+
+
+def _same_intent_payload_query_support(
+    candidate: Candidate,
+    other: Candidate,
+    query_tokens: tuple[str, ...],
+    query_tokens_no_diacritics: frozenset[str],
+    language: str | None,
+) -> tuple[bool, bool]:
+    """Return query support for each candidate's distinguishing slot payload."""
+    candidate_payload = _candidate_surface_slot_tokens(candidate)
+    other_payload = _candidate_surface_slot_tokens(other)
+    shared_payload = candidate_payload & other_payload
+    candidate_distinguishing = candidate_payload - other_payload
+    other_distinguishing = other_payload - candidate_payload
+    return (
+        _payload_tokens_have_query_anchor(
+            candidate_distinguishing,
+            query_tokens,
+            query_tokens_no_diacritics,
+            language,
+        )
+        or _single_short_payload_typo_has_context(
+            candidate_distinguishing,
+            other_distinguishing,
+            shared_payload,
+            query_tokens,
+            query_tokens_no_diacritics,
+            language,
+        ),
+        _payload_tokens_have_query_anchor(
+            other_distinguishing,
+            query_tokens,
+            query_tokens_no_diacritics,
+            language,
+        )
+        or _single_short_payload_typo_has_context(
+            other_distinguishing,
+            candidate_distinguishing,
+            shared_payload,
+            query_tokens,
+            query_tokens_no_diacritics,
+            language,
+        ),
+    )
+
+
+def _single_short_payload_typo_has_context(
+    payload_tokens: frozenset[str],
+    other_payload_tokens: frozenset[str],
+    shared_payload_tokens: frozenset[str],
+    query_tokens: tuple[str, ...],
+    query_tokens_no_diacritics: frozenset[str],
+    language: str | None,
+) -> bool:
+    """Accept one short target typo only inside a strongly anchored target phrase."""
+    if (
+        len(payload_tokens) != 1
+        or not other_payload_tokens
+        or len(shared_payload_tokens) < 2
+        or not _payload_tokens_have_query_anchor(
+            shared_payload_tokens,
+            query_tokens,
+            query_tokens_no_diacritics,
+            language,
+        )
+    ):
+        return False
+    payload_token = normalize_text_no_diacritics(next(iter(payload_tokens)), language)
+    if len(payload_token) != 3:
+        return False
+    return any(
+        len(query_token) == 3
+        and payload_token[0] == query_token[0]
+        and sum(
+            payload_char != query_char
+            for payload_char, query_char in zip(payload_token, query_token, strict=True)
+        )
+        == 1
+        for query_token in query_tokens_no_diacritics
+    )
+
+
+def _surface_payloads_are_nested(candidate: Candidate, other: Candidate) -> bool:
+    """Return whether one non-static spoken payload contains the other."""
+    candidate_payload = _candidate_surface_slot_tokens(candidate)
+    other_payload = _candidate_surface_slot_tokens(other)
+    return bool(candidate_payload and other_payload) and (
+        candidate_payload.issubset(other_payload) or other_payload.issubset(candidate_payload)
+    )
+
+
+def _candidates_share_executable_target(candidate: Candidate, other: Candidate) -> bool:
+    """Return whether candidates describe the same target payload."""
+    if candidate.parsed_slots == other.parsed_slots:
+        return True
+    candidate_payload = _candidate_surface_slot_tokens(candidate)
+    other_payload = _candidate_surface_slot_tokens(other)
+    return bool(candidate_payload and other_payload) and (
+        candidate_payload.issubset(other_payload) or other_payload.issubset(candidate_payload)
+    )
+
+
+def _candidate_has_nonliteral_target_token(
+    candidate: Candidate,
+    reference: Candidate,
+    language: str | None,
+) -> bool:
+    """Return whether a concrete target contributes evidence beyond grammar words."""
+    literal_tokens = frozenset(token for variant in reference.literal_variants for token in variant)
+    literal_tokens_no_diacritics = frozenset(
+        normalize_text_no_diacritics(token, language) for token in literal_tokens
+    )
+    return any(
+        not any(
+            payload_token == literal_token
+            or normalize_text_no_diacritics(payload_token, language)
+            == normalize_text_no_diacritics(literal_token, language)
+            or _is_fuzzy_slot_token_match(payload_token, literal_token)
+            or _has_bounded_shared_stem(payload_token, literal_token)
+            or _cached_fuzz_ratio(payload_token, literal_token) >= SLOT_TOKEN_MATCH_THRESHOLD
+            for literal_token in literal_tokens | literal_tokens_no_diacritics
+        )
+        for payload_token in _candidate_surface_slot_tokens(candidate)
+    )
+
+
+def _intent_group_has_unique_supported_literal(
+    ranked: Sequence[RankedCandidate],
+    candidate: Candidate,
+    other: Candidate,
+    query_tokens: tuple[str, ...],
+    query_tokens_no_diacritics: frozenset[str],
+    language: str | None,
+) -> bool:
+    """Return whether only the candidate's equivalent group has literal evidence.
+
+    Candidate generation emits multiple word-order and slot-decomposition
+    variants for one executable intent/target. Confidence is evaluated on that
+    semantic group so an exact grammar action on one variant can disambiguate a
+    higher-scoring sibling from an opposing action.
+    """
+
+    def _equivalent_group(seed: Candidate) -> tuple[Candidate, ...]:
+        return tuple(
+            item.candidate
+            for item in ranked
+            if item.candidate.intent_name == seed.intent_name
+            and _candidates_share_executable_target(seed, item.candidate)
+        )
+
+    candidate_group = _equivalent_group(candidate)
+    other_group = _equivalent_group(other)
+    if not any(
+        _candidate_has_explicit_supported_literal_variant(
+            grouped,
+            query_tokens,
+            query_tokens_no_diacritics,
+            language,
+        )
+        for grouped in candidate_group
+    ):
+        return False
+    if any(
+        _candidate_has_explicit_supported_literal_variant(
+            grouped,
+            query_tokens,
+            query_tokens_no_diacritics,
+            language,
+        )
+        for grouped in other_group
+    ):
+        return False
+
+    candidate_literal_tokens = frozenset(
+        token
+        for grouped in candidate_group
+        for variant in grouped.literal_variants
+        for token in variant
+    )
+    other_literal_tokens = frozenset(
+        token
+        for grouped in other_group
+        for variant in grouped.literal_variants
+        for token in variant
+    )
+    return any(
+        token in query_tokens
+        or normalize_text_no_diacritics(token, language) in query_tokens_no_diacritics
+        for token in candidate_literal_tokens - other_literal_tokens
+    )
+
+
+def _drop_query_unsupported_same_intent_leaders(
+    ranked: Sequence[RankedCandidate],
+    query_tokens: tuple[str, ...],
+    query_tokens_no_diacritics: frozenset[str],
+    language: str | None,
+) -> tuple[RankedCandidate, ...] | None:
+    """Drop a higher-scoring target when a lower variant has explicit support.
+
+    The lexical scorer can occasionally rank a structurally similar target
+    first even though only a lower same-intent target is present in the query.
+    Removing the unsupported variants lets the complete confidence policy
+    independently evaluate the supported candidate against every other intent.
+    """
+    if len(ranked) < 2:
+        return None
+    top_candidate = ranked[0].candidate
+    top_payload = _candidate_surface_slot_tokens(top_candidate)
+    supported_candidate = next(
+        (
+            item
+            for item in ranked[1:]
+            if item.candidate.intent_name == top_candidate.intent_name
+            and item.candidate.parsed_slots != top_candidate.parsed_slots
+            and _candidate_surface_slot_tokens(item.candidate)
+            and (
+                top_payload
+                or _candidate_has_nonliteral_target_token(
+                    item.candidate,
+                    top_candidate,
+                    language,
+                )
+            )
+            and not _surface_payloads_are_nested(top_candidate, item.candidate)
+            and _same_intent_payload_query_support(
+                top_candidate,
+                item.candidate,
+                query_tokens,
+                query_tokens_no_diacritics,
+                language,
+            )
+            == (False, True)
+        ),
+        None,
+    )
+    if supported_candidate is None:
+        return None
+
+    filtered: list[RankedCandidate] = []
+    supported_payload = supported_candidate.candidate
+    for item in ranked:
+        candidate = item.candidate
+        if candidate.intent_name != supported_payload.intent_name or item is supported_candidate:
+            filtered.append(item)
+            continue
+        supported, candidate_supported = _same_intent_payload_query_support(
+            supported_payload,
+            candidate,
+            query_tokens,
+            query_tokens_no_diacritics,
+            language,
+        )
+        if supported and not candidate_supported:
+            continue
+        filtered.append(item)
+    return tuple(filtered)
+
+
+def _intent_has_supported_literal_variant(
+    ranked: Sequence[RankedCandidate],
+    candidate: Candidate,
+    query_tokens: tuple[str, ...],
+    query_tokens_no_diacritics: frozenset[str],
+    language: str | None,
+) -> bool:
+    """Return whether any generated variant supplies complete intent wording."""
+    return any(
+        item.candidate.intent_name == candidate.intent_name
+        and _candidate_has_supported_literal_variant(
+            item.candidate,
+            query_tokens,
+            query_tokens_no_diacritics,
+            language,
+        )
+        for item in ranked
+    )
+
+
+def _candidates_meaningfully_compete(
+    candidate: Candidate,
+    other: Candidate,
+    *,
+    query_tokens: tuple[str, ...] | None = None,
+    query_tokens_no_diacritics: frozenset[str] = frozenset(),
+    language: str | None = None,
+) -> bool:
+    """Return whether two candidates differ in query-relevant executable payload."""
+    candidate_slots = candidate.parsed_slots
+    other_slots = other.parsed_slots
+    if candidate.normalized_text == other.normalized_text and candidate_slots == other_slots:
+        return False
+    if _is_equivalent_intent_competitor(candidate.intent_name, other.intent_name):
+        return False
+    if candidate.intent_name != other.intent_name:
+        return True
+    if candidate_slots == other_slots:
+        return False
+
+    # HassIL commonly represents one physical target through overlapping slot
+    # decompositions. Surface values also avoid false differences caused by
+    # language-independent output mappings.
+    candidate_payload = _candidate_surface_slot_tokens(candidate)
+    other_payload = _candidate_surface_slot_tokens(other)
+    if candidate_payload and candidate_payload == other_payload:
+        return False
+    if _surface_payloads_are_nested(candidate, other):
+        return False
+
+    if query_tokens is None:
+        return True
+
+    candidate_supported, other_supported = _same_intent_payload_query_support(
+        candidate,
+        other,
+        query_tokens,
+        query_tokens_no_diacritics,
+        language,
+    )
+    return not (
+        candidate_supported and not other_supported and (candidate_payload or other_payload)
+    )
+
+
+def _limit_ranked_items(
+    ranked_items: Sequence[_RankedItem],
+    limit: int,
+) -> list[_RankedItem]:
+    """Cap ranked items while retaining the nearest meaningful competitor."""
+    selected = list(ranked_items[:limit])
+    if len(selected) < 2:
+        return selected
+    top_candidate = selected[0].candidate
+    if any(
+        _candidates_meaningfully_compete(top_candidate, item.candidate) for item in selected[1:]
+    ):
+        return selected
+    competitor = next(
+        (
+            item
+            for item in ranked_items[limit:]
+            if _candidates_meaningfully_compete(top_candidate, item.candidate)
+        ),
+        None,
+    )
+    if competitor is not None:
+        selected[-1] = competitor
+    return selected
+
+
+def _limit_ranked_candidates(
+    ranked: Sequence[RankedCandidate],
+    limit: int,
+) -> tuple[RankedCandidate, ...]:
+    """Cap public ranked candidates while retaining a confidence competitor."""
+    selected = list(ranked[:limit])
+    if len(selected) < 2:
+        return tuple(selected)
+    top_candidate = selected[0].candidate
+    if any(
+        _candidates_meaningfully_compete(top_candidate, item.candidate) for item in selected[1:]
+    ):
+        return tuple(selected)
+    competitor = next(
+        (
+            item
+            for item in ranked[limit:]
+            if _candidates_meaningfully_compete(top_candidate, item.candidate)
+        ),
+        None,
+    )
+    if competitor is not None:
+        selected[-1] = competitor
+    return tuple(selected)
 
 
 def _ranked_tuple_slot_preference(
@@ -2255,13 +3155,12 @@ def _intent_tie_preference(candidate: Candidate, tied_intents: frozenset[str]) -
 
 def _apply_intent_disambiguation(
     ranked: list[RankedCandidate],
-    tiebreaker_margin: float = TIEBREAKER_INTENT_MARGIN,
 ) -> None:
-    """Re-rank when the strongest different-intent candidate nearly ties the top.
+    """Use intent evidence only to resolve an exact final-score tie.
 
-    Same-intent candidate variants are skipped. If the first real competitor's
-    score gap is below ``tiebreaker_margin``, it is promoted when its intent
-    evidence is stronger.
+    The intent component is already included in ``final_score``. Promoting a
+    lower final score would count that component twice and can replace the best
+    lexical candidate with a weaker action. Same-intent variants are skipped.
     """
     if len(ranked) < 2:
         return
@@ -2277,8 +3176,12 @@ def _apply_intent_disambiguation(
     if competitor_index is None:
         return
     competitor = ranked[competitor_index]
-    margin = top.scores.final_score - competitor.scores.final_score
-    if margin > tiebreaker_margin:
+    if not isclose(
+        top.scores.final_score,
+        competitor.scores.final_score,
+        rel_tol=0.0,
+        abs_tol=_STRUCTURAL_TIE_ABS_TOLERANCE,
+    ):
         return
     if competitor.scores.intent_score > top.scores.intent_score:
         ranked[0], ranked[competitor_index] = competitor, top
@@ -2360,70 +3263,486 @@ def _is_same_text_same_slot_competitor(
     )
 
 
+def _is_equivalent_intent_competitor(intent1: str, intent2: str) -> bool:
+    """Return whether two intents are functionally equivalent list intents."""
+    return any(intent1 in group and intent2 in group for group in _EQUIVALENT_INTENT_GROUPS)
+
+
+def _is_known_opposing_action_competition(
+    candidate: RankedCandidate,
+    other: RankedCandidate,
+) -> bool:
+    """Return whether two candidates represent a classified opposing action pair."""
+    return (
+        frozenset((candidate.candidate.intent_name, other.candidate.intent_name))
+        in _KNOWN_OPPOSING_INTENT_TIE_PREFERENCES
+    )
+
+
+def _is_action_bearing_intent(intent_name: str) -> bool:
+    """Conservatively classify Home Assistant intents that can change state."""
+    return intent_name.startswith("Hass") and not (
+        "Get" in intent_name
+        or intent_name
+        in {
+            "HassNevermind",
+            "HassRespond",
+            "HassTimerStatus",
+        }
+    )
+
+
+def _confidence_decision(
+    *,
+    min_confidence: float,
+    min_margin: float,
+    top_candidate: RankedCandidate | None,
+    competing_candidate: RankedCandidate | None,
+    observed_margin: float | None,
+    required_margin: float,
+    margin_policy: str,
+    relaxation_used: bool = False,
+    opposing_action_competition: bool = False,
+    action_incompatible_competition: bool = False,
+    target_incompatible_competition: bool = False,
+    accepted_candidate: RankedCandidate | None = None,
+    rejection_reason: FallbackReason | None = None,
+) -> ConfidenceGateDecision:
+    """Build one confidence decision with consistent configured evidence."""
+    return ConfidenceGateDecision(
+        configured_min_confidence=min_confidence,
+        configured_base_margin=min_margin,
+        top_candidate=top_candidate,
+        meaningful_competitor=competing_candidate,
+        observed_margin=observed_margin,
+        required_margin=required_margin,
+        margin_policy=margin_policy,
+        relaxation_used=relaxation_used,
+        opposing_action_competition=opposing_action_competition,
+        action_incompatible_competition=action_incompatible_competition,
+        target_incompatible_competition=target_incompatible_competition,
+        accepted_candidate=accepted_candidate,
+        rejection_reason=rejection_reason,
+    )
+
+
 def evaluate_confidence_gates(
     ranked: Sequence[RankedCandidate],
     min_confidence: float = DEFAULT_MIN_CONFIDENCE,
     min_margin: float = DEFAULT_MIN_MARGIN,
-) -> tuple[RankedCandidate | None, FallbackReason | None]:
-    """Evaluate confidence gates and return the accepted candidate.
-
-    Returns the accepted candidate and the fallback reason if rejected.
-    """
+    *,
+    query: str | None = None,
+    language: str | None = None,
+) -> ConfidenceGateDecision:
+    """Evaluate the shared dynamic confidence policy and return all evidence."""
     if not ranked:
-        return None, FallbackReason.NO_CANDIDATE
+        return _confidence_decision(
+            min_confidence=min_confidence,
+            min_margin=min_margin,
+            top_candidate=None,
+            competing_candidate=None,
+            observed_margin=None,
+            required_margin=0.0,
+            margin_policy="no_candidate",
+            rejection_reason=FallbackReason.NO_CANDIDATE,
+        )
+    query_tokens = tuple(normalize_text(query).split()) if query is not None else None
+    query_tokens_no_diacritics = (
+        frozenset(normalize_text_no_diacritics(query, language).split())
+        if query is not None
+        else frozenset()
+    )
+    if query_tokens is not None and (
+        filtered_ranked := _drop_query_unsupported_same_intent_leaders(
+            ranked,
+            query_tokens,
+            query_tokens_no_diacritics,
+            language,
+        )
+    ):
+        return evaluate_confidence_gates(
+            filtered_ranked,
+            min_confidence=min_confidence,
+            min_margin=min_margin,
+            query=query,
+            language=language,
+        )
     top_candidate = ranked[0]
     if top_candidate.scores.final_score < min_confidence:
-        return None, FallbackReason.LOW_CONFIDENCE
+        return _confidence_decision(
+            min_confidence=min_confidence,
+            min_margin=min_margin,
+            top_candidate=top_candidate,
+            competing_candidate=None,
+            observed_margin=None,
+            required_margin=0.0,
+            margin_policy="hard_min_confidence",
+            rejection_reason=FallbackReason.LOW_CONFIDENCE,
+        )
     competing_candidate = next(
         (
             item
             for item in ranked[1:]
-            if item.candidate.intent_name != top_candidate.candidate.intent_name
-            and not _is_same_text_same_slot_competitor(top_candidate, item)
+            if _candidates_meaningfully_compete(
+                top_candidate.candidate,
+                item.candidate,
+                query_tokens=query_tokens,
+                query_tokens_no_diacritics=query_tokens_no_diacritics,
+                language=language,
+            )
         ),
         None,
     )
     if competing_candidate is None:
-        return top_candidate, None
+        return _confidence_decision(
+            min_confidence=min_confidence,
+            min_margin=min_margin,
+            top_candidate=top_candidate,
+            competing_candidate=None,
+            observed_margin=None,
+            required_margin=0.0,
+            margin_policy="no_competitor",
+            accepted_candidate=top_candidate,
+        )
+    margin = top_candidate.scores.final_score - competing_candidate.scores.final_score
+    opposing_actions = _is_known_opposing_action_competition(top_candidate, competing_candidate)
+    target_incompatible_competition = (
+        top_candidate.candidate.intent_name == competing_candidate.candidate.intent_name
+        and top_candidate.candidate.parsed_slots != competing_candidate.candidate.parsed_slots
+    )
+    target_has_query_support = True
+    if target_incompatible_competition and query_tokens is not None:
+        target_has_query_support, _competitor_has_query_support = (
+            _same_intent_payload_query_support(
+                top_candidate.candidate,
+                competing_candidate.candidate,
+                query_tokens,
+                query_tokens_no_diacritics,
+                language,
+            )
+        )
+    top_is_action = _is_action_bearing_intent(top_candidate.candidate.intent_name)
+    competitor_is_action = _is_action_bearing_intent(competing_candidate.candidate.intent_name)
+    unknown_action_competition = (
+        not opposing_actions
+        and top_candidate.candidate.intent_name != competing_candidate.candidate.intent_name
+        and top_is_action
+        and competitor_is_action
+    )
+    action_incompatible_competition = not opposing_actions and top_is_action != competitor_is_action
+
+    if _wildcard_absorbs_supported_concrete_target(
+        top_candidate.candidate,
+        competing_candidate.candidate,
+        query_tokens,
+        query_tokens_no_diacritics,
+        language,
+    ):
+        return _confidence_decision(
+            min_confidence=min_confidence,
+            min_margin=min_margin,
+            top_candidate=top_candidate,
+            competing_candidate=competing_candidate,
+            observed_margin=margin,
+            required_margin=min_margin,
+            margin_policy="wildcard_absorbed_concrete_target",
+            opposing_action_competition=opposing_actions,
+            action_incompatible_competition=action_incompatible_competition,
+            target_incompatible_competition=target_incompatible_competition,
+            rejection_reason=FallbackReason.LOW_CONFIDENCE,
+        )
     if _is_exact_lexical_match(top_candidate):
         # Exact canonical text is delegated back to HassIL with live request
         # context; candidate intent/slot metadata is not executed here.
-        return top_candidate, None
-    margin = top_candidate.scores.final_score - competing_candidate.scores.final_score
-    if _has_weak_zero_intent_evidence(top_candidate, margin):
-        return None, FallbackReason.LOW_CONFIDENCE
-    if _has_safe_relaxed_intent_evidence(
+        return _confidence_decision(
+            min_confidence=min_confidence,
+            min_margin=min_margin,
+            top_candidate=top_candidate,
+            competing_candidate=competing_candidate,
+            observed_margin=margin,
+            required_margin=0.0,
+            margin_policy="exact_lexical",
+            relaxation_used=True,
+            opposing_action_competition=opposing_actions,
+            action_incompatible_competition=action_incompatible_competition,
+            target_incompatible_competition=target_incompatible_competition,
+            accepted_candidate=top_candidate,
+        )
+    if (
+        query_tokens is not None
+        and not top_is_action
+        and not _intent_has_supported_literal_variant(
+            ranked,
+            top_candidate.candidate,
+            query_tokens,
+            query_tokens_no_diacritics,
+            language,
+        )
+        and not _candidate_covers_query_tokens(
+            top_candidate.candidate,
+            query_tokens,
+            language,
+        )
+    ):
+        return _confidence_decision(
+            min_confidence=min_confidence,
+            min_margin=min_margin,
+            top_candidate=top_candidate,
+            competing_candidate=competing_candidate,
+            observed_margin=margin,
+            required_margin=min_margin,
+            margin_policy="read_only_incomplete_literal",
+            opposing_action_competition=opposing_actions,
+            action_incompatible_competition=action_incompatible_competition,
+            target_incompatible_competition=target_incompatible_competition,
+            rejection_reason=FallbackReason.LOW_CONFIDENCE,
+        )
+    if (
+        query_tokens is not None
+        and top_is_action
+        and action_incompatible_competition
+        and not _candidate_has_supported_literal_variant(
+            top_candidate.candidate,
+            query_tokens,
+            query_tokens_no_diacritics,
+            language,
+        )
+        and not _candidate_covers_query_tokens(
+            top_candidate.candidate,
+            query_tokens,
+            language,
+        )
+    ):
+        return _confidence_decision(
+            min_confidence=min_confidence,
+            min_margin=min_margin,
+            top_candidate=top_candidate,
+            competing_candidate=competing_candidate,
+            observed_margin=margin,
+            required_margin=min_margin,
+            margin_policy="state_change_incomplete_literal",
+            opposing_action_competition=opposing_actions,
+            action_incompatible_competition=True,
+            target_incompatible_competition=target_incompatible_competition,
+            rejection_reason=FallbackReason.LOW_CONFIDENCE,
+        )
+    if (
+        query_tokens is not None
+        and top_is_action
+        and competitor_is_action
+        and _intent_group_has_unique_supported_literal(
+            ranked,
+            top_candidate.candidate,
+            competing_candidate.candidate,
+            query_tokens,
+            query_tokens_no_diacritics,
+            language,
+        )
+    ):
+        return _confidence_decision(
+            min_confidence=min_confidence,
+            min_margin=min_margin,
+            top_candidate=top_candidate,
+            competing_candidate=competing_candidate,
+            observed_margin=margin,
+            required_margin=0.0,
+            margin_policy="supported_literal_action_evidence",
+            relaxation_used=True,
+            opposing_action_competition=opposing_actions,
+            action_incompatible_competition=action_incompatible_competition,
+            target_incompatible_competition=target_incompatible_competition,
+            accepted_candidate=top_candidate,
+        )
+    if not target_incompatible_competition and _has_safe_relaxed_intent_evidence(
         top_candidate,
         competing_candidate,
         margin,
         min_margin,
     ):
-        return top_candidate, None
-    if _passes_high_confidence_relaxed_margin(top_candidate, margin, min_margin):
-        return top_candidate, None
+        empty_slot_relaxation = not top_candidate.candidate.parsed_slots and not (
+            competing_candidate.candidate.parsed_slots
+        )
+        return _confidence_decision(
+            min_confidence=min_confidence,
+            min_margin=min_margin,
+            top_candidate=top_candidate,
+            competing_candidate=competing_candidate,
+            observed_margin=margin,
+            required_margin=(SAFE_EMPTY_SLOT_RELAXED_MIN_MARGIN if empty_slot_relaxation else 0.0),
+            margin_policy=(
+                "safe_empty_slot_relaxation"
+                if empty_slot_relaxation
+                else "safe_intent_evidence_relaxation"
+            ),
+            relaxation_used=True,
+            opposing_action_competition=opposing_actions,
+            action_incompatible_competition=action_incompatible_competition,
+            target_incompatible_competition=target_incompatible_competition,
+            accepted_candidate=top_candidate,
+        )
+    if not target_incompatible_competition and _passes_high_confidence_relaxed_margin(
+        top_candidate,
+        margin,
+        min_margin,
+    ):
+        return _confidence_decision(
+            min_confidence=min_confidence,
+            min_margin=min_margin,
+            top_candidate=top_candidate,
+            competing_candidate=competing_candidate,
+            observed_margin=margin,
+            required_margin=HIGH_CONFIDENCE_RELAXED_MIN_MARGIN,
+            margin_policy="high_confidence_relaxation",
+            relaxation_used=True,
+            opposing_action_competition=opposing_actions,
+            action_incompatible_competition=action_incompatible_competition,
+            target_incompatible_competition=target_incompatible_competition,
+            accepted_candidate=top_candidate,
+        )
+
+    if _has_weak_zero_intent_evidence(top_candidate, margin):
+        return _confidence_decision(
+            min_confidence=min_confidence,
+            min_margin=min_margin,
+            top_candidate=top_candidate,
+            competing_candidate=competing_candidate,
+            observed_margin=margin,
+            required_margin=min_margin,
+            margin_policy="weak_zero_intent_evidence",
+            opposing_action_competition=opposing_actions,
+            action_incompatible_competition=action_incompatible_competition,
+            target_incompatible_competition=target_incompatible_competition,
+            rejection_reason=FallbackReason.LOW_CONFIDENCE,
+        )
+    if (
+        action_incompatible_competition
+        and not top_is_action
+        and competitor_is_action
+        and top_candidate.scores.intent_score < competing_candidate.scores.intent_score
+    ):
+        return _confidence_decision(
+            min_confidence=min_confidence,
+            min_margin=min_margin,
+            top_candidate=top_candidate,
+            competing_candidate=competing_candidate,
+            observed_margin=margin,
+            required_margin=min_margin,
+            margin_policy="action_incompatible_weaker_intent_evidence",
+            action_incompatible_competition=True,
+            target_incompatible_competition=target_incompatible_competition,
+            rejection_reason=FallbackReason.LOW_CONFIDENCE,
+        )
+    if (
+        target_incompatible_competition
+        and not target_has_query_support
+        and _candidate_surface_slot_tokens(top_candidate.candidate)
+        and _candidate_surface_slot_tokens(competing_candidate.candidate)
+    ):
+        return _confidence_decision(
+            min_confidence=min_confidence,
+            min_margin=min_margin,
+            top_candidate=top_candidate,
+            competing_candidate=competing_candidate,
+            observed_margin=margin,
+            required_margin=min_margin,
+            margin_policy="target_without_query_support",
+            opposing_action_competition=opposing_actions,
+            action_incompatible_competition=action_incompatible_competition,
+            target_incompatible_competition=True,
+            rejection_reason=FallbackReason.LOW_CONFIDENCE,
+        )
+    if (
+        target_incompatible_competition
+        or opposing_actions
+        or unknown_action_competition
+        or action_incompatible_competition
+    ):
+        margin_policy = (
+            "target_base_margin"
+            if target_incompatible_competition
+            else (
+                "opposing_action_base_margin"
+                if opposing_actions
+                else (
+                    "action_incompatible_base_margin"
+                    if action_incompatible_competition
+                    else "unknown_action_base_margin"
+                )
+            )
+        )
+        return _confidence_decision(
+            min_confidence=min_confidence,
+            min_margin=min_margin,
+            top_candidate=top_candidate,
+            competing_candidate=competing_candidate,
+            observed_margin=margin,
+            required_margin=min_margin,
+            margin_policy=margin_policy,
+            opposing_action_competition=opposing_actions,
+            action_incompatible_competition=action_incompatible_competition,
+            target_incompatible_competition=target_incompatible_competition,
+            accepted_candidate=top_candidate if margin >= min_margin else None,
+            rejection_reason=(FallbackReason.LOW_MARGIN if margin < min_margin else None),
+        )
+
     if margin < min_margin:
-        return None, FallbackReason.LOW_MARGIN
-    return top_candidate, None
+        return _confidence_decision(
+            min_confidence=min_confidence,
+            min_margin=min_margin,
+            top_candidate=top_candidate,
+            competing_candidate=competing_candidate,
+            observed_margin=margin,
+            required_margin=min_margin,
+            margin_policy="base_margin",
+            rejection_reason=FallbackReason.LOW_MARGIN,
+        )
+    return _confidence_decision(
+        min_confidence=min_confidence,
+        min_margin=min_margin,
+        top_candidate=top_candidate,
+        competing_candidate=competing_candidate,
+        observed_margin=margin,
+        required_margin=min_margin,
+        margin_policy="base_margin",
+        accepted_candidate=top_candidate,
+    )
 
 
 def accepted_candidate(
     ranked: Sequence[RankedCandidate],
     min_confidence: float = DEFAULT_MIN_CONFIDENCE,
     min_margin: float = DEFAULT_MIN_MARGIN,
+    *,
+    query: str | None = None,
+    language: str | None = None,
 ) -> RankedCandidate | None:
     """Return the accepted top candidate or None when confidence gates reject it."""
-    candidate, _ = evaluate_confidence_gates(ranked, min_confidence, min_margin)
-    return candidate
+    return evaluate_confidence_gates(
+        ranked,
+        min_confidence,
+        min_margin,
+        query=query,
+        language=language,
+    ).accepted_candidate
 
 
 def confidence_gate_rejection_reason(
     ranked: Sequence[RankedCandidate],
     min_confidence: float = DEFAULT_MIN_CONFIDENCE,
     min_margin: float = DEFAULT_MIN_MARGIN,
+    *,
+    query: str | None = None,
+    language: str | None = None,
 ) -> FallbackReason:
     """Return the fallback reason for candidates rejected by confidence gates."""
-    _, reason = evaluate_confidence_gates(ranked, min_confidence, min_margin)
-    return reason or FallbackReason.LOW_CONFIDENCE
+    decision = evaluate_confidence_gates(
+        ranked,
+        min_confidence,
+        min_margin,
+        query=query,
+        language=language,
+    )
+    return decision.rejection_reason or FallbackReason.LOW_CONFIDENCE
 
 
 def _is_exact_lexical_match(ranked_candidate: RankedCandidate) -> bool:

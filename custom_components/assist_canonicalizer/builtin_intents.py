@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from copy import deepcopy
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +58,7 @@ def language_variant_for(language: str) -> str | None:
     return matches[0] if matches else None
 
 
+@lru_cache(maxsize=128)
 def _load_built_in_intents(language_variant: str) -> Mapping[str, Any]:
     """Load built-in Home Assistant intents for a language variant."""
     try:
@@ -70,6 +72,11 @@ def _load_built_in_intents(language_variant: str) -> Mapping[str, Any]:
     except TypeError:
         intents = get_intents(language_variant)
     return intents if isinstance(intents, Mapping) else {}
+
+
+def clear_builtin_intents_caches() -> None:
+    """Clear cached built-in intent sources."""
+    _load_built_in_intents.cache_clear()
 
 
 def _load_custom_sentences(

@@ -1,0 +1,1126 @@
+{
+  "schema_version": 1,
+  "fixture_id": "medium_home_v1",
+  "description": "Deterministic medium-sized multilingual home used for production-path Assist benchmarks.",
+  "expected_counts": {
+    "floors": 3,
+    "areas": 12,
+    "exposed_entities": 60
+  },
+  "expected_domain_counts": {
+    "alarm_control_panel": 1,
+    "binary_sensor": 3,
+    "button": 1,
+    "climate": 3,
+    "cover": 5,
+    "fan": 5,
+    "humidifier": 2,
+    "lawn_mower": 2,
+    "light": 6,
+    "lock": 3,
+    "media_player": 3,
+    "sensor": 8,
+    "siren": 2,
+    "switch": 2,
+    "todo": 1,
+    "vacuum": 5,
+    "valve": 4,
+    "water_heater": 2,
+    "weather": 2
+  },
+  "floors": [
+    {
+      "key": "ground",
+      "name": "Ground Floor",
+      "level": 0,
+      "aliases": [
+        "Downstairs",
+        "Erdgeschoss",
+        "Rez-de-chaussée",
+        "Begane grond",
+        "Tầng trệt"
+      ]
+    },
+    {
+      "key": "upper",
+      "name": "Upper Floor",
+      "level": 1,
+      "aliases": [
+        "Upstairs",
+        "Obergeschoss",
+        "Étage",
+        "Bovenverdieping",
+        "Tầng trên"
+      ]
+    },
+    {
+      "key": "exterior",
+      "name": "Exterior",
+      "level": null,
+      "aliases": [
+        "Outside",
+        "Außenbereich",
+        "Extérieur",
+        "Buiten",
+        "Ngoài trời"
+      ]
+    }
+  ],
+  "areas": [
+    {
+      "key": "entryway",
+      "name": "Entryway",
+      "floor": "ground",
+      "aliases": [
+        "Hallway",
+        "Eingang",
+        "Flur",
+        "Entrée",
+        "Couloir",
+        "Hal",
+        "Gang",
+        "Hành lang",
+        "Cầu thang"
+      ]
+    },
+    {
+      "key": "living_room",
+      "name": "Living Room",
+      "floor": "ground",
+      "aliases": ["Wohnzimmer", "Salon", "Woonkamer", "Phòng khách"]
+    },
+    {
+      "key": "kitchen",
+      "name": "Kitchen",
+      "floor": "ground",
+      "aliases": ["Küche", "Cuisine", "Keuken", "Nhà bếp", "Bếp"]
+    },
+    {
+      "key": "dining_room",
+      "name": "Dining Room",
+      "floor": "ground",
+      "aliases": ["Esszimmer", "Salle à manger", "Eetkamer", "Phòng ăn"]
+    },
+    {
+      "key": "office",
+      "name": "Office",
+      "floor": "ground",
+      "aliases": ["Büro", "Bureau", "Kantoor", "Phòng làm việc"]
+    },
+    {
+      "key": "garage",
+      "name": "Garage",
+      "floor": "ground",
+      "aliases": ["Gara"]
+    },
+    {
+      "key": "primary_bedroom",
+      "name": "Bedroom",
+      "floor": "upper",
+      "aliases": [
+        "Primary Bedroom",
+        "Schlafzimmer",
+        "Chambre",
+        "Slaapkamer",
+        "Phòng ngủ"
+      ]
+    },
+    {
+      "key": "guest_bedroom",
+      "name": "Guest Bedroom",
+      "floor": "upper",
+      "aliases": [
+        "Gästezimmer",
+        "Chambre d'amis",
+        "Gastenkamer",
+        "Phòng ngủ khách"
+      ]
+    },
+    {
+      "key": "bathroom",
+      "name": "Bathroom",
+      "floor": "upper",
+      "aliases": ["Badezimmer", "Salle de bain", "Badkamer", "Phòng tắm"]
+    },
+    {
+      "key": "laundry",
+      "name": "Laundry Room",
+      "floor": "upper",
+      "aliases": ["Waschküche", "Buanderie", "Wasruimte", "Phòng giặt"]
+    },
+    {
+      "key": "patio",
+      "name": "Patio",
+      "floor": "exterior",
+      "aliases": [
+        "Balcony",
+        "Balkon",
+        "Balcon",
+        "Terrasse",
+        "Terras",
+        "Sân hiên",
+        "Ban công"
+      ]
+    },
+    {
+      "key": "garden",
+      "name": "Garden",
+      "floor": "exterior",
+      "aliases": ["Garten", "Jardin", "Tuin", "Khu vườn"]
+    }
+  ],
+  "entities": [
+    {
+      "domain": "light",
+      "platform": "demo",
+      "unique_id": "light_1",
+      "name": "Primary Bedroom Lamp",
+      "area": "primary_bedroom",
+      "aliases": [
+        "Light",
+        "Lamp",
+        "Licht",
+        "Lampe",
+        "Lumière",
+        "Đèn",
+        "Bedroom light",
+        "Schlafzimmerlicht",
+        "Lumière chambre",
+        "Lumière de la chambre",
+        "Slaapkamerlamp",
+        "Slaapkamerlicht",
+        "Đèn phòng ngủ"
+      ]
+    },
+    {
+      "domain": "light",
+      "platform": "demo",
+      "unique_id": "light_2",
+      "name": "Dining Room Ceiling",
+      "area": "dining_room",
+      "aliases": [
+        "Light",
+        "Lamp",
+        "Licht",
+        "Lampe",
+        "Lumière",
+        "Đèn",
+        "Dining light",
+        "Esszimmerlicht",
+        "Lumière salle à manger",
+        "Eetkamerlicht",
+        "Đèn phòng ăn"
+      ]
+    },
+    {
+      "domain": "light",
+      "platform": "demo",
+      "unique_id": "light_3",
+      "name": "Kitchen Main Light",
+      "area": "kitchen",
+      "aliases": [
+        "Light",
+        "Lamp",
+        "Licht",
+        "Lampe",
+        "Lumière",
+        "Đèn",
+        "Kitchen light",
+        "Küchenlicht",
+        "Lumière cuisine",
+        "Lumière de la cuisine",
+        "Keukenlamp",
+        "Keukenlicht",
+        "Đèn bếp"
+      ]
+    },
+    {
+      "domain": "light",
+      "platform": "demo",
+      "unique_id": "light_4",
+      "name": "Office Desk Light",
+      "area": "office",
+      "aliases": [
+        "Light",
+        "Lamp",
+        "Licht",
+        "Lampe",
+        "Lumière",
+        "Đèn",
+        "Office light",
+        "Bürolicht",
+        "Lumière bureau",
+        "Kantoorlicht",
+        "Đèn phòng làm việc"
+      ]
+    },
+    {
+      "domain": "light",
+      "platform": "demo",
+      "unique_id": "light_5",
+      "name": "Living Room Lamp",
+      "area": "living_room",
+      "timer_anchor": true,
+      "aliases": [
+        "Light",
+        "Lamp",
+        "Licht",
+        "Lampe",
+        "Lumière",
+        "Đèn",
+        "Living room light",
+        "Wohnzimmerlicht",
+        "Lumière salon",
+        "Lumière du salon",
+        "Woonkamerlamp",
+        "Woonkamerlicht",
+        "Đèn phòng khách",
+        "客厅灯",
+        "客廳燈"
+      ]
+    },
+    {
+      "domain": "light",
+      "platform": "demo",
+      "unique_id": "light_6",
+      "name": "Entry Light",
+      "area": "entryway",
+      "aliases": [
+        "Light",
+        "Lamp",
+        "Licht",
+        "Lampe",
+        "Lumière",
+        "Đèn",
+        "Hall light",
+        "Hallway light",
+        "Eingangslicht",
+        "Flurlicht",
+        "Lumière entrée",
+        "Lumière du couloir",
+        "Hallicht",
+        "Đèn hành lang",
+        "Đèn cầu thang"
+      ]
+    },
+    {
+      "domain": "switch",
+      "platform": "demo",
+      "unique_id": "switch1",
+      "name": "Patio String Lights",
+      "area": "patio",
+      "aliases": [
+        "Patio lights",
+        "Đèn ban công",
+        "Terrassenlicht",
+        "Guirlande terrasse",
+        "Terrasverlichting",
+        "Đèn sân hiên"
+      ]
+    },
+    {
+      "domain": "switch",
+      "platform": "demo",
+      "unique_id": "switch2",
+      "name": "Coffee Machine",
+      "area": "kitchen",
+      "aliases": [
+        "Coffee maker",
+        "Kaffeemaschine",
+        "Machine à café",
+        "Koffiezetapparaat",
+        "Máy pha cà phê",
+        "Water heater",
+        "Wasserkocher",
+        "Chauffe-eau",
+        "Waterkoker",
+        "Bình nóng lạnh",
+        "Front door switch",
+        "Eingangstürschalter",
+        "Interrupteur de porte d'entrée",
+        "Công tắc cửa chính"
+      ]
+    },
+    {
+      "domain": "fan",
+      "platform": "demo",
+      "unique_id": "fan1",
+      "name": "Living Room Fan",
+      "area": "living_room",
+      "aliases": [
+        "Fan",
+        "Lüfter",
+        "Ventilateur",
+        "Quạt",
+        "Living fan",
+        "Living room fan",
+        "Wohnzimmerlüfter",
+        "Ventilateur salon",
+        "Ventilateur du salon",
+        "Woonkamerventilator",
+        "Quạt phòng khách"
+      ]
+    },
+    {
+      "domain": "fan",
+      "platform": "demo",
+      "unique_id": "fan2",
+      "name": "Bedroom Fan",
+      "area": "primary_bedroom",
+      "aliases": [
+        "Fan",
+        "Lüfter",
+        "Ventilateur",
+        "Quạt",
+        "Bedroom fan",
+        "Schlafzimmerlüfter",
+        "Ventilateur chambre",
+        "Ventilateur de la chambre",
+        "Slaapkamerventilator",
+        "Quạt phòng ngủ"
+      ]
+    },
+    {
+      "domain": "fan",
+      "platform": "demo",
+      "unique_id": "fan3",
+      "name": "Office Fan",
+      "area": "office",
+      "aliases": [
+        "Fan",
+        "Lüfter",
+        "Ventilateur",
+        "Quạt",
+        "Bürolüfter",
+        "Ventilateur bureau",
+        "Kantoorventilator",
+        "Quạt phòng làm việc"
+      ]
+    },
+    {
+      "domain": "fan",
+      "platform": "demo",
+      "unique_id": "fan4",
+      "name": "Bathroom Fan",
+      "area": "bathroom",
+      "aliases": [
+        "Fan",
+        "Lüfter",
+        "Ventilateur",
+        "Quạt",
+        "Bathroom fan",
+        "Badezimmerlüfter",
+        "Ventilateur salle de bain",
+        "Ventilateur de la salle de bain",
+        "Badkamerventilator",
+        "Quạt phòng tắm"
+      ]
+    },
+    {
+      "domain": "fan",
+      "platform": "demo",
+      "unique_id": "fan5",
+      "name": "Guest Room Fan",
+      "area": "guest_bedroom",
+      "aliases": [
+        "Fan",
+        "Lüfter",
+        "Ventilateur",
+        "Quạt",
+        "Gästezimmerlüfter",
+        "Ventilateur chambre d'amis",
+        "Gastenkamerventilator",
+        "Quạt phòng khách ngủ"
+      ]
+    },
+    {
+      "domain": "cover",
+      "platform": "demo",
+      "unique_id": "cover_2",
+      "name": "Bedroom Window",
+      "area": "primary_bedroom",
+      "aliases": [
+        "Bedroom window",
+        "Schlafzimmerfenster",
+        "Schlafzimmervorhang",
+        "Fenêtre de la chambre",
+        "Volet de la chambre",
+        "Slaapkamerraam",
+        "Slaapkamergordijn",
+        "Bedroom curtain",
+        "Cửa sổ phòng ngủ",
+        "Rèm phòng ngủ"
+      ]
+    },
+    {
+      "domain": "cover",
+      "platform": "demo",
+      "unique_id": "cover_1",
+      "name": "Hallway Blind",
+      "area": "entryway",
+      "aliases": [
+        "Hall blind",
+        "Flurrollladen",
+        "Store entrée",
+        "Haljaloezie",
+        "Rèm hành lang"
+      ]
+    },
+    {
+      "domain": "cover",
+      "platform": "demo",
+      "unique_id": "cover_3",
+      "name": "Living Room Curtain",
+      "area": "living_room",
+      "aliases": [
+        "Living room window",
+        "Wohnzimmerfenster",
+        "Wohnzimmervorhang",
+        "Fenêtre du salon",
+        "Volet du salon",
+        "Wohnzimmerrollladen",
+        "Rideau salon",
+        "Woonkamerraam",
+        "Woonkamergordijn",
+        "Cửa sổ phòng khách",
+        "Rèm phòng khách"
+      ]
+    },
+    {
+      "domain": "cover",
+      "platform": "demo",
+      "unique_id": "cover_4",
+      "name": "Garage Door",
+      "area": "garage",
+      "aliases": ["Garagentor", "Porte garage", "Garagedeur", "Cửa gara"]
+    },
+    {
+      "domain": "cover",
+      "platform": "demo",
+      "unique_id": "cover_5",
+      "name": "Patio Awning",
+      "area": "patio",
+      "aliases": [
+        "Pergola roof",
+        "Terrassenmarkise",
+        "Store terrasse",
+        "Terraszonwering",
+        "Mái che sân hiên"
+      ]
+    },
+    {
+      "domain": "climate",
+      "platform": "assist_canonicalizer_benchmark",
+      "unique_id": "climate_1",
+      "name": "Bedroom Thermostat",
+      "area": "primary_bedroom",
+      "aliases": [
+        "Bedroom AC",
+        "Thermostaat",
+        "Schlafzimmerklima",
+        "Climatisation de la chambre",
+        "Schlafzimmerthermostat",
+        "Thermostat chambre",
+        "Slaapkamerthermostaat",
+        "Điều hòa phòng ngủ"
+      ]
+    },
+    {
+      "domain": "climate",
+      "platform": "assist_canonicalizer_benchmark",
+      "unique_id": "climate_2",
+      "name": "Living Room Thermostat",
+      "area": "living_room",
+      "aliases": [
+        "Living room AC",
+        "Wohnzimmerklima",
+        "Climatisation du salon",
+        "Woonkamerthermostaat",
+        "Wohnzimmerthermostat",
+        "Thermostat salon",
+        "Điều hòa phòng khách"
+      ]
+    },
+    {
+      "domain": "climate",
+      "platform": "assist_canonicalizer_benchmark",
+      "unique_id": "climate_3",
+      "name": "Office Thermostat",
+      "area": "office",
+      "aliases": [
+        "Bürothermostat",
+        "Thermostat bureau",
+        "Kantoorthermostaat",
+        "Điều hòa phòng làm việc"
+      ]
+    },
+    {
+      "domain": "vacuum",
+      "platform": "demo",
+      "unique_id": "vacuum_1",
+      "name": "Downstairs Vacuum",
+      "area": "living_room",
+      "vacuum_area_segment": "living_room",
+      "aliases": [
+        "Vacuum",
+        "Robovac",
+        "Robot vacuum",
+        "Staubsauger",
+        "Aspirateur",
+        "Aspirateur robot",
+        "Stofzuiger",
+        "Robot hút bụi",
+        "Máy hút bụi"
+      ]
+    },
+    {
+      "domain": "vacuum",
+      "platform": "demo",
+      "unique_id": "vacuum_2",
+      "name": "Upstairs Vacuum",
+      "area": "primary_bedroom",
+      "aliases": [
+        "Upstairs robot",
+        "Obergeschossstaubsauger",
+        "Aspirateur étage",
+        "Bovenstofzuiger",
+        "Máy hút bụi tầng trên"
+      ]
+    },
+    {
+      "domain": "vacuum",
+      "platform": "demo",
+      "unique_id": "vacuum_3",
+      "name": "Kitchen Vacuum",
+      "area": "kitchen",
+      "aliases": [
+        "Küchenstaubsauger",
+        "Aspirateur cuisine",
+        "Keukenstofzuiger",
+        "Máy hút bụi bếp"
+      ]
+    },
+    {
+      "domain": "vacuum",
+      "platform": "demo",
+      "unique_id": "vacuum_4",
+      "name": "Guest Room Vacuum",
+      "area": "guest_bedroom",
+      "aliases": [
+        "Gästezimmerstaubsauger",
+        "Aspirateur chambre d'amis",
+        "Gastenkamerstofzuiger",
+        "Máy hút bụi phòng khách"
+      ]
+    },
+    {
+      "domain": "vacuum",
+      "platform": "demo",
+      "unique_id": "vacuum_5",
+      "name": "Garage Vacuum",
+      "area": "garage",
+      "aliases": [
+        "Garagenstaubsauger",
+        "Aspirateur garage",
+        "Garagestofzuiger",
+        "Máy hút bụi gara"
+      ]
+    },
+    {
+      "domain": "water_heater",
+      "platform": "demo",
+      "unique_id": "demo_water_heater",
+      "name": "Main Water Heater",
+      "area": "laundry",
+      "aliases": [
+        "Utility hot-water cylinder",
+        "Warmwasserspeicher",
+        "Ballon d'eau chaude",
+        "Warmwatervat",
+        "Bồn nước nóng"
+      ]
+    },
+    {
+      "domain": "water_heater",
+      "platform": "demo",
+      "unique_id": "demo_water_heater_celsius",
+      "name": "Guest Water Heater",
+      "area": "guest_bedroom",
+      "aliases": [
+        "Guest boiler",
+        "Gästewasserkocher",
+        "Chauffe-eau invités",
+        "Gastenboiler",
+        "Bình nóng lạnh phòng khách"
+      ]
+    },
+    {
+      "domain": "weather",
+      "platform": "demo",
+      "unique_id": "demo-weather-south",
+      "name": "Home Weather",
+      "area": "garden",
+      "aliases": ["Weather", "Wetter", "Météo", "Weer", "Thời tiết"]
+    },
+    {
+      "domain": "weather",
+      "platform": "demo",
+      "unique_id": "demo-weather-north",
+      "name": "Patio Weather",
+      "area": "patio",
+      "aliases": [
+        "Outdoor weather",
+        "Außenwetter",
+        "Météo extérieure",
+        "Buitenweer",
+        "Thời tiết ngoài trời"
+      ]
+    },
+    {
+      "domain": "valve",
+      "platform": "demo",
+      "unique_id": "valve_1",
+      "name": "Front Garden Valve",
+      "area": "garden",
+      "aliases": [
+        "Front irrigation",
+        "Vordergartenventil",
+        "Vanne jardin avant",
+        "Voortuinventiel",
+        "Van vườn trước"
+      ]
+    },
+    {
+      "domain": "valve",
+      "platform": "demo",
+      "unique_id": "valve_2",
+      "name": "Orchard Valve",
+      "area": "garden",
+      "aliases": [
+        "Orchard irrigation",
+        "Obstgartenventil",
+        "Vanne verger",
+        "Boomgaardventiel",
+        "Van vườn cây"
+      ]
+    },
+    {
+      "domain": "valve",
+      "platform": "demo",
+      "unique_id": "valve_3",
+      "name": "Back Garden Valve",
+      "area": "garden",
+      "aliases": [
+        "Back irrigation",
+        "Hintergartenventil",
+        "Vanne jardin arrière",
+        "Achtertuinventiel",
+        "Van vườn sau"
+      ]
+    },
+    {
+      "domain": "valve",
+      "platform": "demo",
+      "unique_id": "valve_4",
+      "name": "Tree Line Valve",
+      "area": "garden",
+      "aliases": [
+        "Tree irrigation",
+        "Baumventil",
+        "Vanne arbres",
+        "Bomenventiel",
+        "Van tưới cây"
+      ]
+    },
+    {
+      "domain": "sensor",
+      "platform": "demo",
+      "unique_id": "sensor_1",
+      "name": "Outdoor Temperature",
+      "area": "garden",
+      "aliases": [
+        "Outside temperature",
+        "Außentemperatur",
+        "Température extérieure",
+        "Buitentemperatuur",
+        "Nhiệt độ ngoài trời"
+      ]
+    },
+    {
+      "domain": "sensor",
+      "platform": "demo",
+      "unique_id": "sensor_2",
+      "name": "Outdoor Humidity",
+      "area": "garden",
+      "aliases": [
+        "Outside humidity",
+        "Außenfeuchtigkeit",
+        "Humidité extérieure",
+        "Buitenvochtigheid",
+        "Độ ẩm ngoài trời"
+      ]
+    },
+    {
+      "domain": "sensor",
+      "platform": "demo",
+      "unique_id": "sensor_3",
+      "name": "Garage Carbon Monoxide",
+      "area": "garage",
+      "aliases": [
+        "Garage CO",
+        "Garagenkohlenmonoxid",
+        "Monoxyde garage",
+        "Garage koolmonoxide",
+        "CO gara"
+      ]
+    },
+    {
+      "domain": "sensor",
+      "platform": "demo",
+      "unique_id": "sensor_4",
+      "name": "Living Room Carbon Dioxide",
+      "area": "living_room",
+      "aliases": [
+        "Living room CO2",
+        "Living room motion sensor",
+        "Wohnzimmerbewegungssensor",
+        "Capteur de mouvement du salon",
+        "Cảm biến chuyển động phòng khách",
+        "Wohnzimmer CO2",
+        "CO2 salon",
+        "Woonkamer CO2",
+        "CO2 phòng khách"
+      ]
+    },
+    {
+      "domain": "sensor",
+      "platform": "demo",
+      "unique_id": "sensor_5",
+      "name": "Home Power Consumption",
+      "area": "laundry",
+      "aliases": [
+        "Power usage",
+        "Stromverbrauch",
+        "Consommation électrique",
+        "Stroomverbruik",
+        "Điện năng tiêu thụ"
+      ]
+    },
+    {
+      "domain": "sensor",
+      "platform": "demo",
+      "unique_id": "sensor_10",
+      "name": "Office Thermostat Mode",
+      "area": "office",
+      "aliases": [
+        "Thermostat mode",
+        "Front door sensor",
+        "Eingangstürsensor",
+        "Capteur de porte d'entrée",
+        "Cảm biến cửa chính",
+        "Thermostatmodus",
+        "Mode thermostat",
+        "Thermostaatmodus",
+        "Chế độ điều hòa"
+      ]
+    },
+    {
+      "domain": "alarm_control_panel",
+      "platform": "demo",
+      "unique_id": "demo_alarm_control_panel",
+      "name": "Home Security Alarm",
+      "area": "entryway",
+      "aliases": [
+        "Security alarm",
+        "Alarmanlage",
+        "Alarme maison",
+        "Huisalarm",
+        "Báo động nhà"
+      ]
+    },
+    {
+      "domain": "binary_sensor",
+      "platform": "demo",
+      "unique_id": "binary_1",
+      "name": "Basement Water Leak",
+      "area": "laundry",
+      "aliases": [
+        "Laundry leak",
+        "Front door sensor",
+        "Eingangstürsensor",
+        "Capteur de porte d'entrée",
+        "Cảm biến cửa chính",
+        "Wasserleck",
+        "Fuite d'eau",
+        "Waterlek",
+        "Rò rỉ nước"
+      ]
+    },
+    {
+      "domain": "binary_sensor",
+      "platform": "demo",
+      "unique_id": "binary_2",
+      "name": "Backyard Motion",
+      "area": "garden",
+      "aliases": [
+        "Garden motion",
+        "Living room motion sensor",
+        "Wohnzimmerbewegungssensor",
+        "Capteur de mouvement du salon",
+        "Cảm biến chuyển động phòng khách",
+        "Gartenbewegung",
+        "Mouvement jardin",
+        "Tuinbeweging",
+        "Chuyển động khu vườn"
+      ]
+    },
+    {
+      "domain": "binary_sensor",
+      "platform": "demo",
+      "unique_id": "binary_3",
+      "name": "Outdoor Sensor Charging",
+      "area": "garden",
+      "aliases": [
+        "Outside battery charging",
+        "Außensensor lädt",
+        "Capteur extérieur en charge",
+        "Buitensensor laadt",
+        "Cảm biến ngoài trời đang sạc"
+      ]
+    },
+    {
+      "domain": "button",
+      "platform": "demo",
+      "unique_id": "push",
+      "name": "Garage Doorbell Button",
+      "area": "garage",
+      "aliases": [
+        "Garage button",
+        "Garagentaste",
+        "Bouton garage",
+        "Garageknop",
+        "Nút gara"
+      ]
+    },
+    {
+      "domain": "sensor",
+      "platform": "demo",
+      "unique_id": "sensor_6",
+      "name": "Home Energy Total",
+      "area": "laundry",
+      "aliases": [
+        "Total energy",
+        "Gesamtenergie",
+        "Énergie totale",
+        "Totale energie",
+        "Tổng điện năng"
+      ]
+    },
+    {
+      "domain": "sensor",
+      "platform": "demo",
+      "unique_id": "sensor_7",
+      "name": "Solar Energy Total",
+      "area": "garden",
+      "aliases": [
+        "Solar total",
+        "Solarenergie gesamt",
+        "Énergie solaire totale",
+        "Totale zonne-energie",
+        "Tổng năng lượng mặt trời"
+      ]
+    },
+    {
+      "domain": "todo",
+      "platform": "assist_canonicalizer_benchmark",
+      "unique_id": "benchmark_todo_list",
+      "name": "Shopping List",
+      "area": "kitchen",
+      "aliases": [
+        "Einkaufsliste",
+        "Liste de courses",
+        "Boodschappenlijst",
+        "Todolijst",
+        "Danh sách việc cần làm"
+      ]
+    },
+    {
+      "domain": "humidifier",
+      "platform": "assist_canonicalizer_benchmark",
+      "unique_id": "humidifier_primary_bedroom",
+      "name": "Bedroom Humidifier",
+      "area": "primary_bedroom",
+      "aliases": [
+        "Bedroom humidity",
+        "Schlafzimmerbefeuchter",
+        "Humidificateur chambre",
+        "Slaapkamerbevochtiger",
+        "Máy tạo ẩm phòng ngủ"
+      ]
+    },
+    {
+      "domain": "humidifier",
+      "platform": "assist_canonicalizer_benchmark",
+      "unique_id": "dehumidifier_laundry",
+      "name": "Laundry Dehumidifier",
+      "area": "laundry",
+      "aliases": [
+        "Laundry humidity control",
+        "Waschküche Entfeuchter",
+        "Déshumidificateur buanderie",
+        "Wasruimte ontvochtiger",
+        "Máy hút ẩm phòng giặt"
+      ]
+    },
+    {
+      "domain": "lawn_mower",
+      "platform": "assist_canonicalizer_benchmark",
+      "unique_id": "mower_front_garden",
+      "name": "Front Garden Mower",
+      "area": "garden",
+      "aliases": [
+        "Front mower",
+        "Robotmaaier",
+        "Vorgartenmäher",
+        "Tondeuse jardin avant",
+        "Voortuinmaaier",
+        "Máy cắt cỏ vườn trước"
+      ]
+    },
+    {
+      "domain": "lawn_mower",
+      "platform": "assist_canonicalizer_benchmark",
+      "unique_id": "mower_back_garden",
+      "name": "Back Garden Mower",
+      "area": "garden",
+      "aliases": [
+        "Back mower",
+        "Hintergartenmäher",
+        "Tondeuse jardin arrière",
+        "Achtertuinmaaier",
+        "Máy cắt cỏ vườn sau"
+      ]
+    },
+    {
+      "domain": "lock",
+      "platform": "assist_canonicalizer_benchmark",
+      "unique_id": "lock_front_door",
+      "name": "Front Door Lock",
+      "area": "entryway",
+      "aliases": [
+        "Front lock",
+        "Haustürschloss",
+        "Serrure entrée",
+        "Voordeurslot",
+        "Khóa cửa trước"
+      ]
+    },
+    {
+      "domain": "lock",
+      "platform": "assist_canonicalizer_benchmark",
+      "unique_id": "lock_patio_door",
+      "name": "Patio Door Lock",
+      "area": "patio",
+      "aliases": [
+        "Patio lock",
+        "Terrassentürschloss",
+        "Serrure terrasse",
+        "Terrasdeurslot",
+        "Khóa cửa sân hiên"
+      ]
+    },
+    {
+      "domain": "lock",
+      "platform": "assist_canonicalizer_benchmark",
+      "unique_id": "lock_garage_entry",
+      "name": "Garage Entry Lock",
+      "area": "garage",
+      "aliases": [
+        "Garage lock",
+        "Garagenschloss",
+        "Serrure garage",
+        "Garageslot",
+        "Khóa gara"
+      ]
+    },
+    {
+      "domain": "media_player",
+      "platform": "assist_canonicalizer_benchmark",
+      "unique_id": "media_living_room_tv",
+      "name": "Living Room Television",
+      "area": "living_room",
+      "aliases": [
+        "TV",
+        "Television",
+        "Fernseher",
+        "Télévision",
+        "Télévision du salon",
+        "Televisie",
+        "Tivi",
+        "Living room TV",
+        "Wohnzimmerfernseher",
+        "Télévision salon",
+        "Woonkamertelevisie",
+        "Tivi phòng khách"
+      ]
+    },
+    {
+      "domain": "media_player",
+      "platform": "assist_canonicalizer_benchmark",
+      "unique_id": "media_kitchen_speaker",
+      "name": "Kitchen Speaker",
+      "area": "kitchen",
+      "aliases": [
+        "Speaker",
+        "Loa",
+        "Kitchen music",
+        "Küchenlautsprecher",
+        "Enceinte cuisine",
+        "Keukenluidspreker",
+        "Loa nhà bếp"
+      ]
+    },
+    {
+      "domain": "media_player",
+      "platform": "assist_canonicalizer_benchmark",
+      "unique_id": "media_bedroom_speaker",
+      "name": "Bedroom Speaker",
+      "area": "primary_bedroom",
+      "aliases": [
+        "Bedroom music",
+        "Schlafzimmerlautsprecher",
+        "Enceinte chambre",
+        "Slaapkamerluidspreker",
+        "Loa phòng ngủ"
+      ]
+    },
+    {
+      "domain": "siren",
+      "platform": "assist_canonicalizer_benchmark",
+      "unique_id": "siren_indoor",
+      "name": "Indoor Siren",
+      "area": "entryway",
+      "aliases": [
+        "Inside siren",
+        "Innensirene",
+        "Sirène intérieure",
+        "Binnensirene",
+        "Còi báo trong nhà"
+      ]
+    },
+    {
+      "domain": "siren",
+      "platform": "assist_canonicalizer_benchmark",
+      "unique_id": "siren_garden",
+      "name": "Garden Siren",
+      "area": "garden",
+      "aliases": [
+        "Outdoor siren",
+        "Gartensirene",
+        "Sirène jardin",
+        "Tuinsirene",
+        "Còi báo khu vườn"
+      ]
+    }
+  ]
+}

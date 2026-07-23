@@ -12,23 +12,76 @@ from .const import (
     PRESERVED_UNIT_SUFFIXES,
 )
 
-_PUNCTUATION_RE = re.compile(r"[^\w\s]", re.UNICODE)
+_NON_WORD_RE = re.compile(r"[^\w\s]", re.UNICODE)
 _WHITESPACE_RE = re.compile(r"\s+")
 _HAS_DIGIT_RE = re.compile(r"\d")
 _NUMERIC_UNICODE_MINUS_RE = re.compile(
     r"(?<!\w)[\u2010\u2011\u2012\u2013\u2212\ufe63\uff0d](?=(?:\d|[.,]\d))"
 )
-
-# Precomputed BMP translation table that deletes all Unicode combining marks.
-# Built once at import; covers all diacritics used by DE, EN, FR, NL, VI and
-# avoids per-character Python overhead in normalize_text_no_diacritics.
-_COMBINING_TABLE: dict[int, None] = {
-    cp: None for cp in range(0x10000) if unicodedata.combining(chr(cp))
-}
+_WORD_JOIN_CONTROLS = frozenset(("\u200c", "\u200d"))
 
 # Frozenset of source characters in GENERIC_LATIN_REPLACEMENTS for fast
 # membership testing via frozenset.isdisjoint (C-level, single-pass).
 _GENERIC_LATIN_CHARS: frozenset[str] = frozenset(GENERIC_LATIN_REPLACEMENTS)
+
+
+def _is_variation_selector(char: str) -> bool:
+    """Return whether a mark only selects a visual glyph presentation."""
+    codepoint = ord(char)
+    return 0xFE00 <= codepoint <= 0xFE0F or 0xE0100 <= codepoint <= 0xE01EF
+
+
+def _mark_attachment_flags(text: str) -> list[bool]:
+    """Precompute whether each mark position is attached to a word-char base."""
+    flags = [False] * len(text)
+    last_is_word_base = False
+    for i, char in enumerate(text):
+        if char in _WORD_JOIN_CONTROLS:
+            continue
+        if unicodedata.category(char).startswith("M"):
+            flags[i] = last_is_word_base
+            continue
+        last_is_word_base = char == "_" or char.isalnum()
+    return flags
+
+
+def _strip_non_word_characters(text: str) -> str:
+    """Preserve attached script marks while replacing punctuation with spaces."""
+    flags = _mark_attachment_flags(text)
+
+    def _replace(match: re.Match[str]) -> str:
+        char = match.group(0)
+        if char in _WORD_JOIN_CONTROLS:
+            return ""
+        if (
+            not unicodedata.category(char).startswith("M")
+            or _is_variation_selector(char)
+            or char == "\u20e3"
+        ):
+            return " "
+        return char if flags[match.start()] else ""
+
+    return _NON_WORD_RE.sub(_replace, text)
+
+
+def _strip_latin_diacritics(text: str) -> str:
+    """Strip marks attached to Latin letters without rewriting other scripts."""
+    decomposed = unicodedata.normalize("NFD", text)
+    result: list[str] = []
+    previous_base_is_latin = False
+    removed_mark = False
+    for char in decomposed:
+        if unicodedata.category(char).startswith("M"):
+            if previous_base_is_latin:
+                removed_mark = True
+                continue
+            result.append(char)
+            continue
+        result.append(char)
+        previous_base_is_latin = unicodedata.category(char).startswith("L") and unicodedata.name(
+            char, ""
+        ).startswith("LATIN")
+    return unicodedata.normalize("NFC", "".join(result)) if removed_mark else text
 
 
 def _make_placeholder(name: str) -> str:
@@ -134,11 +187,11 @@ def normalize_text(text: str) -> str:
     if _HAS_DIGIT_RE.search(normalized) is not None:
         normalized = _NUMERIC_UNICODE_MINUS_RE.sub("-", normalized)
         with_placeholders = _PLACEHOLDER_MANAGER.apply(normalized)
-        without_punctuation = _PUNCTUATION_RE.sub(" ", with_placeholders)
+        without_punctuation = _strip_non_word_characters(with_placeholders)
         collapsed = _WHITESPACE_RE.sub(" ", without_punctuation).strip()
         return _PLACEHOLDER_MANAGER.restore(collapsed)
 
-    without_punctuation = _PUNCTUATION_RE.sub(" ", normalized)
+    without_punctuation = _strip_non_word_characters(normalized)
     return _WHITESPACE_RE.sub(" ", without_punctuation).strip()
 
 
@@ -150,8 +203,8 @@ def normalize_text_no_diacritics(text: str, language: str | None = None) -> str:
        removal, and whitespace collapse (via `normalize_text`).
     2. Language-specific overrides (from `LANGUAGE_SPECIFIC_OVERRIDES` in const.py).
     3. Generic Latin replacements (from `GENERIC_LATIN_REPLACEMENTS` in const.py).
-    4. Accent/diacritic stripping (via Unicode NFD decomposition followed by
-       removing combining diacritics/accents).
+    4. Accent/diacritic stripping from Latin letters only. Marks that form
+       letters in other scripts are retained to avoid changing word identity.
     """
     return normalize_text_no_diacritics_from_normalized(normalize_text(text), language)
 
@@ -177,8 +230,7 @@ def normalize_text_no_diacritics_from_normalized(
         for source, target in GENERIC_LATIN_REPLACEMENTS.items():
             normalized = normalized.replace(source, target)
 
-    nfd_form = unicodedata.normalize("NFD", normalized)
-    return nfd_form.translate(_COMBINING_TABLE)
+    return _strip_latin_diacritics(normalized)
 
 
 def tokenize_text(text: str) -> tuple[str, ...]:

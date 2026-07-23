@@ -7,7 +7,7 @@
         "data": {
           "fallback_agent_id": "Fallback-gespreksagent",
           "min_confidence": "Minimale matchbetrouwbaarheid",
-          "min_margin": "Minimale betrouwbaarheidsmarge"
+          "min_margin": "Basisbetrouwbaarheidsmarge"
         }
       }
     },
@@ -23,7 +23,7 @@
         "data": {
           "fallback_agent_id": "Fallback-gespreksagent",
           "min_confidence": "Minimale matchbetrouwbaarheid",
-          "min_margin": "Minimale betrouwbaarheidsmarge"
+          "min_margin": "Basisbetrouwbaarheidsmarge"
         }
       }
     }

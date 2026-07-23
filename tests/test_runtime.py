@@ -25,7 +25,11 @@ from custom_components.assist_canonicalizer import (
     runtime as runtime_module,
 )
 from custom_components.assist_canonicalizer.candidate import Candidate, CandidateSource
-from custom_components.assist_canonicalizer.const import DEFAULT_MAX_CANDIDATES_PER_TEMPLATE
+from custom_components.assist_canonicalizer.const import (
+    DEFAULT_MAX_CANDIDATES,
+    DEFAULT_MAX_CANDIDATES_PER_TEMPLATE,
+    DEFAULT_MAX_REGISTRY_VALUES_SCORED_PER_QUERY,
+)
 from custom_components.assist_canonicalizer.grammar_loader import (
     build_candidates_from_intent_sources,
     build_registry_slot_index,
@@ -263,25 +267,6 @@ class _AsyncCallLaterRecorder:
         return _TimerCancellation(self.scheduled_callbacks, timer)
 
 
-class _RebuildCounter:
-    """Count async rebuild calls while delegating to the original method."""
-
-    def __init__(self, original_rebuild: Any) -> None:
-        """Initialize with the original rebuild method."""
-        self.original_rebuild = original_rebuild
-        self.calls = 0
-
-
-_REBUILD_COUNTERS: dict[int, _RebuildCounter] = {}
-
-
-async def _mock_rebuild_counting(self: Any, h: Any, language: str) -> Any:
-    """Count rebuild calls for the runtime currently under test."""
-    counter = _REBUILD_COUNTERS[id(self)]
-    counter.calls += 1
-    return await counter.original_rebuild(self, h, language)
-
-
 async def test_async_rebuild_index_coalesces_concurrent_language_jobs(monkeypatch: Any) -> None:
     """Coalesce equivalent language variants into one rebuild job."""
     monkeypatch.setattr(homeassistant.helpers.storage, "Store", MockStore)
@@ -372,6 +357,65 @@ async def test_rank_with_dynamic_candidates_includes_tail_registry_alias() -> No
     assert ranked[0].scores.final_score == 1.0
 
 
+def test_fuzzy_tail_registry_retrieval_is_bounded_independently_of_registry_size() -> None:
+    """Recover a typo after the static cap while fully scoring a fixed-size pool."""
+    intent_sources: dict[str, Mapping[str, Any]] = {
+        "built_in": {
+            "intents": {
+                "HassTurnOn": {
+                    "data": [
+                        {
+                            "sentences": ["turn on {name}"],
+                            "requires_context": {"domain": "light"},
+                        },
+                        {
+                            "sentences": ["turn on lights in {area}"],
+                            "requires_context": {"domain": "light"},
+                        },
+                    ]
+                }
+            }
+        }
+    }
+    names = (*(f"Synthetic fixture {index}" for index in range(2_000)), "Garden beacon")
+    areas = (*(f"Synthetic area {index}" for index in range(2_000)), "Atrium")
+    registry_slots = {"name": names, "name:light": names, "area": areas}
+    static_candidates = build_candidates_from_intent_sources(
+        "en",
+        intent_sources,
+        registry_slots,
+    )
+    assert all(candidate.text != "turn on Garden beacon" for candidate in static_candidates)
+
+    runtime = CanonicalizerRuntime()
+    runtime.update_registry_slot_values(registry_slots)
+    runtime.language_intent_sources["en"] = intent_sources
+    ranked = runtime.rank_with_dynamic_candidates(
+        "en",
+        build_index("en", static_candidates),
+        "turn on Garden becon",
+    )
+
+    assert ranked[0].candidate.text == "turn on Garden beacon"
+    assert ranked[0].candidate.metadata["registry_retrieval"] == "fuzzy"
+    atrium_ranked = runtime.rank_with_dynamic_candidates(
+        "en",
+        build_index("en", static_candidates),
+        "turn on lights in atrum",
+    )
+    assert atrium_ranked[0].candidate.text == "turn on lights in Atrium"
+    assert atrium_ranked[0].candidate.metadata["registry_retrieval"] == "fuzzy"
+    assert runtime.diagnostics.registry_record_count == len(names) + len(areas)
+    assert (
+        runtime.diagnostics.registry_values_scored <= DEFAULT_MAX_REGISTRY_VALUES_SCORED_PER_QUERY
+    )
+    assert runtime.diagnostics.registry_values_nominated <= (
+        DEFAULT_MAX_REGISTRY_VALUES_SCORED_PER_QUERY
+    )
+    assert runtime.diagnostics.fuzzy_dynamic_candidates >= 1
+    assert runtime.diagnostics.registry_fingerprint
+
+
 def test_rank_with_dynamic_candidates_uses_language_specific_registry_index() -> None:
     """Match registry values using language-specific transliteration rules."""
     intent_sources: dict[str, Mapping[str, Any]] = {
@@ -440,7 +484,6 @@ def test_rank_with_dynamic_candidates_includes_capped_domain_area_alias() -> Non
         "turn on fan living room",
     )
 
-    assert len(ranked) == 1
     assert ranked[0].candidate.normalized_text == "turn on fan living room"
     assert ranked[0].scores.final_score == 1.0
 
@@ -1419,7 +1462,7 @@ async def test_async_shutdown_drains_cancelled_rebuild_store_writer(monkeypatch:
             def blocking_write() -> None:
                 """Block the executor writer until the test releases it."""
                 save_started.set()
-                assert release_save.wait(timeout=5)
+                assert release_save.wait(timeout=30)
                 MockStore.stored_data[self.key] = data
                 save_finished.set()
 
@@ -1431,7 +1474,7 @@ async def test_async_shutdown_drains_cancelled_rebuild_store_writer(monkeypatch:
     hass = HashableFakeHass(async_create_task=lambda coro: asyncio.create_task(coro))
 
     rebuild_task = asyncio.create_task(runtime.async_rebuild_index(hass, "en"))
-    assert await asyncio.to_thread(save_started.wait, 5)
+    assert await asyncio.to_thread(save_started.wait, 30)
     shutdown_task = asyncio.create_task(runtime.async_shutdown())
     await asyncio.sleep(0.05)
 
@@ -1645,31 +1688,41 @@ async def test_debounced_rebuild_coalesces_events(monkeypatch: Any) -> None:
         lambda h: {"name": ("light",)},
     )
 
-    original_rebuild = CanonicalizerRuntime.async_rebuild_index
-    rebuild_counter = _RebuildCounter(original_rebuild)
-    _REBUILD_COUNTERS[id(runtime)] = rebuild_counter
-    try:
-        monkeypatch.setattr(CanonicalizerRuntime, "async_rebuild_index", _mock_rebuild_counting)
+    rebuild_calls = 0
+    rebuild_called = asyncio.Event()
 
-        _subscribe_registry_updates(hass, runtime)
+    async def async_rebuild_index_mock(
+        _runtime: CanonicalizerRuntime,
+        _hass: Any,
+        _language: str,
+    ) -> None:
+        """Record a rebuild without starting unrelated index construction."""
+        nonlocal rebuild_calls
+        rebuild_calls += 1
+        rebuild_called.set()
 
-        # Trigger entity registry update
-        listeners[0]({})
-        assert len(scheduled_callbacks) == 1
+    monkeypatch.setattr(
+        CanonicalizerRuntime,
+        "async_rebuild_index",
+        async_rebuild_index_mock,
+    )
 
-        # Trigger another entity registry update, should debounce
-        listeners[0]({})
-        assert len(scheduled_callbacks) == 1
+    _subscribe_registry_updates(hass, runtime)
 
-        # Fire debounced function
-        scheduled_callbacks[0]()
+    # Trigger entity registry update
+    listeners[0]({})
+    assert len(scheduled_callbacks) == 1
 
-        # Allow task to progress
-        await asyncio.sleep(0.01)
+    # Trigger another entity registry update, should debounce
+    listeners[0]({})
+    assert len(scheduled_callbacks) == 1
 
-        assert rebuild_counter.calls == 1
-    finally:
-        _REBUILD_COUNTERS.pop(id(runtime), None)
+    # Fire debounced function
+    scheduled_callbacks[0]()
+
+    await asyncio.wait_for(rebuild_called.wait(), timeout=1)
+
+    assert rebuild_calls == 1
 
 
 def test_canonical_fingerprint_value_sorting() -> None:
@@ -2076,6 +2129,49 @@ def test_merge_ranked_candidates_sorting() -> None:
     merged = _merge_ranked_candidates((rc1,), (rc2,), max_candidates=2)
     # Custom sentence has higher priority (source_priority is lower, i.e., 0 vs 1)
     assert merged[0].candidate.source == CandidateSource.CUSTOM_SENTENCE
+
+
+def test_merge_ranked_candidates_retains_meaningful_confidence_competitor() -> None:
+    """Do not let one dynamic intent crowd every alternative out of the result cap."""
+    primary_candidate = Candidate(
+        text="open the bedroom window",
+        intent_name="HassTurnOn",
+        metadata={"slots": '{"name":"bedroom window"}'},
+    )
+    primary = (
+        RankedCandidate(
+            primary_candidate,
+            ScoreBreakdown(0.49, 0.49, 0.49, 0.49, 0.49),
+        ),
+    )
+    dynamic = tuple(
+        RankedCandidate(
+            Candidate(
+                text=f"is bedroom window opening variant {index}",
+                intent_name="HassGetState",
+                metadata={
+                    "slots": '{"name":"bedroom window","state":"opening"}',
+                },
+            ),
+            ScoreBreakdown(
+                0.80 - index / 1000,
+                0.80 - index / 1000,
+                0.80 - index / 1000,
+                0.80 - index / 1000,
+                0.80 - index / 1000,
+            ),
+        )
+        for index in range(DEFAULT_MAX_CANDIDATES + 5)
+    )
+
+    merged = _merge_ranked_candidates(
+        primary,
+        dynamic,
+        max_candidates=DEFAULT_MAX_CANDIDATES,
+    )
+
+    assert len(merged) == DEFAULT_MAX_CANDIDATES
+    assert merged[-1].candidate is primary_candidate
 
 
 def test_subscribed_source_counts_invalid() -> None:

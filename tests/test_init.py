@@ -1,16 +1,20 @@
 """Tests for Assist Canonicalizer integration entry points."""
 
 import asyncio
+from functools import partial
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from homeassistant.core import HassJob, HassJobType
 
 import custom_components.assist_canonicalizer
 from custom_components.assist_canonicalizer import (
     _async_update_options,
     _async_warmup_pipeline_languages,
+    _debounced_registry_rebuild,
     _discover_pipeline_languages,
+    _schedule_registry_refresh,
     _warmup_single_language,
     async_setup_entry,
     async_unload_entry,
@@ -30,6 +34,20 @@ class _IntentSubscriptionRecorder:
         """Mock subscribing to intent changes."""
         self.saved_callback = cb
         return lambda: None
+
+
+def test_registry_debounce_jobs_are_callback_safe() -> None:
+    """Keep both event-loop-only registry debounce callbacks off the executor."""
+    runtime = CanonicalizerRuntime()
+    hass = MagicMock()
+
+    assert HassJob(partial(_debounced_registry_rebuild, hass, runtime)).job_type is (
+        HassJobType.Callback
+    )
+    assert (
+        HassJob(partial(_schedule_registry_refresh, hass, runtime, MagicMock())).job_type
+        is HassJobType.Callback
+    )
 
 
 @pytest.mark.asyncio

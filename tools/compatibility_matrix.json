@@ -1,27 +1,22 @@
 [
   {
     "ha_version": "2024.12.0",
-    "python_version": "3.12",
-    "pinned_test_dependencies": []
+    "python_version": "3.12"
   },
   {
     "ha_version": "2025.2.0",
-    "python_version": "3.13",
-    "pinned_test_dependencies": []
+    "python_version": "3.13"
   },
   {
     "ha_version": "2026.2.0",
-    "python_version": "3.13",
-    "pinned_test_dependencies": []
+    "python_version": "3.13"
   },
   {
     "ha_version": "2026.3.0",
-    "python_version": "3.14",
-    "pinned_test_dependencies": []
+    "python_version": "3.14"
   },
   {
     "ha_version": "latest",
-    "python_version": "3.14",
-    "pinned_test_dependencies": []
+    "python_version": "3.14"
   }
 ]

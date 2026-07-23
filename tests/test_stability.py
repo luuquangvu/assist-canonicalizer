@@ -201,6 +201,25 @@ def test_candidate_literal_variants_recovers_from_corrupt_metadata() -> None:
     )
 
 
+def test_candidate_caches_implicit_literal_variant_detection() -> None:
+    """Identify absent and explicit empty grammar variants without rescanning them."""
+    no_literals = Candidate(text="kitchen light", intent_name="HassTurnOn")
+    optional_literals = Candidate(
+        text="the kitchen light",
+        intent_name="HassTurnOn",
+        metadata={"literal_variants": '[[],["the"]]'},
+    )
+    required_literals = Candidate(
+        text="turn on kitchen light",
+        intent_name="HassTurnOn",
+        metadata={"literal_variants": '[["turn","on"],["switch","on"]]'},
+    )
+
+    assert no_literals.has_implicit_literal_variant
+    assert optional_literals.has_implicit_literal_variant
+    assert not required_literals.has_implicit_literal_variant
+
+
 @pytest.mark.parametrize(
     "literal_variants",
     [

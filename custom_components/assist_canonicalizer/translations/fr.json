@@ -7,7 +7,7 @@
         "data": {
           "fallback_agent_id": "Agent de conversation de secours",
           "min_confidence": "Confiance minimale de correspondance",
-          "min_margin": "Marge de confiance minimale"
+          "min_margin": "Marge de confiance de base"
         }
       }
     },
@@ -23,7 +23,7 @@
         "data": {
           "fallback_agent_id": "Agent de conversation de secours",
           "min_confidence": "Confiance minimale de correspondance",
-          "min_margin": "Marge de confiance minimale"
+          "min_margin": "Marge de confiance de base"
         }
       }
     }

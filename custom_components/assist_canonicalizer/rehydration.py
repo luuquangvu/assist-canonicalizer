@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from functools import lru_cache
+from itertools import pairwise
 from math import ceil
 from typing import Any, NamedTuple
 
@@ -127,15 +128,16 @@ def get_wildcard_rehydration(
 
     Uses a single-pass extraction based on stable original candidate token indices,
     replacing wildcards from right-to-left (descending index) to avoid loop-based
-    re-tokenization and prevent desync.
-
-    Known limitation: when two wildcards are adjacent (no literal separator tokens
-    between them), each wildcard's boundary is computed independently and may claim
-    overlapping query token spans.  In practice, templates include separator tokens
-    between wildcards (e.g. "play {song} by {artist}"), so this does not surface.
+    re-tokenization and prevent desync. Adjacent wildcards fail closed because the
+    query provides no deterministic boundary between their free-text values.
     """
     wildcard_infos = candidate.wildcard_infos
     if not wildcard_infos:
+        return candidate.text, {}
+    if any(
+        next_index <= current_index + 1
+        for (current_index, _), (next_index, _) in pairwise(wildcard_infos)
+    ):
         return candidate.text, {}
 
     if query_tokens is None:

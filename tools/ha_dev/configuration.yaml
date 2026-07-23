@@ -1,0 +1,32 @@
+homeassistant:
+  name: Assist Canonicalizer Benchmark Home
+  latitude: 0.0
+  longitude: 0.0
+  elevation: 0
+  unit_system: metric
+  currency: USD
+  country: US
+  time_zone: UTC
+  language: en
+
+frontend:
+
+config:
+
+conversation:
+
+assist_pipeline:
+
+demo:
+
+assist_canonicalizer_benchmark:
+
+http:
+  server_host: 127.0.0.1
+  server_port: 8123
+
+logger:
+  default: info
+  logs:
+    custom_components.assist_canonicalizer: debug
+    custom_components.assist_canonicalizer_benchmark: debug

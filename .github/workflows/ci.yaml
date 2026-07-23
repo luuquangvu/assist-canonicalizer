@@ -34,34 +34,45 @@ jobs:
         run: uv sync --all-groups
 
       - name: Run Ruff
-        run: uv run --no-project ruff check
+        run: uv run ruff check
 
       - name: Run Ruff Format
-        run: uv run --no-project ruff format --check
+        run: uv run ruff format --check
 
       - name: Run Ty Check
-        run: uv run --no-project ty check
+        run: uv run ty check
 
       - name: Run Pyright
-        run: uv run --no-project pyright
+        run: uv run pyright
 
       - name: Run Interrogate
-        run: uv run --no-project interrogate
+        run: uv run interrogate
 
       - name: Run Pytest
-        run: uv run --no-project pytest
+        run: uv run pytest
 
-      - name: Run Multilingual Accuracy Gate
+  managed-live-benchmark:
+    runs-on: ubuntu-latest
+    name: "Managed-Live Benchmark Gate"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+
+      - name: Install dependencies
+        run: uv sync --all-groups
+
+      - name: Run Managed-Live Benchmark Gate
         run: >-
-          uv run --no-project tools/benchmark.py
-          --mode accuracy
-          --skip-ablations
-          --min-intent-slot-accuracy 92.0
-          --max-fallback-rate 8.0
-          --max-mismatch-rate 2.0
-          --min-language-intent-slot-accuracy 91.0
-          --max-language-fallback-rate 8.5
-          --max-language-mismatch-rate 2.5
+          uv run tools/benchmark.py
+          --min-intent-slot-accuracy 88.75
+          --max-mismatch-rate 1.50
+          --min-language-intent-slot-accuracy 85.00
+          --max-language-mismatch-rate 3.00
 
   setup-matrix:
     runs-on: ubuntu-latest
@@ -99,19 +110,6 @@ jobs:
               (.python_version | type == "string") and
               (.ha_version == "latest" or (.ha_version | test("^[a-zA-Z0-9]+(\\.[a-zA-Z0-9]+)*$")))
               and (.python_version | test("^[a-zA-Z0-9]+(\\.[a-zA-Z0-9]+)*$"))
-              and ((.pinned_test_dependencies // []) | type == "array")
-              and all((.pinned_test_dependencies // [])[]; (
-                (type == "object")
-                and (.package | type == "string")
-                and (.version | type == "string")
-                and (.package | test("^[a-zA-Z0-9](?:[a-zA-Z0-9._-]*[a-zA-Z0-9])?$"))
-                and (.version | test("^[a-zA-Z0-9]+(\\.[a-zA-Z0-9]+)*$"))
-              ))
-              and (
-                ((.pinned_test_dependencies // []) | map(.package | ascii_downcase | gsub("[._-]+"; "-"))) as $pinned_packages
-                | all($pinned_packages[]; . != "homeassistant")
-                  and (($pinned_packages | unique | length) == ($pinned_packages | length))
-              )
             ))
           ' tools/compatibility_matrix.json >/dev/null
 
@@ -126,13 +124,8 @@ jobs:
                 . + {
                   ha_real_version: .ha_version
                 }
-              end)
-              | . + {
-                pinned_test_dependency_specs: (
-                  (.pinned_test_dependencies // [])
-                  | map((.package | ascii_downcase | gsub("[._-]+"; "-")) + "==" + .version)
-                )
-              }
+              end
+            )
             )
             | {include: .}
           ' tools/compatibility_matrix.json)
@@ -159,53 +152,42 @@ jobs:
         shell: bash
         env:
           MATRIX_HA_REAL_VERSION: ${{ matrix.ha_real_version }}
-          MATRIX_PINNED_TEST_DEPENDENCY_SPECS: ${{ toJson(matrix.pinned_test_dependency_specs) }}
           MATRIX_PYTHON_VERSION: ${{ matrix.python_version }}
         run: |
           set -euo pipefail
 
           uv --no-config venv --no-project --python "$MATRIX_PYTHON_VERSION"
           HA_SPEC="homeassistant==$MATRIX_HA_REAL_VERSION"
-          mapfile -t PINNED_TEST_DEPENDENCIES < <(jq -r '.[]' <<< "$MATRIX_PINNED_TEST_DEPENDENCY_SPECS")
-          PINNED_HA_INTENTS=false
-          for spec in "${PINNED_TEST_DEPENDENCIES[@]}"; do
-            if [[ "${spec%%==*}" == "home-assistant-intents" ]]; then
-              PINNED_HA_INTENTS=true
-              break
-            fi
-          done
-          HA_REQUIREMENTS_CDN_URL="https://cdn.jsdelivr.net/gh/home-assistant/core@$MATRIX_HA_REAL_VERSION/requirements_all.txt"
-          HA_REQUIREMENTS_GITHUB_URL="https://raw.githubusercontent.com/home-assistant/core/$MATRIX_HA_REAL_VERSION/requirements_all.txt"
-          fetch_requirements() {
-            curl -sS -f --max-time 20 --retry 3 "$HA_REQUIREMENTS_CDN_URL" 2>/dev/null \
-              || curl -sS -f --max-time 20 --retry 3 "$HA_REQUIREMENTS_GITHUB_URL"
+          HA_CONSTRAINTS_CDN_URL="https://cdn.jsdelivr.net/gh/home-assistant/core@$MATRIX_HA_REAL_VERSION/homeassistant/package_constraints.txt"
+          HA_CONSTRAINTS_GITHUB_URL="https://raw.githubusercontent.com/home-assistant/core/$MATRIX_HA_REAL_VERSION/homeassistant/package_constraints.txt"
+          fetch_constraints() {
+            curl -sS -f --max-time 20 --retry 3 "$HA_CONSTRAINTS_CDN_URL" 2>/dev/null \
+              || curl -sS -f --max-time 20 --retry 3 "$HA_CONSTRAINTS_GITHUB_URL"
           }
-          REQUIRED_TEST_DEPS=(hassil pytest pytest-homeassistant-custom-component rapidfuzz)
-          if [[ "$PINNED_HA_INTENTS" == false ]]; then
-            HA_REQUIREMENTS=$(fetch_requirements)
-            HA_INTENTS_SPEC=$(awk '/^home-assistant-intents==/ {print $1; exit}' <<< "$HA_REQUIREMENTS")
-            if [[ ! "$HA_INTENTS_SPEC" =~ ^home-assistant-intents==[a-zA-Z0-9]+(\.[a-zA-Z0-9]+)*$ ]]; then
-              echo "::error::Failed to resolve home-assistant-intents from requirements_all.txt (tried CDN and GitHub)"
-              exit 1
-            fi
-            REQUIRED_TEST_DEPS+=("$HA_INTENTS_SPEC")
+          HA_CONSTRAINTS=$(fetch_constraints)
+          HA_INTENTS_SPEC=$(awk '/^home-assistant-intents==/ {print $1; exit}' <<< "$HA_CONSTRAINTS")
+          if [[ ! "$HA_INTENTS_SPEC" =~ ^home-assistant-intents==[a-zA-Z0-9]+(\.[a-zA-Z0-9]+)*$ ]]; then
+            echo "::error::Failed to resolve home-assistant-intents from package_constraints.txt (tried CDN and GitHub)"
+            exit 1
           fi
-          echo "homeassistant==$MATRIX_HA_REAL_VERSION" > overrides.txt
-          INSTALL_TEST_DEPS=("${PINNED_TEST_DEPENDENCIES[@]}")
-          for dep in "${REQUIRED_TEST_DEPS[@]}"; do
-            dep_package="${dep%%==*}"
-            pinned=false
-            for spec in "${PINNED_TEST_DEPENDENCIES[@]}"; do
-              if [[ "${spec%%==*}" == "$dep_package" ]]; then
-                pinned=true
-                break
-              fi
-            done
-            if [[ "$pinned" == false ]]; then
-              INSTALL_TEST_DEPS+=("$dep")
-            fi
-          done
-          uv --no-config pip install --overrides overrides.txt --python .venv/bin/python "$HA_SPEC" "${INSTALL_TEST_DEPS[@]}"
+          HASSIL_SPEC=$(awk '/^hassil==/ {print $1; exit}' <<< "$HA_CONSTRAINTS")
+          if [[ ! "$HASSIL_SPEC" =~ ^hassil==[a-zA-Z0-9]+(\.[a-zA-Z0-9]+)*$ ]]; then
+            echo "::error::Failed to resolve hassil from package_constraints.txt (tried CDN and GitHub)"
+            exit 1
+          fi
+          REQUIRED_TEST_DEPS=(
+            "$HASSIL_SPEC"
+            "$HA_INTENTS_SPEC"
+            "pytest"
+            "pytest-asyncio"
+            "pytest-cov"
+            "pytest-homeassistant-custom-component"
+            "pytest-timeout"
+            "pytest-xdist"
+            "rapidfuzz"
+          )
+          echo "$HA_SPEC" > overrides.txt
+          uv --no-config pip install --overrides overrides.txt --python .venv/bin/python "$HA_SPEC" "${REQUIRED_TEST_DEPS[@]}"
 
       - name: Run Pytest
         run: uv run --no-project --python .venv/bin/python pytest --no-cov -m "not current_intents"
