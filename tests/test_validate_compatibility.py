@@ -10,6 +10,207 @@ from tools import validate_compatibility
 TEST_DEP_VERSIONS = {"home-assistant-intents": "2026.6.1"}
 
 
+def test_cleanup_compatibility_bytecode_is_scoped_and_missing_safe(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Remove target bytecode caches without touching siblings or missing paths."""
+    target_dir = tmp_path / "venv"
+    target_bytecode = target_dir / "package" / "__pycache__"
+    sibling_bytecode = tmp_path / "sibling" / "__pycache__"
+    target_bytecode.mkdir(parents=True)
+    sibling_bytecode.mkdir(parents=True)
+    (target_bytecode / "module.pyc").write_bytes(b"target")
+    (sibling_bytecode / "module.pyc").write_bytes(b"sibling")
+
+    validate_compatibility._cleanup_compatibility_bytecode(target_dir)
+    successful_output = capsys.readouterr()
+    validate_compatibility._cleanup_compatibility_bytecode(tmp_path / "missing")
+    missing_output = capsys.readouterr()
+
+    assert not target_bytecode.exists()
+    assert sibling_bytecode.is_dir()
+    assert "STEP_OK: cleanup __pycache__" in successful_output.out
+    assert "STEP_OK: cleanup __pycache__" not in missing_output.out
+    assert "target directory does not exist" in missing_output.err
+
+
+def test_cleanup_compatibility_bytecode_rejects_regular_file(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Reject an existing cleanup target that is not a directory."""
+    target_file = tmp_path / "venv"
+    target_file.write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="cleanup target path is not a directory"):
+        validate_compatibility._cleanup_compatibility_bytecode(target_file)
+
+    output = capsys.readouterr()
+    assert "STEP_OK: cleanup __pycache__" not in output.out
+    assert "STEP_FAILED: cleanup __pycache__" in output.err
+
+
+def test_cleanup_compatibility_bytecode_cleans_siblings_before_raising(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Clean sibling caches before reporting a removal failure."""
+    target_dir = tmp_path / "venv"
+    blocked_bytecode = target_dir / "blocked" / "__pycache__"
+    removable_bytecode = target_dir / "removable" / "__pycache__"
+    blocked_bytecode.mkdir(parents=True)
+    removable_bytecode.mkdir(parents=True)
+    original_rmtree = validate_compatibility.shutil.rmtree
+
+    def remove_bytecode(path: Path) -> None:
+        if path == blocked_bytecode:
+            raise PermissionError("permission denied")
+        original_rmtree(path)
+
+    monkeypatch.setattr(validate_compatibility.shutil, "rmtree", remove_bytecode)
+
+    with pytest.raises(RuntimeError, match="Compatibility bytecode cleanup failed"):
+        validate_compatibility._cleanup_compatibility_bytecode(target_dir)
+
+    assert blocked_bytecode.is_dir()
+    assert not removable_bytecode.exists()
+    output = capsys.readouterr()
+    assert "STEP_OK: cleanup __pycache__" not in output.out
+    error = output.err
+    assert f"unable to remove {blocked_bytecode}" in error
+    assert "permission denied" in error
+    assert "STEP_FAILED: cleanup __pycache__" in error
+
+
+def test_cleanup_compatibility_bytecode_timeout_fails_the_step(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Stop a long cleanup at its deadline and report an incomplete step."""
+    bytecode_dir = tmp_path / "venv" / "package" / "__pycache__"
+    bytecode_dir.mkdir(parents=True)
+    final_timestamp = validate_compatibility._CLEANUP_TIMEOUT_SECONDS + 1.0
+    timestamps = iter((0.0, final_timestamp))
+    monkeypatch.setattr(
+        validate_compatibility,
+        "monotonic",
+        lambda: next(timestamps, final_timestamp),
+    )
+
+    with pytest.raises(RuntimeError, match="Compatibility bytecode cleanup failed"):
+        validate_compatibility._cleanup_compatibility_bytecode(tmp_path / "venv")
+
+    assert bytecode_dir.is_dir()
+    output = capsys.readouterr()
+    assert "STEP_OK: cleanup __pycache__" not in output.out
+    assert (
+        f"timed out after {validate_compatibility._CLEANUP_TIMEOUT_SECONDS} seconds" in output.err
+    )
+    assert "STEP_FAILED: cleanup __pycache__" in output.err
+
+
+def test_cleanup_compatibility_bytecode_allows_final_removal_to_cross_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Report success when the final cache removal completes after the deadline."""
+    removed_bytecode = tmp_path / "venv" / "__pycache__"
+    removed_bytecode.mkdir(parents=True)
+    final_timestamp = validate_compatibility._CLEANUP_TIMEOUT_SECONDS + 1.0
+    current_timestamp = [0.0]
+    original_rmtree = validate_compatibility.shutil.rmtree
+
+    def remove_final_bytecode(path: Path) -> None:
+        original_rmtree(path)
+        current_timestamp[0] = final_timestamp
+
+    monkeypatch.setattr(
+        validate_compatibility,
+        "monotonic",
+        lambda: current_timestamp[0],
+    )
+    monkeypatch.setattr(validate_compatibility.shutil, "rmtree", remove_final_bytecode)
+
+    validate_compatibility._cleanup_compatibility_bytecode(tmp_path / "venv")
+
+    assert not removed_bytecode.exists()
+    output = capsys.readouterr()
+    assert "STEP_OK: cleanup __pycache__" in output.out
+    assert "timed out after" not in output.err
+    assert "STEP_FAILED: cleanup __pycache__" not in output.err
+
+
+def test_cleanup_compatibility_bytecode_caps_reported_issues(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Bound retained cleanup errors while still counting omitted issues."""
+    target_dir = tmp_path / "venv"
+    issue_count = validate_compatibility._CLEANUP_ISSUE_LIMIT + 2
+    for index in range(issue_count):
+        (target_dir / f"package_{index}" / "__pycache__").mkdir(parents=True)
+
+    def fail_removal(path: Path) -> None:
+        raise PermissionError(f"cannot remove {path}")
+
+    monkeypatch.setattr(validate_compatibility.shutil, "rmtree", fail_removal)
+
+    with pytest.raises(RuntimeError) as raised:
+        validate_compatibility._cleanup_compatibility_bytecode(target_dir)
+
+    message = str(raised.value)
+    assert message.count("unable to remove") == validate_compatibility._CLEANUP_ISSUE_LIMIT
+    assert "2 additional issue(s) omitted" in message
+
+
+def test_cleanup_compatibility_bytecode_rejects_symlinked_target(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Reject a symlink root without removing caches from its destination."""
+    actual_target = tmp_path / "actual"
+    bytecode_dir = actual_target / "package" / "__pycache__"
+    bytecode_dir.mkdir(parents=True)
+    linked_target = tmp_path / "linked"
+    linked_target.symlink_to(actual_target, target_is_directory=True)
+
+    with pytest.raises(RuntimeError, match="refusing to clean symlinked target directory"):
+        validate_compatibility._cleanup_compatibility_bytecode(linked_target)
+
+    assert bytecode_dir.is_dir()
+    output = capsys.readouterr()
+    assert "STEP_OK: cleanup __pycache__" not in output.out
+    assert "STEP_FAILED: cleanup __pycache__" in output.err
+
+
+def test_cleanup_compatibility_bytecode_reports_symlinked_cache(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Report a cache symlink without removing its link target."""
+    target_dir = tmp_path / "venv"
+    cache_target = tmp_path / "external_cache"
+    cache_target.mkdir()
+    cached_file = cache_target / "module.pyc"
+    cached_file.write_bytes(b"external")
+    bytecode_link = target_dir / "package" / "__pycache__"
+    bytecode_link.parent.mkdir(parents=True)
+    bytecode_link.symlink_to(cache_target, target_is_directory=True)
+
+    with pytest.raises(RuntimeError, match="Compatibility bytecode cleanup failed"):
+        validate_compatibility._cleanup_compatibility_bytecode(target_dir)
+
+    assert bytecode_link.is_symlink()
+    assert cached_file.read_bytes() == b"external"
+    output = capsys.readouterr()
+    assert f"unable to remove {bytecode_link}" in output.err
+    assert "STEP_FAILED: cleanup __pycache__" in output.err
+
+
 def test_stale_deps_ignore_unpinned_harness_versions(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -217,6 +418,46 @@ def test_install_dependencies_resets_before_marker_reinstall(
         "install",
         "--upgrade",
     )
+
+
+def test_install_dependencies_writes_marker_only_after_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Leave the dependency marker stale when bytecode cleanup fails."""
+    operations: list[str] = []
+
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_install_compatibility_dependencies",
+        lambda *_args: None,
+    )
+
+    def fail_cleanup(_venv_path: Path) -> None:
+        operations.append("cleanup")
+        raise RuntimeError("cleanup failed")
+
+    def record_marker(
+        _venv_path: Path,
+        _test_dependency_versions: dict[str, str],
+    ) -> None:
+        operations.append("marker")
+
+    monkeypatch.setattr(validate_compatibility, "_cleanup_compatibility_bytecode", fail_cleanup)
+    monkeypatch.setattr(validate_compatibility, "_write_venv_dependency_marker", record_marker)
+
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        validate_compatibility._install_dependencies(
+            tmp_path / "venv",
+            tmp_path / "venv" / "bin" / "python",
+            "2026.6.0",
+            True,
+            (),
+            TEST_DEP_VERSIONS,
+            py_ver="3.14",
+        )
+
+    assert operations == ["cleanup"]
 
 
 def test_run_tests_resets_before_forced_reinstall(

@@ -85,10 +85,17 @@ def test_language_variant_for_resolves_equal_scores_deterministically() -> None:
     ]
 
     with patch.dict(sys.modules, {"home_assistant_intents": mock_module}):
+        # language_variant_for caches per language code; clear between calls
+        # so each assertion exercises a fresh package enumeration order.
+        language_variant_for.cache_clear()
         assert language_variant_for("pt-AO") == "pt"
+        language_variant_for.cache_clear()
         assert language_variant_for("pt-AO") == "pt"
+        language_variant_for.cache_clear()
         assert language_variant_for("zh-SG") == "zh-CN"
+        language_variant_for.cache_clear()
         assert language_variant_for("zh-SG") == "zh-CN"
+    language_variant_for.cache_clear()
 
 
 def test_json_load_invalid() -> None:

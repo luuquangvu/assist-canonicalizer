@@ -76,7 +76,7 @@ def test_normalize_text_handles_join_controls_and_orphan_visual_marks() -> None:
     assert normalize_text("می\u200cخواهم") == "میخواهم"  # noqa: RUF001
     assert normalize_text("❤️ light") == "light"
     assert normalize_text("\u0301\u0300 light") == "light"
-    assert normalize_text("बत्ती—जलाओ!") == "बत्ती जलाओ"
+    assert normalize_text("बत्ती।जलाओ!") == "बत्ती जलाओ"
 
 
 def test_no_diacritic_normalization_only_folds_latin_marks() -> None:
@@ -163,12 +163,10 @@ def test_normalize_text_preserves_target_punctuation() -> None:
 
 def test_clear_normalization_caches() -> None:
     """Verify that clear_normalization_caches clears LRU cache entries."""
-    # Cache something
     _ = tokenize_normalized("test cache entry")
     cache_info_before = tokenize_normalized.cache_info()
     assert cache_info_before.currsize > 0
 
-    # Clear caches
     clear_normalization_caches()
     cache_info_after = tokenize_normalized.cache_info()
     assert cache_info_after.currsize == 0

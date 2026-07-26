@@ -14,7 +14,11 @@ from .const import (
     DEFAULT_MAX_TOTAL_CANDIDATES_PER_LANGUAGE,
     DEFAULT_MIN_CONFIDENCE,
 )
-from .normalization import char_ngrams_normalized, literal_tokens_list
+from .normalization import (
+    char_ngrams_normalized,
+    literal_tokens_list,
+    normalize_text_no_diacritics_from_normalized,
+)
 from .ranking import (
     CharNGramIndex,
     RankedCandidate,
@@ -39,8 +43,14 @@ class _CanonicalIndexData:
     slot_token_index: SlotTokenIndex
 
 
-def _build_index_state(candidates: tuple[Candidate, ...]) -> _CanonicalIndexData:
-    """Build all derived index structures from the candidate list."""
+def _build_index_state(candidates: tuple[Candidate, ...], language: str) -> _CanonicalIndexData:
+    """Build all derived index structures from the candidate list.
+
+    Diacritic-folded exact keys use the index language: query-side folding
+    in the exact lookup uses ``CanonicalIndex.language``, so candidates
+    admitted with ``language=None`` must fold identically or their keys
+    silently never match under language-specific overrides.
+    """
     all_tokens: set[str] = set()
     exact_normalized: dict[str, list[Candidate]] = {}
     exact_no_diacritics: dict[str, list[Candidate]] = {}
@@ -53,7 +63,11 @@ def _build_index_state(candidates: tuple[Candidate, ...]) -> _CanonicalIndexData
 
     for i, candidate in enumerate(candidates):
         exact_normalized.setdefault(candidate.normalized_text, []).append(candidate)
-        no_diac = candidate.normalized_text_no_diacritics
+        no_diac = (
+            candidate.normalized_text_no_diacritics
+            if candidate.language == language
+            else normalize_text_no_diacritics_from_normalized(candidate.normalized_text, language)
+        )
         exact_no_diacritics.setdefault(no_diac, []).append(candidate)
         if literal_text := candidate.metadata.get("literal_text"):
             all_tokens.update(literal_tokens_list(literal_text))
@@ -134,7 +148,7 @@ class CanonicalIndex:
             "_candidate_char_index",
             CharNGramIndex.from_grams(tuple(char_ngrams_normalized(t) for t in normalized_texts)),
         )
-        state = _build_index_state(self.candidates)
+        state = _build_index_state(self.candidates, self.language)
         for name, value in vars(state).items():
             object.__setattr__(self, f"_{name}", value)
 

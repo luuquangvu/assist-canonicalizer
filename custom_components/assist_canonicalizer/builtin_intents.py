@@ -42,8 +42,13 @@ def load_language_intent_sources(
     return sources
 
 
+@lru_cache(maxsize=128)
 def language_variant_for(language: str) -> str | None:
-    """Return the Home Assistant intents language variant for a language."""
+    """Return the Home Assistant intents language variant for a language.
+
+    The result depends only on the installed intents package, which cannot
+    change without a restart, so caching is safe.
+    """
     if not language.strip():
         return None
 
@@ -77,6 +82,7 @@ def _load_built_in_intents(language_variant: str) -> Mapping[str, Any]:
 def clear_builtin_intents_caches() -> None:
     """Clear cached built-in intent sources."""
     _load_built_in_intents.cache_clear()
+    language_variant_for.cache_clear()
 
 
 def _load_custom_sentences(

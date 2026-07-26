@@ -47,6 +47,10 @@ def _mark_attachment_flags(text: str) -> list[bool]:
 
 def _strip_non_word_characters(text: str) -> str:
     """Preserve attached script marks while replacing punctuation with spaces."""
+    if text.isascii():
+        # ASCII text contains no combining marks, join controls, or variation
+        # selectors, so every non-word character simply becomes a space.
+        return _NON_WORD_RE.sub(" ", text)
     flags = _mark_attachment_flags(text)
 
     def _replace(match: re.Match[str]) -> str:
@@ -176,6 +180,7 @@ class _PunctuationPlaceholderManager:
 _PLACEHOLDER_MANAGER = _PunctuationPlaceholderManager()
 
 
+@lru_cache(maxsize=65536)
 def normalize_text(text: str) -> str:
     """Normalize text without applying language-specific rules.
 
@@ -281,6 +286,7 @@ def literal_tokens_list(literal_text: str) -> tuple[str, ...]:
 
 def clear_normalization_caches() -> None:
     """Clear all global LRU caches in normalization module."""
+    normalize_text.cache_clear()
     normalize_text_no_diacritics_from_normalized.cache_clear()
     tokenize_normalized.cache_clear()
     char_ngrams_normalized.cache_clear()

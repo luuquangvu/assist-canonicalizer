@@ -34,8 +34,10 @@ from custom_components.assist_canonicalizer.rehydration import (
     WildcardVariantAnalysis,
     _align_prefix_boundary,
     _align_suffix_boundary,
+    _candidate_norm_token_lists,
     _extract_original_span,
     _replace_wildcard_in_original,
+    clear_rehydration_caches,
     get_wildcard_rehydration,
     rehydrate_wildcard_slots,
 )
@@ -313,6 +315,19 @@ def test_rehydration_boundary_and_replace_stability() -> None:
 
     # Prefix alignment boundary >= suffix boundary check
     assert _extract_original_span("test query", 2, 1) == ""
+
+
+def test_candidate_normalized_token_lists_are_cached_and_cleared() -> None:
+    """Reuse candidate normalization and clear it with other rehydration caches."""
+    clear_rehydration_caches()
+
+    assert _replace_wildcard_in_original("play song", 1, "jazz", "song") == "play jazz"
+    assert _replace_wildcard_in_original("play song", 1, "rock", "song") == "play rock"
+    assert _candidate_norm_token_lists.cache_info().hits == 1
+
+    clear_rehydration_caches()
+
+    assert _candidate_norm_token_lists.cache_info().currsize == 0
 
 
 def test_rehydrate_wildcard_slots_stability() -> None:

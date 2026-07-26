@@ -13,6 +13,7 @@ from homeassistant.components.conversation.models import ConversationInput
 from homeassistant.core import Context
 
 from custom_components.assist_canonicalizer.recognition import (
+    _MAX_OBSERVED_VALUE_LENGTH,
     RecognitionKind,
     RecognitionObservation,
     async_observe_delegated_text,
@@ -35,7 +36,7 @@ def _conversation_input() -> ConversationInput:
         "satellite_id": "assist_satellite.kitchen",
         "extra_system_prompt": "stay local",
     }
-    kwargs.update({name: value for name, value in optional.items() if name in signature.parameters})
+    kwargs |= {name: value for name, value in optional.items() if name in signature.parameters}
     return ConversationInput(**kwargs)
 
 
@@ -100,6 +101,36 @@ async def test_recognition_forwards_context_and_observes_intent_without_executio
         if hasattr(user_input, optional_field):
             assert getattr(recognition_input, optional_field) == getattr(user_input, optional_field)
     assert user_input.text == "turn teh lamp on"
+
+
+@pytest.mark.asyncio
+async def test_recognition_sorts_duplicate_slots_without_comparing_values() -> None:
+    """Keep duplicate slot names with heterogeneous values in stable name order."""
+    default_agent = SimpleNamespace(
+        async_recognize_sentence_trigger=AsyncMock(return_value=None),
+        async_recognize_intent=AsyncMock(
+            return_value=SimpleNamespace(
+                intent=SimpleNamespace(name="HassListAddItem"),
+                entities_list=(
+                    SimpleNamespace(name="item", value=3),
+                    SimpleNamespace(name="domain", value="todo"),
+                    SimpleNamespace(name="item", value="milk"),
+                ),
+                unmatched_entities_list=(),
+                intent_data=SimpleNamespace(requires_context=None, excludes_context=None),
+            )
+        ),
+    )
+
+    with patch(
+        "custom_components.assist_canonicalizer.recognition.async_get_agent",
+        return_value=default_agent,
+    ):
+        observation = await async_observe_delegated_text(
+            object(), _conversation_input(), "add milk to my list"
+        )
+
+    assert observation.slots == (("domain", "todo"), ("item", 3), ("item", "milk"))
 
 
 @pytest.mark.asyncio
@@ -208,3 +239,19 @@ def test_metadata_divergence_is_diagnostic_only() -> None:
         observation,
     ) == (False, False)
     assert observation.executable
+
+
+def test_metadata_matches_observation_bounds_long_expected_values() -> None:
+    """Bound expected slot values like observed ones to avoid false divergence."""
+    long_value = "x" * (_MAX_OBSERVED_VALUE_LENGTH + 1)
+    observation = RecognitionObservation(
+        kind=RecognitionKind.INTENT,
+        intent_name="HassListAddItem",
+        slots=(("item", long_value[:_MAX_OBSERVED_VALUE_LENGTH]),),
+    )
+
+    assert metadata_matches_observation(
+        "HassListAddItem",
+        {"item": long_value},
+        observation,
+    ) == (True, True)

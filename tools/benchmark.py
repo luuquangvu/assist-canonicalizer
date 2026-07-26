@@ -21,7 +21,7 @@ import time
 import tomllib
 import unicodedata
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from string import ascii_letters, digits
@@ -63,7 +63,7 @@ SCRATCH_DIR = REPO_ROOT / "scratch"
 DEFAULT_OUTPUT_JSON = SCRATCH_DIR / "benchmark" / "managed_live_report.json"
 DEFAULT_OUTPUT_MARKDOWN = SCRATCH_DIR / "benchmark" / "managed_live_report.md"
 
-BENCHMARK_SCHEMA_VERSION = 2
+BENCHMARK_SCHEMA_VERSION = 3
 BENCHMARK_GROUP = "ha-benchmark"
 REAL_WORLD_SUITE_ID = "managed_live_real_world_v1"
 HOST = "127.0.0.1"
@@ -694,7 +694,7 @@ def _sanitize_text(text: str) -> str:
 
 
 def _log_tail(managed: ManagedProcess | None) -> str:
-    """Return a bounded sanitized process-log tail for a failed run."""
+    """Return a bounded sanitized process-log tail for an infrastructure failure."""
     if managed is None:
         return ""
     managed.log_handle.flush()
@@ -916,111 +916,143 @@ async def _prepare_languages(
     return prepared
 
 
+def _language_smoke_case(command: LanguageSmokeCommand) -> BenchmarkCase:
+    """Return the benchmark case for one language-smoke command."""
+    return BenchmarkCase(
+        case_id=f"language-smoke-{command.language}",
+        language=command.language,
+        query=command.text,
+        oracle="intent_slot",
+        category="compatibility_smoke",
+        expected_intent="HassTurnOn",
+        expected_canonical=command.text,
+        expected_slots={},
+        expected_fallback=False,
+        satellite_id=CONTEXT_SATELLITE_ID,
+        expected_response_type=None,
+        expected_target_id=command.target_entity_id,
+        expected_state=None,
+        setup=None,
+    )
+
+
+async def _language_smoke_attempt(
+    session: aiohttp.ClientSession,
+    command: LanguageSmokeCommand,
+    case: BenchmarkCase,
+    agent_id: str,
+    attempt: int,
+) -> dict[str, Any]:
+    """Execute and observe one language-smoke attempt."""
+    await _call_service(
+        session,
+        command.target_domain,
+        "turn_off",
+        {"entity_id": command.target_entity_id},
+    )
+    conversation_id = f"language-smoke-{command.language}-{attempt}"
+    payload, _latency_ms, trace = await _run_observed_conversation(
+        session,
+        case,
+        agent_id,
+        conversation_id,
+    )
+    diagnostics = await _diagnostics(session)
+    if diagnostics.get("last_request_id") != conversation_id:
+        raise BenchmarkError(f"Language smoke request correlation failed for {command.language}")
+    response = _response_observation(payload)
+    state = await _wait_for_expected_state(
+        session,
+        ExpectedState(entity_id=command.target_entity_id, state="on"),
+    )
+    confidence_gate = diagnostics.get("confidence_gate")
+    return {
+        "response_type": response["response_type"],
+        "error_code": response["error_code"],
+        "intent": trace.actual_intent,
+        "slots": dict(trace.actual_slots),
+        "entity_ids": response["entity_ids"],
+        "target_state": state.get("state") if isinstance(state, dict) else None,
+        "delegated_text_sha256": hashlib.sha256(trace.delegated_text.encode()).hexdigest(),
+        "fallback_reason": diagnostics.get("last_fallback_reason"),
+        "recognition_kind": diagnostics.get("recognition_kind"),
+        "selected_delegated_text_hash": diagnostics.get("selected_delegated_text_hash"),
+        "confidence_margin_policy": (
+            confidence_gate.get("margin_policy") if isinstance(confidence_gate, dict) else None
+        ),
+    }
+
+
+async def _execute_language_smoke_command(
+    session: aiohttp.ClientSession,
+    command: LanguageSmokeCommand,
+    agent_id: str,
+) -> dict[str, Any]:
+    """Execute and verify both attempts for one language."""
+    case = _language_smoke_case(command)
+    observations = [
+        await _language_smoke_attempt(
+            session,
+            command,
+            case,
+            agent_id,
+            attempt,
+        )
+        for attempt in range(2)
+    ]
+    if observations[0] != observations[1]:
+        raise BenchmarkError(
+            f"Language smoke outcome is non-deterministic for {command.language}: {observations}"
+        )
+    observation = observations[0]
+    if not _language_smoke_observation_succeeded(
+        observation,
+        command.target_entity_id,
+    ):
+        raise BenchmarkError(f"Language smoke failed for {command.language}: {observation}")
+    await _call_service(
+        session,
+        command.target_domain,
+        "turn_off",
+        {"entity_id": command.target_entity_id},
+    )
+    await _wait_for_expected_state(
+        session,
+        ExpectedState(entity_id=command.target_entity_id, state="off"),
+    )
+    return {
+        "language": command.language,
+        "command_sha256": hashlib.sha256(command.text.encode()).hexdigest(),
+        "target_domain": command.target_domain,
+        "target_entity_id": command.target_entity_id,
+        "outcome": observation,
+    }
+
+
 async def _execute_language_smoke(
     session: aiohttp.ClientSession,
     commands: Sequence[LanguageSmokeCommand],
     agent_id: str,
 ) -> list[dict[str, Any]]:
-    """Execute every installed language twice through the production conversation path."""
-    results: list[dict[str, Any]] = []
+    """Execute every installed language twice through the production path."""
+    results = []
     for command in commands:
-        target_entity_id = command.target_entity_id
-        case = BenchmarkCase(
-            case_id=f"language-smoke-{command.language}",
-            language=command.language,
-            query=command.text,
-            oracle="intent_slot",
-            category="compatibility_smoke",
-            expected_intent="HassTurnOn",
-            expected_canonical=command.text,
-            expected_slots={},
-            expected_fallback=False,
-            satellite_id=CONTEXT_SATELLITE_ID,
-            expected_response_type=None,
-            expected_target_id=target_entity_id,
-            expected_state=None,
-            setup=None,
-        )
-        observations: list[dict[str, Any]] = []
-        for attempt in range(2):
-            await _call_service(
-                session,
-                command.target_domain,
-                "turn_off",
-                {"entity_id": target_entity_id},
-            )
-            conversation_id = f"language-smoke-{command.language}-{attempt}"
-            payload, _latency_ms, trace = await _run_observed_conversation(
-                session,
-                case,
-                agent_id,
-                conversation_id,
-            )
-            diagnostics = await _diagnostics(session)
-            if diagnostics.get("last_request_id") != conversation_id:
-                raise BenchmarkError(
-                    f"Language smoke request correlation failed for {command.language}"
-                )
-            response = _response_observation(payload)
-            state = await _wait_for_expected_state(
-                session,
-                ExpectedState(entity_id=target_entity_id, state="on"),
-            )
-            observations.append(
-                {
-                    "response_type": response["response_type"],
-                    "error_code": response["error_code"],
-                    "intent": trace.actual_intent,
-                    "slots": dict(trace.actual_slots),
-                    "entity_ids": response["entity_ids"],
-                    "target_state": state.get("state") if isinstance(state, dict) else None,
-                    "delegated_text_sha256": hashlib.sha256(
-                        trace.delegated_text.encode()
-                    ).hexdigest(),
-                    "fallback_reason": diagnostics.get("last_fallback_reason"),
-                    "recognition_kind": diagnostics.get("recognition_kind"),
-                    "selected_delegated_text_hash": diagnostics.get("selected_delegated_text_hash"),
-                    "confidence_margin_policy": (
-                        diagnostics.get("confidence_gate", {}).get("margin_policy")
-                        if isinstance(diagnostics.get("confidence_gate"), dict)
-                        else None
-                    ),
-                }
-            )
-        if observations[0] != observations[1]:
-            raise BenchmarkError(
-                f"Language smoke outcome is non-deterministic for {command.language}: "
-                f"{observations}"
-            )
-        observation = observations[0]
-        if not _language_smoke_observation_succeeded(observation, target_entity_id):
-            raise BenchmarkError(f"Language smoke failed for {command.language}: {observation}")
-        results.append(
-            {
-                "language": command.language,
-                "command_sha256": hashlib.sha256(command.text.encode()).hexdigest(),
-                "target_domain": command.target_domain,
-                "target_entity_id": target_entity_id,
-                "outcome": observation,
-            }
-        )
-        await _call_service(
-            session,
-            command.target_domain,
-            "turn_off",
-            {"entity_id": target_entity_id},
-        )
-        await _wait_for_expected_state(
-            session,
-            ExpectedState(entity_id=target_entity_id, state="off"),
-        )
+        results.append(await _execute_language_smoke_command(session, command, agent_id))
     return results
 
 
 def _language_smoke_observation_succeeded(
     observation: Mapping[str, Any], target_entity_id: str
 ) -> bool:
-    """Return whether a deterministic smoke observation achieved its live contract."""
+    """Return whether a compatibility smoke request achieved its action contract.
+
+    The all-language smoke suite validates recognition, target resolution, and the
+    resulting state rather than translated speech. Some upstream language packs contain
+    valid area or domain grammar paired with a response template that assumes an
+    optional entity-name slot; Home Assistant may warn while rendering that speech even
+    though the action succeeds. Treating response wording as correctness here would
+    turn an upstream translation defect into a false integration regression.
+    """
     return (
         observation["response_type"] != "error"
         and observation["intent"] == "HassTurnOn"
@@ -1650,8 +1682,45 @@ async def _execute_suite(
     warmup: int,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Execute warmup and measured requests serially with deterministic setup."""
+    canonical_controls = await _canonical_controls(session, cases)
     case_results: list[dict[str, Any]] = []
     suite_failures: list[str] = []
+    for case in cases:
+        canonical_control = _case_canonical_control(case, canonical_controls)
+        execution = await _execute_case_iterations(
+            session,
+            case,
+            canonical_control,
+            agent_id,
+            iterations,
+            warmup,
+        )
+        if case.setup is not None:
+            # Restore fixture state after the final measured request.
+            await _call_service(
+                session,
+                case.setup.domain,
+                case.setup.service,
+                case.setup.data,
+            )
+        if execution.failures:
+            suite_failures.append(f"{case.case_id}: {'; '.join(execution.failures)}")
+        case_results.append(
+            _case_result(
+                case,
+                execution,
+                iterations,
+                has_canonical_control=canonical_control is not None,
+            )
+        )
+    return case_results, suite_failures
+
+
+async def _canonical_controls(
+    session: aiohttp.ClientSession,
+    cases: Sequence[BenchmarkCase],
+) -> dict[tuple[str, str, str | None], Mapping[str, Any]]:
+    """Prepare unique live canonical controls required by the suite."""
     recognition_oracles: dict[tuple[str, str, str | None], Mapping[str, Any]] = {}
     canonical_controls: dict[tuple[str, str, str | None], Mapping[str, Any]] = {}
     for case in cases:
@@ -1672,160 +1741,234 @@ async def _execute_suite(
                 recognition_oracle,
                 f"benchmark-oracle-{case.case_id}",
             )
+    return canonical_controls
 
-    for case in cases:
-        canonical_oracle: Mapping[str, Any] | None = None
-        if case.expected_canonical is not None:
-            oracle_key = (case.language, case.expected_canonical, case.satellite_id)
-            canonical_oracle = canonical_controls[oracle_key]
-        latencies: list[float] = []
-        hassil_baseline_latencies: list[float] = []
-        measured_passes = 0
-        semantic_measured_passes = 0
-        hassil_baseline_measured_passes = 0
-        failures: list[str] = []
-        last_observation: dict[str, Any] = {}
-        hassil_baseline_last_observation: dict[str, Any] = {}
-        last_diagnostics: Mapping[str, Any] = {}
-        total_runs = warmup + iterations
-        for run_index in range(total_runs):
-            phase = "warmup" if run_index < warmup else "measure"
-            phase_index = run_index if phase == "warmup" else run_index - warmup
-            baseline_latency_ms: float | None = None
-            if case.setup is not None:
-                await _call_service(
-                    session,
-                    case.setup.domain,
-                    case.setup.service,
-                    case.setup.data,
-                )
-            if canonical_oracle is not None:
-                await _prepare_live_case(session, case, canonical_oracle)
-                baseline_conversation_id = f"benchmark-hassil-{case.case_id}-{phase}-{phase_index}"
-                (
-                    baseline_payload,
-                    baseline_latency_ms,
-                    baseline_trace,
-                ) = await _run_observed_conversation(
-                    session,
-                    case,
-                    HOME_ASSISTANT_AGENT_ID,
-                    baseline_conversation_id,
-                )
-                hassil_baseline_last_observation = _live_oracle_observation(
-                    case,
-                    baseline_payload,
-                    baseline_trace,
-                    canonical_oracle,
-                )
-                await _prepare_live_case(session, case, canonical_oracle)
-            conversation_id = f"benchmark-{case.case_id}-{phase}-{phase_index}"
-            payload, latency_ms, trace = await _run_observed_conversation(
-                session, case, agent_id, conversation_id
-            )
-            last_diagnostics = await _diagnostics(session)
-            if last_diagnostics.get("last_request_id") != conversation_id:
-                raise BenchmarkError(
-                    f"Production diagnostics request correlation failed for {case.case_id}"
-                )
-            passed, run_failures, observation = await _evaluate_response(
-                session,
-                case,
-                payload,
-                trace,
-                last_diagnostics,
-                canonical_oracle,
-            )
-            last_observation = observation
-            if phase == "measure":
-                latencies.append(latency_ms)
-                measured_passes += int(passed)
-                semantic_measured_passes += int(bool(observation.get("semantic_correct")))
-                if canonical_oracle is not None:
-                    if baseline_latency_ms is None:
-                        raise BenchmarkError(
-                            f"HassIL baseline latency is missing for {case.case_id}"
-                        )
-                    hassil_baseline_latencies.append(baseline_latency_ms)
-                    hassil_baseline_measured_passes += int(
-                        bool(hassil_baseline_last_observation.get("semantic_correct"))
-                    )
-                if not passed:
-                    failures.extend(
-                        f"{phase}[{phase_index}]: {failure}" for failure in run_failures
-                    )
 
-        if case.setup is not None:
-            await _call_service(
-                session,
-                case.setup.domain,
-                case.setup.service,
-                case.setup.data,
-            )
-        if failures:
-            suite_failures.append(f"{case.case_id}: {'; '.join(failures)}")
-        case_results.append(
-            {
-                "id": case.case_id,
-                "language": case.language,
-                "query": case.query,
-                "oracle": case.oracle,
-                "category": case.category,
-                "expected_intent": case.expected_intent,
-                "expected_slots": dict(case.expected_slots),
-                "expected_fallback": case.expected_fallback,
-                "passed": not failures and measured_passes == iterations,
-                "measured_passes": measured_passes,
-                "semantic_measured_passes": semantic_measured_passes,
-                "semantic_passed": semantic_measured_passes == iterations,
-                "measured_requests": iterations,
-                "failures": failures,
-                "latency_samples_ms": latencies,
-                "latency_ms": _latency_statistics(latencies),
-                "last_observation": last_observation,
-                "hassil_baseline_measured_passes": hassil_baseline_measured_passes,
-                "hassil_baseline_passed": (
-                    hassil_baseline_measured_passes == iterations
-                    if canonical_oracle is not None
-                    else None
-                ),
-                "hassil_baseline_latency_samples_ms": hassil_baseline_latencies,
-                "hassil_baseline_latency_ms": (
-                    _latency_statistics(hassil_baseline_latencies)
-                    if hassil_baseline_latencies
-                    else None
-                ),
-                "hassil_baseline_last_observation": (
-                    hassil_baseline_last_observation if canonical_oracle is not None else None
-                ),
-                "last_diagnostics": {
-                    "last_request_id": last_diagnostics.get("last_request_id"),
-                    "last_query_latency_ms": last_diagnostics.get("last_query_latency_ms"),
-                    "last_fallback_reason": last_diagnostics.get("last_fallback_reason"),
-                    "dynamic_candidate_count": last_diagnostics.get("dynamic_candidate_count"),
-                    "selected_delegated_text_hash": last_diagnostics.get(
-                        "selected_delegated_text_hash"
-                    ),
-                    "selected_candidate_source": last_diagnostics.get("selected_candidate_source"),
-                    "confidence_gate": last_diagnostics.get("confidence_gate"),
-                    "execution_result": last_diagnostics.get("execution_result"),
-                    "recognition_kind": last_diagnostics.get("recognition_kind"),
-                    "recognition_intent": last_diagnostics.get("recognition_intent"),
-                    "recognition_unmatched_count": last_diagnostics.get(
-                        "recognition_unmatched_count"
-                    ),
-                    "recognition_latency_ms": last_diagnostics.get("recognition_latency_ms"),
-                    "preflight_attempt_count": last_diagnostics.get("preflight_attempt_count"),
-                    "metadata_diverged": last_diagnostics.get("metadata_diverged"),
-                    "metadata_divergence_reason": last_diagnostics.get(
-                        "metadata_divergence_reason"
-                    ),
-                    "recovery_used": last_diagnostics.get("recovery_used"),
-                    "registry_retrieval": last_diagnostics.get("registry_retrieval"),
-                },
-            }
+def _case_canonical_control(
+    case: BenchmarkCase,
+    controls: Mapping[tuple[str, str, str | None], Mapping[str, Any]],
+) -> Mapping[str, Any] | None:
+    """Return the prepared canonical control for a case."""
+    if case.expected_canonical is None:
+        return None
+    return controls[(case.language, case.expected_canonical, case.satellite_id)]
+
+
+@dataclass(frozen=True, slots=True)
+class _CaseRun:
+    """Observations from one warmup or measured case request."""
+
+    latency_ms: float
+    baseline_latency_ms: float | None
+    passed: bool
+    failures: tuple[str, ...]
+    observation: dict[str, Any]
+    baseline_observation: dict[str, Any] | None
+    diagnostics: Mapping[str, Any]
+
+
+@dataclass(slots=True)
+class _CaseExecution:
+    """Accumulated measurements and final observations for one case."""
+
+    latencies: list[float] = field(default_factory=list)
+    baseline_latencies: list[float] = field(default_factory=list)
+    measured_passes: int = 0
+    semantic_measured_passes: int = 0
+    baseline_measured_passes: int = 0
+    failures: list[str] = field(default_factory=list)
+    last_observation: dict[str, Any] = field(default_factory=dict)
+    baseline_last_observation: dict[str, Any] = field(default_factory=dict)
+    last_diagnostics: Mapping[str, Any] = field(default_factory=dict)
+
+
+async def _execute_case_run(
+    session: aiohttp.ClientSession,
+    case: BenchmarkCase,
+    canonical_control: Mapping[str, Any] | None,
+    agent_id: str,
+    conversation_id: str,
+    baseline_conversation_id: str,
+) -> _CaseRun:
+    """Execute paired baseline and canonicalizer requests for one case run."""
+    if case.setup is not None:
+        await _call_service(
+            session,
+            case.setup.domain,
+            case.setup.service,
+            case.setup.data,
         )
-    return case_results, suite_failures
+    baseline_latency_ms: float | None = None
+    baseline_observation: dict[str, Any] | None = None
+    if canonical_control is not None:
+        await _prepare_live_case(session, case, canonical_control)
+        baseline_payload, baseline_latency_ms, baseline_trace = await _run_observed_conversation(
+            session,
+            case,
+            HOME_ASSISTANT_AGENT_ID,
+            baseline_conversation_id,
+        )
+        baseline_observation = _live_oracle_observation(
+            case,
+            baseline_payload,
+            baseline_trace,
+            canonical_control,
+        )
+        await _prepare_live_case(session, case, canonical_control)
+    payload, latency_ms, trace = await _run_observed_conversation(
+        session,
+        case,
+        agent_id,
+        conversation_id,
+    )
+    diagnostics = await _diagnostics(session)
+    if diagnostics.get("last_request_id") != conversation_id:
+        raise BenchmarkError(
+            f"Production diagnostics request correlation failed for {case.case_id}"
+        )
+    passed, failures, observation = await _evaluate_response(
+        session,
+        case,
+        payload,
+        trace,
+        diagnostics,
+        canonical_control,
+    )
+    return _CaseRun(
+        latency_ms=latency_ms,
+        baseline_latency_ms=baseline_latency_ms,
+        passed=passed,
+        failures=tuple(failures),
+        observation=observation,
+        baseline_observation=baseline_observation,
+        diagnostics=diagnostics,
+    )
+
+
+def _record_measured_case_run(
+    execution: _CaseExecution,
+    run: _CaseRun,
+    phase_index: int,
+    case_id: str,
+    has_canonical_control: bool,
+) -> None:
+    """Add one measured run to its case accumulator."""
+    execution.latencies.append(run.latency_ms)
+    execution.measured_passes += int(run.passed)
+    execution.semantic_measured_passes += int(bool(run.observation.get("semantic_correct")))
+    if has_canonical_control:
+        if run.baseline_latency_ms is None:
+            raise BenchmarkError(f"HassIL baseline latency is missing for {case_id}")
+        execution.baseline_latencies.append(run.baseline_latency_ms)
+        execution.baseline_measured_passes += int(
+            bool(run.baseline_observation and run.baseline_observation.get("semantic_correct"))
+        )
+    if not run.passed:
+        execution.failures.extend(f"measure[{phase_index}]: {failure}" for failure in run.failures)
+
+
+async def _execute_case_iterations(
+    session: aiohttp.ClientSession,
+    case: BenchmarkCase,
+    canonical_control: Mapping[str, Any] | None,
+    agent_id: str,
+    iterations: int,
+    warmup: int,
+) -> _CaseExecution:
+    """Execute every warmup and measured request for one case."""
+    execution = _CaseExecution()
+    for run_index in range(warmup + iterations):
+        is_warmup = run_index < warmup
+        phase = "warmup" if is_warmup else "measure"
+        phase_index = run_index if is_warmup else run_index - warmup
+        run = await _execute_case_run(
+            session,
+            case,
+            canonical_control,
+            agent_id,
+            f"benchmark-{case.case_id}-{phase}-{phase_index}",
+            f"benchmark-hassil-{case.case_id}-{phase}-{phase_index}",
+        )
+        execution.last_observation = run.observation
+        execution.last_diagnostics = run.diagnostics
+        if run.baseline_observation is not None:
+            execution.baseline_last_observation = run.baseline_observation
+        if not is_warmup:
+            _record_measured_case_run(
+                execution,
+                run,
+                phase_index,
+                case.case_id,
+                canonical_control is not None,
+            )
+    return execution
+
+
+def _case_diagnostics(diagnostics: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the stable diagnostics subset included in reports."""
+    keys = (
+        "last_request_id",
+        "last_query_latency_ms",
+        "last_fallback_reason",
+        "dynamic_candidate_count",
+        "selected_delegated_text_hash",
+        "selected_candidate_source",
+        "confidence_gate",
+        "execution_result",
+        "recognition_kind",
+        "recognition_intent",
+        "recognition_unmatched_count",
+        "recognition_latency_ms",
+        "preflight_attempt_count",
+        "metadata_diverged",
+        "metadata_divergence_reason",
+        "recovery_used",
+        "registry_retrieval",
+    )
+    return {key: diagnostics.get(key) for key in keys}
+
+
+def _case_result(
+    case: BenchmarkCase,
+    execution: _CaseExecution,
+    iterations: int,
+    *,
+    has_canonical_control: bool,
+) -> dict[str, Any]:
+    """Build the serializable report entry for one benchmark case."""
+    return {
+        "id": case.case_id,
+        "language": case.language,
+        "query": case.query,
+        "oracle": case.oracle,
+        "category": case.category,
+        "expected_intent": case.expected_intent,
+        "expected_slots": dict(case.expected_slots),
+        "expected_fallback": case.expected_fallback,
+        "passed": (not execution.failures and execution.measured_passes == iterations),
+        "measured_passes": execution.measured_passes,
+        "semantic_measured_passes": execution.semantic_measured_passes,
+        "semantic_passed": execution.semantic_measured_passes == iterations,
+        "measured_requests": iterations,
+        "failures": execution.failures,
+        "latency_samples_ms": execution.latencies,
+        "latency_ms": _latency_statistics(execution.latencies),
+        "last_observation": execution.last_observation,
+        "hassil_baseline_measured_passes": execution.baseline_measured_passes,
+        "hassil_baseline_passed": (
+            execution.baseline_measured_passes == iterations if has_canonical_control else None
+        ),
+        "hassil_baseline_latency_samples_ms": execution.baseline_latencies,
+        "hassil_baseline_latency_ms": (
+            _latency_statistics(execution.baseline_latencies)
+            if execution.baseline_latencies
+            else None
+        ),
+        "hassil_baseline_last_observation": (
+            execution.baseline_last_observation if has_canonical_control else None
+        ),
+        "last_diagnostics": _case_diagnostics(execution.last_diagnostics),
+    }
 
 
 def _percentile(values: Sequence[float], percentile: float) -> float:
@@ -1848,155 +1991,275 @@ def _latency_statistics(values: Sequence[float]) -> dict[str, float]:
     }
 
 
-def _aggregate(case_results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """Aggregate production outcomes, corpus accuracy, and live latency."""
-    all_latencies: list[float] = []
-    hassil_baseline_latencies: list[float] = []
-    passed_requests = 0
-    total_requests = 0
-    passed_cases = 0
-    intent_slot_correct = 0
-    fallback_count = 0
-    mismatch_count = 0
-    execution_success_count = 0
-    canonical_match_count = 0
-    canonical_oracle_valid_count = 0
-    corpus_label_intent_match_count = 0
-    corpus_label_slot_match_count = 0
-    corpus_case_count = 0
-    canonicalizer_correct_count = 0
-    hassil_baseline_correct_count = 0
-    hassil_baseline_execution_success_count = 0
-    recovered_case_count = 0
-    regressed_case_count = 0
-    both_correct_count = 0
-    both_incorrect_count = 0
-    resolved_entity_slot_match_count = 0
+@dataclass(slots=True)
+class _AggregateCounts:
+    """Mutable counters for direct observations and effective production outcomes.
+
+    The managed runner observes direct HassIL and the direct canonicalizer path as
+    separate paired requests. ``canonicalizer_correct_count`` represents the effective
+    HassIL-first production policy, whereas ``direct_canonicalizer_correct_count``
+    preserves the unprotected direct-agent result. Generic fallback and mismatch
+    counters complete the effective outcome partition; their
+    ``direct_canonicalizer_*`` counterparts retain the unprotected observations. A
+    baseline success paired with a direct-path failure increments
+    ``shortcut_protected_case_count`` rather than a regression count because production
+    returns the HassIL result before ranking. Recovered, protected, both-correct, and
+    both-incorrect form the four-way partition of direct canonicalizer versus HassIL
+    outcomes.
+    """
+
+    passed_requests: int = 0
+    total_requests: int = 0
+    passed_cases: int = 0
+    intent_slot_correct: int = 0
+    fallback_count: int = 0
+    mismatch_count: int = 0
+    direct_canonicalizer_fallback_count: int = 0
+    direct_canonicalizer_mismatch_count: int = 0
+    execution_success_count: int = 0
+    canonical_match_count: int = 0
+    canonical_oracle_valid_count: int = 0
+    corpus_label_intent_match_count: int = 0
+    corpus_label_slot_match_count: int = 0
+    corpus_case_count: int = 0
+    canonicalizer_correct_count: int = 0
+    direct_canonicalizer_correct_count: int = 0
+    hassil_baseline_correct_count: int = 0
+    hassil_baseline_execution_success_count: int = 0
+    recovered_case_count: int = 0
+    shortcut_protected_case_count: int = 0
+    both_correct_count: int = 0
+    both_incorrect_count: int = 0
+    resolved_entity_slot_match_count: int = 0
+
+
+def _numeric_latency_samples(
+    value: Any,
+    description: str,
+) -> list[float]:
+    """Validate and normalize a latency sample list."""
+    if not isinstance(value, list) or not all(isinstance(sample, int | float) for sample in value):
+        raise BenchmarkError(f"{description} latency samples are invalid")
+    return [float(sample) for sample in value]
+
+
+def _accumulate_corpus_result(
+    result: Mapping[str, Any],
+    observation: Mapping[str, Any],
+    counts: _AggregateCounts,
+    hassil_latencies: list[float],
+) -> None:
+    """Accumulate paired observations under the HassIL-first production invariant.
+
+    ``direct_canonicalizer_correct`` is deliberately strict: the direct agent must
+    produce the expected semantics without raw fallback. ``baseline_correct`` records
+    whether untouched input succeeds through HassIL. Production behavior is the union
+    of those results:
+
+    * a HassIL success is returned immediately and protects any weaker direct result;
+    * after a HassIL failure, the direct canonicalizer result determines correctness;
+    * a direct success after a HassIL failure is a recovered case.
+
+    Effective correctness, mismatch, and fallback are mutually exclusive outcomes and
+    therefore partition the corpus. Direct-path counterparts remain available under
+    explicit ``direct_canonicalizer_*`` fields so the report still exposes standalone
+    canonicalizer quality independently of the shortcut.
+    """
+    counts.corpus_case_count += 1
+    counts.canonical_match_count += int(bool(observation.get("canonical_match")))
+    hassil_latencies.extend(
+        _numeric_latency_samples(
+            result.get("hassil_baseline_latency_samples_ms"),
+            "HassIL baseline",
+        )
+    )
+    baseline_observation = result.get("hassil_baseline_last_observation")
+    if not isinstance(baseline_observation, dict):
+        raise BenchmarkError("HassIL baseline observation is invalid")
+    fallback_observed = bool(observation.get("fallback_observed"))
+    baseline_fallback = bool(baseline_observation.get("fallback_observed"))
+    direct_canonicalizer_correct = bool(result.get("semantic_passed")) and not fallback_observed
+    baseline_correct = bool(result.get("hassil_baseline_passed")) and not baseline_fallback
+    effective_correct = baseline_correct or direct_canonicalizer_correct
+    counts.canonicalizer_correct_count += int(effective_correct)
+    counts.direct_canonicalizer_correct_count += int(direct_canonicalizer_correct)
+    counts.hassil_baseline_correct_count += int(baseline_correct)
+    counts.hassil_baseline_execution_success_count += int(
+        bool(baseline_observation.get("execution_success"))
+    )
+    counts.recovered_case_count += int(direct_canonicalizer_correct and not baseline_correct)
+    counts.shortcut_protected_case_count += int(
+        baseline_correct and not direct_canonicalizer_correct
+    )
+    counts.both_correct_count += int(direct_canonicalizer_correct and baseline_correct)
+    counts.both_incorrect_count += int(not direct_canonicalizer_correct and not baseline_correct)
+    counts.resolved_entity_slot_match_count += int(
+        observation.get("slot_match_method") == "resolved_entities"
+    )
+    counts.canonical_oracle_valid_count += int(
+        observation.get("canonical_oracle_intent") is not None
+        and observation.get("canonical_oracle_unmatched_count") == 0
+    )
+    counts.corpus_label_intent_match_count += int(
+        bool(observation.get("corpus_label_intent_matches_oracle"))
+    )
+    counts.corpus_label_slot_match_count += int(
+        bool(observation.get("corpus_label_slots_match_oracle"))
+    )
+    expected_fallback = bool(result.get("expected_fallback"))
+    intent_slots_ok = bool(observation.get("intent_correct")) and bool(
+        observation.get("slots_correct")
+    )
+    counts.intent_slot_correct += int(
+        intent_slots_ok and not expected_fallback and not fallback_observed
+    )
+    direct_mismatch = not fallback_observed and (expected_fallback or not intent_slots_ok)
+    counts.direct_canonicalizer_fallback_count += int(fallback_observed)
+    counts.direct_canonicalizer_mismatch_count += int(direct_mismatch)
+    counts.fallback_count += int(not baseline_correct and fallback_observed)
+    counts.mismatch_count += int(not baseline_correct and direct_mismatch)
+
+
+def _collect_aggregate_values(
+    case_results: Sequence[Mapping[str, Any]],
+) -> tuple[_AggregateCounts, list[float], list[float]]:
+    """Collect counts and latency samples from case results."""
+    counts = _AggregateCounts()
+    latencies: list[float] = []
+    hassil_latencies: list[float] = []
     for result in case_results:
-        samples = result["latency_samples_ms"]
-        if not isinstance(samples, list) or not all(
-            isinstance(sample, int | float) for sample in samples
-        ):
-            raise BenchmarkError("Case result latency samples are invalid")
-        all_latencies.extend(float(sample) for sample in samples)
-        passed_requests += int(result["measured_passes"])
-        total_requests += int(result["measured_requests"])
-        passed_cases += int(bool(result["passed"]))
+        latencies.extend(_numeric_latency_samples(result["latency_samples_ms"], "Case result"))
+        counts.passed_requests += int(result["measured_passes"])
+        counts.total_requests += int(result["measured_requests"])
+        counts.passed_cases += int(bool(result["passed"]))
         observation = result.get("last_observation")
         if not isinstance(observation, dict):
             raise BenchmarkError("Case result observation is invalid")
-        execution_success_count += int(bool(observation.get("execution_success")))
-        canonical_match_count += int(bool(observation.get("canonical_match")))
-        if result.get("oracle") != "intent_slot":
-            continue
-        corpus_case_count += 1
-        baseline_samples = result.get("hassil_baseline_latency_samples_ms")
-        baseline_observation = result.get("hassil_baseline_last_observation")
-        if not isinstance(baseline_samples, list) or not all(
-            isinstance(sample, int | float) for sample in baseline_samples
-        ):
-            raise BenchmarkError("HassIL baseline latency samples are invalid")
-        if not isinstance(baseline_observation, dict):
-            raise BenchmarkError("HassIL baseline observation is invalid")
-        hassil_baseline_latencies.extend(float(sample) for sample in baseline_samples)
-        fallback_observed = bool(observation.get("fallback_observed"))
-        hassil_baseline_fallback = bool(baseline_observation.get("fallback_observed"))
-        canonicalizer_correct = bool(result.get("semantic_passed")) and not fallback_observed
-        hassil_baseline_correct = (
-            bool(result.get("hassil_baseline_passed")) and not hassil_baseline_fallback
-        )
-        canonicalizer_correct_count += int(canonicalizer_correct)
-        hassil_baseline_correct_count += int(hassil_baseline_correct)
-        hassil_baseline_execution_success_count += int(
-            bool(baseline_observation.get("execution_success"))
-        )
-        recovered_case_count += int(canonicalizer_correct and not hassil_baseline_correct)
-        regressed_case_count += int(hassil_baseline_correct and not canonicalizer_correct)
-        both_correct_count += int(canonicalizer_correct and hassil_baseline_correct)
-        both_incorrect_count += int(not canonicalizer_correct and not hassil_baseline_correct)
-        resolved_entity_slot_match_count += int(
-            observation.get("slot_match_method") == "resolved_entities"
-        )
-        canonical_oracle_valid_count += int(
-            observation.get("canonical_oracle_intent") is not None
-            and observation.get("canonical_oracle_unmatched_count") == 0
-        )
-        corpus_label_intent_match_count += int(
-            bool(observation.get("corpus_label_intent_matches_oracle"))
-        )
-        corpus_label_slot_match_count += int(
-            bool(observation.get("corpus_label_slots_match_oracle"))
-        )
-        expected_fallback = bool(result.get("expected_fallback"))
-        intent_slots_ok = bool(observation.get("intent_correct")) and bool(
-            observation.get("slots_correct")
-        )
-        intent_slot_correct += int(
-            intent_slots_ok and not expected_fallback and not fallback_observed
-        )
-        fallback_count += int(fallback_observed)
-        if expected_fallback:
-            mismatch_count += int(not fallback_observed)
-        elif not fallback_observed:
-            mismatch_count += int(not intent_slots_ok)
-    latency_summary = _latency_statistics(all_latencies)
-    summary = {
-        "case_count": len(case_results),
-        "passed_cases": passed_cases,
-        "failed_cases": len(case_results) - passed_cases,
-        "request_count": total_requests,
-        "passed_requests": passed_requests,
-        "accuracy_pct": 100.0 * passed_requests / total_requests,
-        "latency_ms": latency_summary,
+        counts.execution_success_count += int(bool(observation.get("execution_success")))
+        if result.get("oracle") == "intent_slot":
+            _accumulate_corpus_result(
+                result,
+                observation,
+                counts,
+                hassil_latencies,
+            )
+    return counts, latencies, hassil_latencies
+
+
+def _base_aggregate_summary(
+    case_count: int,
+    counts: _AggregateCounts,
+    latency_summary: Mapping[str, float],
+) -> dict[str, Any]:
+    """Return direct-request policy and latency metrics shared by all suites.
+
+    These fields describe the request actually sent to the benchmarked agent and are
+    intentionally not rewritten by HassIL-first protection. Corpus-only effective
+    accuracy and shortcut protection are added separately by
+    :func:`_corpus_aggregate_summary`.
+    """
+    return {
+        "case_count": case_count,
+        "passed_cases": counts.passed_cases,
+        "failed_cases": case_count - counts.passed_cases,
+        "request_count": counts.total_requests,
+        "passed_requests": counts.passed_requests,
+        "accuracy_pct": 100.0 * counts.passed_requests / counts.total_requests,
+        "latency_ms": dict(latency_summary),
         "request_path_throughput_rps": 1000.0 / latency_summary["mean"],
-        "execution_success_count": execution_success_count,
-        "execution_success_pct": 100.0 * execution_success_count / len(case_results),
+        "execution_success_count": counts.execution_success_count,
+        "execution_success_pct": 100.0 * counts.execution_success_count / case_count,
     }
-    if corpus_case_count:
-        hassil_latency_summary = _latency_statistics(hassil_baseline_latencies)
-        canonicalizer_accuracy_pct = 100.0 * canonicalizer_correct_count / corpus_case_count
-        hassil_accuracy_pct = 100.0 * hassil_baseline_correct_count / corpus_case_count
-        summary |= {
-            "corpus_case_count": corpus_case_count,
-            "canonicalizer_correct_count": canonicalizer_correct_count,
-            "canonicalizer_accuracy_pct": canonicalizer_accuracy_pct,
-            "hassil_baseline_correct_count": hassil_baseline_correct_count,
-            "hassil_baseline_accuracy_pct": hassil_accuracy_pct,
-            "accuracy_uplift_pp": canonicalizer_accuracy_pct - hassil_accuracy_pct,
-            "recovered_case_count": recovered_case_count,
-            "regressed_case_count": regressed_case_count,
-            "net_recovered_case_count": recovered_case_count - regressed_case_count,
-            "both_correct_count": both_correct_count,
-            "both_incorrect_count": both_incorrect_count,
-            "hassil_baseline_execution_success_count": (hassil_baseline_execution_success_count),
-            "hassil_baseline_execution_success_pct": 100.0
-            * hassil_baseline_execution_success_count
-            / corpus_case_count,
-            "hassil_baseline_latency_ms": hassil_latency_summary,
-            "canonicalizer_mean_latency_overhead_ms": latency_summary["mean"]
-            - hassil_latency_summary["mean"],
-            "canonicalizer_p95_latency_overhead_ms": latency_summary["p95"]
-            - hassil_latency_summary["p95"],
-            "resolved_entity_slot_match_count": resolved_entity_slot_match_count,
-            "intent_slot_correct": intent_slot_correct,
-            "intent_slot_accuracy_pct": 100.0 * intent_slot_correct / corpus_case_count,
-            "fallback_count": fallback_count,
-            "fallback_rate_pct": 100.0 * fallback_count / corpus_case_count,
-            "mismatch_count": mismatch_count,
-            "mismatch_rate_pct": 100.0 * mismatch_count / corpus_case_count,
-            "canonical_match_count": canonical_match_count,
-            "canonical_match_pct": 100.0 * canonical_match_count / corpus_case_count,
-            "canonical_oracle_valid_count": canonical_oracle_valid_count,
-            "canonical_oracle_valid_pct": 100.0 * canonical_oracle_valid_count / corpus_case_count,
-            "corpus_label_intent_match_count": corpus_label_intent_match_count,
-            "corpus_label_intent_match_pct": 100.0
-            * corpus_label_intent_match_count
-            / corpus_case_count,
-            "corpus_label_slot_match_count": corpus_label_slot_match_count,
-            "corpus_label_slot_match_pct": 100.0
-            * corpus_label_slot_match_count
-            / corpus_case_count,
-        }
+
+
+def _corpus_aggregate_summary(
+    counts: _AggregateCounts,
+    latency_summary: Mapping[str, float],
+    hassil_latencies: Sequence[float],
+) -> dict[str, Any]:
+    """Return effective production metrics plus unprotected direct diagnostics.
+
+    The historical canonicalizer accuracy, mismatch, and fallback fields describe
+    effective Assist behavior: HassIL receives the untouched query first, and direct
+    canonicalizer outcomes matter only when HassIL fails. Together those three
+    outcomes partition the corpus. ``direct_canonicalizer_*`` keeps the unprotected
+    direct-agent measurements available for engineering analysis.
+    ``shortcut_protected_*`` makes the difference explicit instead of mislabeling
+    protected queries as regressions.
+    """
+    case_count = counts.corpus_case_count
+    hassil_latency = _latency_statistics(hassil_latencies)
+    canonicalizer_accuracy = 100.0 * counts.canonicalizer_correct_count / case_count
+    direct_canonicalizer_accuracy = 100.0 * counts.direct_canonicalizer_correct_count / case_count
+    hassil_accuracy = 100.0 * counts.hassil_baseline_correct_count / case_count
+    return {
+        "corpus_case_count": case_count,
+        "canonicalizer_correct_count": counts.canonicalizer_correct_count,
+        "canonicalizer_accuracy_pct": canonicalizer_accuracy,
+        "direct_canonicalizer_correct_count": counts.direct_canonicalizer_correct_count,
+        "direct_canonicalizer_accuracy_pct": direct_canonicalizer_accuracy,
+        "direct_canonicalizer_fallback_count": counts.direct_canonicalizer_fallback_count,
+        "direct_canonicalizer_fallback_rate_pct": (
+            100.0 * counts.direct_canonicalizer_fallback_count / case_count
+        ),
+        "direct_canonicalizer_mismatch_count": counts.direct_canonicalizer_mismatch_count,
+        "direct_canonicalizer_mismatch_rate_pct": (
+            100.0 * counts.direct_canonicalizer_mismatch_count / case_count
+        ),
+        "hassil_baseline_correct_count": counts.hassil_baseline_correct_count,
+        "hassil_baseline_accuracy_pct": hassil_accuracy,
+        "accuracy_uplift_pp": canonicalizer_accuracy - hassil_accuracy,
+        "recovered_case_count": counts.recovered_case_count,
+        "shortcut_protected_case_count": counts.shortcut_protected_case_count,
+        "shortcut_protected_rate_pct": (100.0 * counts.shortcut_protected_case_count / case_count),
+        "both_correct_count": counts.both_correct_count,
+        "both_incorrect_count": counts.both_incorrect_count,
+        "hassil_baseline_execution_success_count": (counts.hassil_baseline_execution_success_count),
+        "hassil_baseline_execution_success_pct": 100.0
+        * counts.hassil_baseline_execution_success_count
+        / case_count,
+        "hassil_baseline_latency_ms": hassil_latency,
+        "canonicalizer_mean_latency_overhead_ms": (
+            latency_summary["mean"] - hassil_latency["mean"]
+        ),
+        "canonicalizer_p95_latency_overhead_ms": (latency_summary["p95"] - hassil_latency["p95"]),
+        "resolved_entity_slot_match_count": counts.resolved_entity_slot_match_count,
+        "intent_slot_correct": counts.intent_slot_correct,
+        "intent_slot_accuracy_pct": 100.0 * counts.intent_slot_correct / case_count,
+        "fallback_count": counts.fallback_count,
+        "fallback_rate_pct": 100.0 * counts.fallback_count / case_count,
+        "mismatch_count": counts.mismatch_count,
+        "mismatch_rate_pct": 100.0 * counts.mismatch_count / case_count,
+        "canonical_match_count": counts.canonical_match_count,
+        "canonical_match_pct": 100.0 * counts.canonical_match_count / case_count,
+        "canonical_oracle_valid_count": counts.canonical_oracle_valid_count,
+        "canonical_oracle_valid_pct": 100.0 * counts.canonical_oracle_valid_count / case_count,
+        "corpus_label_intent_match_count": counts.corpus_label_intent_match_count,
+        "corpus_label_intent_match_pct": 100.0
+        * counts.corpus_label_intent_match_count
+        / case_count,
+        "corpus_label_slot_match_count": counts.corpus_label_slot_match_count,
+        "corpus_label_slot_match_pct": 100.0 * counts.corpus_label_slot_match_count / case_count,
+    }
+
+
+def _aggregate(case_results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Aggregate direct observations and shortcut-aware corpus effectiveness."""
+    counts, latencies, hassil_latencies = _collect_aggregate_values(case_results)
+    latency_summary = _latency_statistics(latencies)
+    summary = _base_aggregate_summary(
+        len(case_results),
+        counts,
+        latency_summary,
+    )
+    if counts.corpus_case_count:
+        summary.update(
+            _corpus_aggregate_summary(
+                counts,
+                latency_summary,
+                hassil_latencies,
+            )
+        )
     return summary
 
 
@@ -2191,7 +2454,6 @@ def align_table(
     else:
         aligns = list(alignments)
         if len(aligns) < ncols:
-            # Pad with last alignment character to match column count
             aligns.extend([aligns[-1]] * (ncols - len(aligns)))
         aligns = aligns[:ncols]
 
@@ -2249,8 +2511,8 @@ def _md_aligned_table(
     return lines
 
 
-def _write_markdown(path: Path, report: Mapping[str, Any]) -> None:
-    """Write a comprehensive human-readable managed-live report."""
+def _markdown_summary(report: Mapping[str, Any]) -> tuple[list[str], bool]:
+    """Return report heading and summary lines."""
     summary = report["summary"]
     fixture = report["environment"]["fixture"]
     language_support = report.get("language_support", {})
@@ -2272,15 +2534,23 @@ def _write_markdown(path: Path, report: Mapping[str, Any]) -> None:
     if has_corpus_metrics:
         lines.extend(
             (
-                f"- Canonicalizer semantic accuracy: {summary['canonicalizer_accuracy_pct']:.2f}%",
+                f"- Assist Canonicalizer semantic accuracy: "
+                f"{summary['canonicalizer_accuracy_pct']:.2f}%",
+                f"- Direct canonicalizer semantic accuracy: "
+                f"{summary['direct_canonicalizer_accuracy_pct']:.2f}%",
                 f"- Direct HassIL semantic accuracy: "
                 f"{summary['hassil_baseline_accuracy_pct']:.2f}%",
-                f"- Canonicalizer uplift over HassIL: "
+                f"- Assist Canonicalizer uplift over HassIL: "
                 f"{summary['accuracy_uplift_pp']:+.2f} percentage points",
-                f"- Cases recovered/regressed versus HassIL: "
-                f"{summary['recovered_case_count']}/{summary['regressed_case_count']}",
+                f"- Cases recovered/regressions prevented: "
+                f"{summary['recovered_case_count']}/"
+                f"{summary['shortcut_protected_case_count']}",
                 f"- Canonicalizer fallback rate: {summary['fallback_rate_pct']:.2f}%",
                 f"- Canonicalizer mismatch rate: {summary['mismatch_rate_pct']:.2f}%",
+                f"- Direct canonicalizer fallback rate: "
+                f"{summary['direct_canonicalizer_fallback_rate_pct']:.2f}%",
+                f"- Direct canonicalizer mismatch rate: "
+                f"{summary['direct_canonicalizer_mismatch_rate_pct']:.2f}%",
                 f"- Canonicalizer non-error responses: {summary['execution_success_pct']:.2f}%",
                 f"- Direct HassIL non-error responses: "
                 f"{summary['hassil_baseline_execution_success_pct']:.2f}%",
@@ -2299,168 +2569,203 @@ def _write_markdown(path: Path, report: Mapping[str, Any]) -> None:
                 f"{summary['corpus_case_count']}",
             )
         )
+    return lines, has_corpus_metrics
 
-    breakdowns = report.get("breakdowns", {})
-    languages = breakdowns.get("languages", {}) if isinstance(breakdowns, dict) else {}
-    if isinstance(languages, dict) and languages:
-        lines.extend(
+
+def _markdown_language_table(
+    languages: Mapping[str, Mapping[str, Any]],
+    has_corpus_metrics: bool,
+) -> list[str]:
+    """Return the per-language results table."""
+    lines = ["", "## Per-language production results", ""]
+    if has_corpus_metrics:
+        headers = (
+            "Language",
+            "Cases",
+            "Assist Canonicalizer",
+            "Direct canon",
+            "HassIL",
+            "Uplift pp",
+            "Recovered",
+            "Regressions prevented",
+            "Fallback",
+            "Mismatch",
+            "Canon mean",
+            "Canon p50",
+            "Canon p95",
+            "HassIL mean",
+            "HassIL p50",
+            "HassIL p95",
+        )
+        alignments = "<>>>>>>>>>>>>>>>"
+        rows = [
             (
-                "",
-                "## Per-language production results",
-                "",
+                f"`{language}`",
+                str(metrics["case_count"]),
+                f"{metrics.get('canonicalizer_accuracy_pct', 0.0):.2f}%",
+                f"{metrics.get('direct_canonicalizer_accuracy_pct', 0.0):.2f}%",
+                f"{metrics.get('hassil_baseline_accuracy_pct', 0.0):.2f}%",
+                f"{metrics.get('accuracy_uplift_pp', 0.0):+.2f}",
+                str(metrics.get("recovered_case_count", 0)),
+                str(metrics.get("shortcut_protected_case_count", 0)),
+                f"{metrics.get('fallback_rate_pct', 0.0):.2f}%",
+                f"{metrics.get('mismatch_rate_pct', 0.0):.2f}%",
+                f"{metrics['latency_ms']['mean']:.3f}",
+                f"{metrics['latency_ms']['median']:.3f}",
+                f"{metrics['latency_ms']['p95']:.3f}",
+                f"{metrics.get('hassil_baseline_latency_ms', {}).get('mean', 0.0):.3f}",
+                f"{metrics.get('hassil_baseline_latency_ms', {}).get('median', 0.0):.3f}",
+                f"{metrics.get('hassil_baseline_latency_ms', {}).get('p95', 0.0):.3f}",
             )
+            for language, metrics in languages.items()
+        ]
+    else:
+        headers = (
+            "Language",
+            "Cases",
+            "Passed",
+            "Pass rate",
+            "Canon mean",
+            "Canon p50",
+            "Canon p95",
         )
-        if has_corpus_metrics:
-            lang_headers = (
-                "Language",
-                "Cases",
-                "Canonicalizer",
-                "HassIL",
-                "Uplift pp",
-                "Recovered",
-                "Regressed",
-                "Fallback",
-                "Mismatch",
-                "Canon mean",
-                "Canon p50",
-                "Canon p95",
-                "HassIL mean",
-                "HassIL p50",
-                "HassIL p95",
-            )
-            lang_aligns = "<>>>>>>>>>>>>>>"
-            lang_rows = [
-                (
-                    f"`{language}`",
-                    str(metrics["case_count"]),
-                    f"{metrics.get('canonicalizer_accuracy_pct', 0.0):.2f}%",
-                    f"{metrics.get('hassil_baseline_accuracy_pct', 0.0):.2f}%",
-                    f"{metrics.get('accuracy_uplift_pp', 0.0):+.2f}",
-                    str(metrics.get("recovered_case_count", 0)),
-                    str(metrics.get("regressed_case_count", 0)),
-                    f"{metrics.get('fallback_rate_pct', 0.0):.2f}%",
-                    f"{metrics.get('mismatch_rate_pct', 0.0):.2f}%",
-                    f"{metrics['latency_ms']['mean']:.3f}",
-                    f"{metrics['latency_ms']['median']:.3f}",
-                    f"{metrics['latency_ms']['p95']:.3f}",
-                    f"{metrics.get('hassil_baseline_latency_ms', {}).get('mean', 0.0):.3f}",
-                    f"{metrics.get('hassil_baseline_latency_ms', {}).get('median', 0.0):.3f}",
-                    f"{metrics.get('hassil_baseline_latency_ms', {}).get('p95', 0.0):.3f}",
-                )
-                for language, metrics in languages.items()
-            ]
-        else:
-            lang_headers = (
-                "Language",
-                "Cases",
-                "Passed",
-                "Pass rate",
-                "Canon mean",
-                "Canon p50",
-                "Canon p95",
-            )
-            lang_aligns = "<>>>>>>"
-            lang_rows = [
-                (
-                    f"`{language}`",
-                    str(metrics["case_count"]),
-                    str(metrics.get("passed_cases", 0)),
-                    f"{metrics.get('accuracy_pct', 0.0):.2f}%",
-                    f"{metrics['latency_ms']['mean']:.3f}",
-                    f"{metrics['latency_ms']['median']:.3f}",
-                    f"{metrics['latency_ms']['p95']:.3f}",
-                )
-                for language, metrics in languages.items()
-            ]
-        lines.extend(_md_aligned_table(lang_headers, lang_aligns, lang_rows))
-    categories = breakdowns.get("categories", {}) if isinstance(breakdowns, dict) else {}
-    if isinstance(categories, dict) and categories:
-        lines.extend(
+        alignments = "<>>>>>>"
+        rows = [
             (
-                "",
-                "## Per-category production results",
-                "",
+                f"`{language}`",
+                str(metrics["case_count"]),
+                str(metrics.get("passed_cases", 0)),
+                f"{metrics.get('accuracy_pct', 0.0):.2f}%",
+                f"{metrics['latency_ms']['mean']:.3f}",
+                f"{metrics['latency_ms']['median']:.3f}",
+                f"{metrics['latency_ms']['p95']:.3f}",
             )
+            for language, metrics in languages.items()
+        ]
+    lines.extend(_md_aligned_table(headers, alignments, rows))
+    return lines
+
+
+def _markdown_category_table(
+    categories: Mapping[str, Mapping[str, Any]],
+    has_corpus_metrics: bool,
+) -> list[str]:
+    """Return the per-category results table."""
+    lines = ["", "## Per-category production results", ""]
+    if has_corpus_metrics:
+        headers = (
+            "Category",
+            "Cases",
+            "Assist Canonicalizer",
+            "Direct canon",
+            "HassIL",
+            "Uplift pp",
+            "Recovered",
+            "Regressions prevented",
+            "Fallback",
+            "Mismatch",
         )
-        if has_corpus_metrics:
-            cat_headers = (
-                "Category",
-                "Cases",
-                "Canonicalizer",
-                "HassIL",
-                "Uplift pp",
-                "Recovered",
-                "Regressed",
-                "Fallback",
-                "Mismatch",
+        alignments = "<>>>>>>>>>"
+        rows = [
+            (
+                f"`{category}`",
+                str(metrics["case_count"]),
+                f"{metrics.get('canonicalizer_accuracy_pct', 0.0):.2f}%",
+                f"{metrics.get('direct_canonicalizer_accuracy_pct', 0.0):.2f}%",
+                f"{metrics.get('hassil_baseline_accuracy_pct', 0.0):.2f}%",
+                f"{metrics.get('accuracy_uplift_pp', 0.0):+.2f}",
+                str(metrics.get("recovered_case_count", 0)),
+                str(metrics.get("shortcut_protected_case_count", 0)),
+                f"{metrics.get('fallback_rate_pct', 0.0):.2f}%",
+                f"{metrics.get('mismatch_rate_pct', 0.0):.2f}%",
             )
-            cat_aligns = "<>>>>>>>>"
-            cat_rows = [
-                (
-                    f"`{category}`",
-                    str(metrics["case_count"]),
-                    f"{metrics.get('canonicalizer_accuracy_pct', 0.0):.2f}%",
-                    f"{metrics.get('hassil_baseline_accuracy_pct', 0.0):.2f}%",
-                    f"{metrics.get('accuracy_uplift_pp', 0.0):+.2f}",
-                    str(metrics.get("recovered_case_count", 0)),
-                    str(metrics.get("regressed_case_count", 0)),
-                    f"{metrics.get('fallback_rate_pct', 0.0):.2f}%",
-                    f"{metrics.get('mismatch_rate_pct', 0.0):.2f}%",
-                )
-                for category, metrics in categories.items()
-            ]
-        else:
-            cat_headers = ("Category", "Cases", "Passed", "Pass rate")
-            cat_aligns = "<>>>"
-            cat_rows = [
-                (
-                    f"`{category}`",
-                    str(metrics["case_count"]),
-                    str(metrics.get("passed_cases", 0)),
-                    f"{metrics.get('accuracy_pct', 0.0):.2f}%",
-                )
-                for category, metrics in categories.items()
-            ]
-        lines.extend(_md_aligned_table(cat_headers, cat_aligns, cat_rows))
-    lines.extend(
-        (
-            "",
-            "## Case results",
-            "",
-        )
-    )
-    case_headers = (
+            for category, metrics in categories.items()
+        ]
+    else:
+        headers = ("Category", "Cases", "Passed", "Pass rate")
+        alignments = "<>>>"
+        rows = [
+            (
+                f"`{category}`",
+                str(metrics["case_count"]),
+                str(metrics.get("passed_cases", 0)),
+                f"{metrics.get('accuracy_pct', 0.0):.2f}%",
+            )
+            for category, metrics in categories.items()
+        ]
+    lines.extend(_md_aligned_table(headers, alignments, rows))
+    return lines
+
+
+def _markdown_case_table(cases: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Return direct, protected, and effective correctness for every case.
+
+    ``Direct correct`` applies the strict direct-agent rule used by aggregation:
+    expected semantics without raw fallback. ``Integration correct`` additionally
+    accepts a paired HassIL success, and ``Regression prevented`` identifies exactly
+    the cases added by that production shortcut.
+    """
+    headers = (
         "Case",
         "Language",
         "Category",
         "Policy pass",
-        "Canonicalizer correct",
+        "Direct correct",
+        "Integration correct",
+        "Regression prevented",
         "HassIL correct",
         "Fallback",
         "Canon mean ms",
         "HassIL mean ms",
     )
-    case_rows = []
-    for case in report["cases"]:
+    rows = []
+    for case in cases:
         observation = case["last_observation"]
         hassil_passed = case.get("hassil_baseline_passed")
+        direct_correct = bool(case.get("semantic_passed")) and not bool(
+            observation.get("fallback_observed")
+        )
+        effective_correct = bool(hassil_passed) or direct_correct
+        shortcut_protected = bool(hassil_passed) and not direct_correct
         hassil_latency = case.get("hassil_baseline_latency_ms")
         hassil_result = ("yes" if hassil_passed else "no") if hassil_passed is not None else "n/a"
         hassil_mean = f"{hassil_latency['mean']:.3f}" if isinstance(hassil_latency, dict) else "n/a"
-        case_rows.append(
+        rows.append(
             (
                 f"`{case['id']}`",
                 f"`{case['language']}`",
                 f"`{case['category']}`",
                 "yes" if case["passed"] else "no",
-                "yes" if case.get("semantic_passed") else "no",
+                "yes" if direct_correct else "no",
+                "yes" if effective_correct else "no",
+                "yes" if shortcut_protected else "no",
                 hassil_result,
                 "yes" if observation.get("fallback_observed") else "no",
                 f"{case['latency_ms']['mean']:.3f}",
                 hassil_mean,
             )
         )
-    lines.extend(_md_aligned_table(case_headers, "<><^^^^>>", case_rows))
+    lines = ["", "## Case results", ""]
+    lines.extend(_md_aligned_table(headers, "<><^^^^^^>>", rows))
+    return lines
+
+
+def _write_markdown(path: Path, report: Mapping[str, Any]) -> None:
+    """Write a comprehensive human-readable managed-live report."""
+    lines, has_corpus_metrics = _markdown_summary(report)
+    breakdowns = report.get("breakdowns", {})
+    if isinstance(breakdowns, dict):
+        languages = breakdowns.get("languages", {})
+        if isinstance(languages, dict) and languages:
+            lines.extend(_markdown_language_table(languages, has_corpus_metrics))
+        categories = breakdowns.get("categories", {})
+        if isinstance(categories, dict) and categories:
+            lines.extend(_markdown_category_table(categories, has_corpus_metrics))
+    lines.extend(
+        _markdown_case_table(
+            cast(Sequence[Mapping[str, Any]], report["cases"]),
+        )
+    )
     if failures := report.get("case_failures", []):
         lines.extend(("", "## Failed live oracles", ""))
         lines.extend(f"- {failure}" for failure in failures)
@@ -2504,226 +2809,454 @@ def _select_cases(
     return selected
 
 
-async def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
-    """Own the full ephemeral Home Assistant benchmark lifecycle."""
+@dataclass(frozen=True, slots=True)
+class _BenchmarkInputs:
+    """Static inputs prepared before Home Assistant starts."""
+
+    dependencies: Mapping[str, Any]
+    fixture: Mapping[str, Any]
+    suite_id: str
+    cases: tuple[BenchmarkCase, ...]
+    languages: tuple[str, ...]
+    categories: tuple[str, ...]
+    language_smoke_commands: tuple[LanguageSmokeCommand, ...]
+    integration_source_sha256: str
+    language_smoke_manifest_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class _LiveBenchmarkResults:
+    """Results collected from the managed Home Assistant session."""
+
+    fixture_state: Mapping[str, Any]
+    prepared_languages: Any
+    case_results: list[dict[str, Any]]
+    suite_failures: list[str]
+    language_smoke: Any
+
+
+def _language_smoke_manifest(
+    commands: Sequence[LanguageSmokeCommand],
+) -> list[dict[str, str]]:
+    """Return the stable language-smoke fingerprint payload."""
+    return [
+        {
+            "language": command.language,
+            "text": command.text,
+            "target_domain": command.target_domain,
+            "target_entity_id": command.target_entity_id,
+        }
+        for command in commands
+    ]
+
+
+def _benchmark_inputs(args: argparse.Namespace) -> _BenchmarkInputs:
+    """Load and fingerprint all static benchmark inputs."""
     dependencies = verify_benchmark_dependencies()
     fixture = _load_json_object(FIXTURE_PATH, "benchmark fixture")
     suite_id, all_cases = load_cases(args.cases)
     languages = _comma_separated_values(args.languages)
     categories = _comma_separated_values(args.categories)
     cases = _select_cases(all_cases, languages, categories, args.case_limit)
-    language_smoke_commands = build_language_smoke_commands()
-    integration_source_sha256 = _tree_sha256(INTEGRATION_PATH)
-    language_smoke_manifest_sha256 = _canonical_payload_sha256(
-        [
-            {
-                "language": command.language,
-                "text": command.text,
-                "target_domain": command.target_domain,
-                "target_entity_id": command.target_entity_id,
-            }
-            for command in language_smoke_commands
-        ]
+    smoke_commands = build_language_smoke_commands()
+    return _BenchmarkInputs(
+        dependencies=dependencies,
+        fixture=fixture,
+        suite_id=suite_id,
+        cases=cases,
+        languages=languages,
+        categories=categories,
+        language_smoke_commands=smoke_commands,
+        integration_source_sha256=_tree_sha256(INTEGRATION_PATH),
+        language_smoke_manifest_sha256=_canonical_payload_sha256(
+            _language_smoke_manifest(smoke_commands)
+        ),
     )
+
+
+async def _run_live_benchmark_session(
+    session: aiohttp.ClientSession,
+    managed: ManagedProcess,
+    inputs: _BenchmarkInputs,
+    args: argparse.Namespace,
+) -> _LiveBenchmarkResults:
+    """Prepare Home Assistant and execute all live benchmark requests."""
+    await _wait_for_http(session, managed)
+    print("HA_HTTP_READY", flush=True)
+    token = await _onboard(session)
+    session.headers.update({"Authorization": f"Bearer {token}"})
+    await _wait_for_fixture(session, inputs.fixture)
+    await _create_config_entry(session, "shopping_list")
+    await _call_service(session, "assist_canonicalizer_benchmark", "reapply")
+    fixture_state = await _wait_for_fixture(session, inputs.fixture)
+    print("BENCHMARK_FIXTURE_VERIFIED", flush=True)
+    config = await _request_json(session, "GET", "/api/config")
+    if not isinstance(config, dict):
+        raise BenchmarkError("Home Assistant config response must be an object")
+    if config.get("version") != inputs.dependencies["homeassistant"]:
+        raise BenchmarkError(
+            "Home Assistant API version differs from the verified Python distribution: "
+            f"{config.get('version')} != {inputs.dependencies['homeassistant']}"
+        )
+    agent_id = await _create_integration_entry(session)
+    await _wait_for_agent(session)
+    prepared_languages = await _prepare_languages(
+        session,
+        tuple(
+            {case.language for case in inputs.cases}
+            | {command.language for command in inputs.language_smoke_commands}
+        ),
+    )
+    case_results, suite_failures = await _execute_suite(
+        session,
+        inputs.cases,
+        agent_id,
+        args.iterations,
+        args.warmup,
+    )
+    language_smoke = await _execute_language_smoke(
+        session,
+        inputs.language_smoke_commands,
+        agent_id,
+    )
+    return _LiveBenchmarkResults(
+        fixture_state=fixture_state,
+        prepared_languages=prepared_languages,
+        case_results=case_results,
+        suite_failures=suite_failures,
+        language_smoke=language_smoke,
+    )
+
+
+def _benchmark_context_fingerprint(
+    args: argparse.Namespace,
+    inputs: _BenchmarkInputs,
+    fixture_state: Mapping[str, Any],
+    case_suite_sha256: str,
+    configuration_sha256: str,
+) -> str:
+    """Return the fingerprint for all benchmark comparison inputs."""
+    return _canonical_payload_sha256(
+        {
+            "homeassistant_version": inputs.dependencies["homeassistant"],
+            "python_version": sys.version.split()[0],
+            "dependencies": inputs.dependencies["packages"],
+            "fixture_fingerprint": fixture_state["fingerprint"],
+            "case_suite_sha256": case_suite_sha256,
+            "configuration_sha256": configuration_sha256,
+            "integration_source_sha256": inputs.integration_source_sha256,
+            "language_smoke_manifest_sha256": (inputs.language_smoke_manifest_sha256),
+            "iterations": args.iterations,
+            "warmup": args.warmup,
+            "device_id": BENCHMARK_DEVICE_ID,
+            "satellite_id": CONTEXT_SATELLITE_ID,
+        }
+    )
+
+
+def _benchmark_environment(
+    inputs: _BenchmarkInputs,
+    live: _LiveBenchmarkResults,
+    context_fingerprint: str,
+) -> dict[str, Any]:
+    """Return the report's reproducibility environment."""
+    fixture = inputs.fixture
+    return {
+        "homeassistant_version": inputs.dependencies["homeassistant"],
+        "python_version": sys.version.split()[0],
+        "dependencies": inputs.dependencies["packages"],
+        "installed_intent_languages": [
+            command.language for command in inputs.language_smoke_commands
+        ],
+        "integration_source_sha256": inputs.integration_source_sha256,
+        "language_smoke_manifest_sha256": inputs.language_smoke_manifest_sha256,
+        "context_fingerprint": context_fingerprint,
+        "fixture": {
+            "fixture_id": fixture["fixture_id"],
+            "schema_version": fixture["schema_version"],
+            "fingerprint": live.fixture_state["fingerprint"],
+            "counts": fixture["expected_counts"],
+            "domain_counts": fixture["expected_domain_counts"],
+            "runtime_state_count": live.fixture_state.get("runtime_state_count"),
+        },
+    }
+
+
+def _benchmark_settings(
+    args: argparse.Namespace,
+    inputs: _BenchmarkInputs,
+) -> dict[str, Any]:
+    """Return execution and interpretation settings recorded in the report.
+
+    The runner executes paired direct requests for deterministic observation. The
+    ``effective_result`` marker records that aggregation composes those observations
+    using the production HassIL-first invariant rather than treating the direct
+    canonicalizer request as the complete user-visible path.
+    """
+    return {
+        "iterations": args.iterations,
+        "warmup": args.warmup,
+        "serial_execution": True,
+        "endpoint": f"{HOST}:{PORT}",
+        "languages": list(inputs.languages),
+        "categories": list(inputs.categories),
+        "case_limit": args.case_limit,
+        "device_id": BENCHMARK_DEVICE_ID,
+        "satellite_id": CONTEXT_SATELLITE_ID,
+        "canonical_oracle": "executed_live_default_agent_canonical_control",
+        "hassil_baseline": "paired_original_query_to_live_default_agent",
+        "observed_result": "production_default_agent_trace_and_resolved_entities",
+        "effective_result": "hassil_first_shortcut_then_direct_canonicalizer",
+    }
+
+
+def _build_benchmark_report(
+    args: argparse.Namespace,
+    inputs: _BenchmarkInputs,
+    live: _LiveBenchmarkResults,
+    started_at: float,
+) -> dict[str, Any]:
+    """Build the managed-live benchmark report."""
+    summary = _aggregate(live.case_results)
+    case_suite_sha256 = _case_input_sha256(args.cases)
+    configuration_sha256 = _file_sha256(CONFIGURATION_PATH)
+    context_fingerprint = _benchmark_context_fingerprint(
+        args,
+        inputs,
+        live.fixture_state,
+        case_suite_sha256,
+        configuration_sha256,
+    )
+    return {
+        "report_schema_version": BENCHMARK_SCHEMA_VERSION,
+        "authoritative": True,
+        "benchmark_mode": "managed_live",
+        "execution_tier": "managed_live",
+        "suite_id": inputs.suite_id,
+        "case_suite_sha256": case_suite_sha256,
+        "case_input_files": _case_input_files(args.cases),
+        "configuration_sha256": configuration_sha256,
+        "environment": _benchmark_environment(inputs, live, context_fingerprint),
+        "settings": _benchmark_settings(args, inputs),
+        "prepared_languages": live.prepared_languages,
+        "language_support": {
+            "accuracy_gated": sorted(ACCURACY_GATED_LANGUAGES),
+            "compatibility_smoke_count": len(live.language_smoke),
+            "compatibility_smoke": live.language_smoke,
+        },
+        "summary": summary,
+        "breakdowns": _breakdowns(live.case_results),
+        "cases": live.case_results,
+        "startup_and_run_seconds": time.perf_counter() - started_at,
+    }
+
+
+def _threshold_failure(
+    actual: float,
+    threshold: float,
+    label: str,
+    direction: Literal["above", "below"],
+    prefix: str = "",
+) -> str | None:
+    """Return a formatted threshold failure when the limit is violated."""
+    violates = actual < threshold if direction == "below" else actual > threshold
+    if not violates:
+        return None
+    return f"{prefix}{label} {actual:.2f}% is {direction} {threshold:.2f}%"
+
+
+def _required_summary_metric(
+    summary: Mapping[str, Any],
+    metric: str,
+    *,
+    scope: str | None = None,
+) -> float:
+    """Return a required numeric summary metric."""
+    if metric not in summary:
+        scope_text = f" for {scope}" if scope is not None else ""
+        raise BenchmarkError(f"Benchmark summary metric {metric!r} is missing{scope_text}")
+    return float(summary[metric])
+
+
+def _global_threshold_failures(
+    args: argparse.Namespace,
+    summary: Mapping[str, Any],
+) -> list[str]:
+    """Return failures for whole-corpus HassIL-first production thresholds.
+
+    All three outcome gates use the same effective production partition. In
+    particular, the legacy-named ``--min-intent-slot-accuracy`` option reads
+    ``canonicalizer_accuracy_pct`` so a correct HassIL shortcut counts as success,
+    just as it does in the user-facing benchmark table. Explicit
+    ``direct_canonicalizer_*`` metrics remain diagnostics and are not used by these
+    production gates.
+    """
+    thresholds: tuple[
+        tuple[float | None, str, str, Literal["above", "below"]],
+        ...,
+    ] = (
+        (
+            args.min_intent_slot_accuracy,
+            "canonicalizer_accuracy_pct",
+            "production accuracy",
+            "below",
+        ),
+        (args.max_fallback_rate, "fallback_rate_pct", "fallback rate", "above"),
+        (args.max_mismatch_rate, "mismatch_rate_pct", "mismatch rate", "above"),
+    )
+    return [
+        failure
+        for threshold, metric, label, direction in thresholds
+        if threshold is not None
+        and (
+            failure := _threshold_failure(
+                _required_summary_metric(summary, metric),
+                threshold,
+                label,
+                direction,
+            )
+        )
+    ]
+
+
+def _language_threshold_failures(
+    args: argparse.Namespace,
+    language_summaries: Mapping[str, Mapping[str, Any]],
+) -> list[str]:
+    """Return per-language failures from the HassIL-first outcome partition.
+
+    This deliberately mirrors :func:`_global_threshold_failures`: protected cases
+    contribute to effective accuracy and cannot also contribute to mismatch or
+    fallback. Direct-agent metrics remain available in each language summary for
+    separate diagnosis.
+    """
+    thresholds: tuple[
+        tuple[float | None, str, str, Literal["above", "below"]],
+        ...,
+    ] = (
+        (
+            args.min_language_intent_slot_accuracy,
+            "canonicalizer_accuracy_pct",
+            "production accuracy",
+            "below",
+        ),
+        (
+            args.max_language_fallback_rate,
+            "fallback_rate_pct",
+            "fallback rate",
+            "above",
+        ),
+        (
+            args.max_language_mismatch_rate,
+            "mismatch_rate_pct",
+            "mismatch rate",
+            "above",
+        ),
+    )
+    return [
+        failure
+        for language, summary in sorted(language_summaries.items())
+        for threshold, metric, label, direction in thresholds
+        if threshold is not None
+        and (
+            failure := _threshold_failure(
+                _required_summary_metric(summary, metric, scope=language.upper()),
+                threshold,
+                label,
+                direction,
+                prefix=f"{language.upper()}: ",
+            )
+        )
+    ]
+
+
+def _benchmark_threshold_failures(
+    args: argparse.Namespace,
+    report: Mapping[str, Any],
+) -> list[str]:
+    """Return all configured benchmark threshold failures."""
+    summary = cast(Mapping[str, Any], report["summary"])
+    breakdowns = cast(Mapping[str, Any], report["breakdowns"])
+    language_summaries = cast(
+        Mapping[str, Mapping[str, Any]],
+        breakdowns.get("languages", {}),
+    )
+    return [
+        *_global_threshold_failures(args, summary),
+        *_language_threshold_failures(args, language_summaries),
+    ]
+
+
+def _finalize_benchmark_report(
+    args: argparse.Namespace,
+    report: dict[str, Any],
+    suite_failures: list[str],
+) -> None:
+    """Write the report and enforce requested failure policies."""
+    regressions = _baseline_regressions(
+        report,
+        args.baseline,
+        args.max_p95_regression_pct,
+        args.allow_homeassistant_upgrade,
+    )
+    threshold_failures = _benchmark_threshold_failures(args, report)
+    report["regressions"] = regressions
+    report["case_failures"] = suite_failures
+    report["threshold_failures"] = threshold_failures
+    _write_json(args.output_json, report)
+    _write_markdown(args.output_markdown, report)
+    if args.fail_on_case_failure and suite_failures:
+        raise BenchmarkError("Functional benchmark failures:\n- " + "\n- ".join(suite_failures))
+    if args.fail_on_regression and regressions:
+        raise BenchmarkError("Benchmark regressions:\n- " + "\n- ".join(regressions))
+    if threshold_failures:
+        raise BenchmarkError("Benchmark threshold failures:\n- " + "\n- ".join(threshold_failures))
+
+
+async def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
+    """Own the full ephemeral Home Assistant benchmark lifecycle.
+
+    Home Assistant's sanitized process-log tail is attached only to setup or runtime
+    failures where server diagnostics can identify the cause. Report-policy failures
+    are enforced outside that exception handler because their generated case,
+    regression, and threshold details are already complete and actionable; appending
+    unrelated Home Assistant warnings would obscure those details.
+    """
+    inputs = _benchmark_inputs(args)
     _assert_port_available()
     config_dir = _create_config_dir()
     managed: ManagedProcess | None = None
     started_at = time.perf_counter()
     try:
-        await _run_config_check(config_dir)
-        print("HA_CONFIG_OK", flush=True)
-        managed = await _start_home_assistant(config_dir)
-        timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            await _wait_for_http(session, managed)
-            print("HA_HTTP_READY", flush=True)
-            token = await _onboard(session)
-            session.headers.update({"Authorization": f"Bearer {token}"})
-            await _wait_for_fixture(session, fixture)
-            await _create_config_entry(session, "shopping_list")
-            await _call_service(session, "assist_canonicalizer_benchmark", "reapply")
-            fixture_state = await _wait_for_fixture(session, fixture)
-            print("BENCHMARK_FIXTURE_VERIFIED", flush=True)
+        try:
+            await _run_config_check(config_dir)
+            print("HA_CONFIG_OK", flush=True)
+            managed = await _start_home_assistant(config_dir)
+            timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                live = await _run_live_benchmark_session(
+                    session,
+                    managed,
+                    inputs,
+                    args,
+                )
 
-            config = await _request_json(session, "GET", "/api/config")
-            if not isinstance(config, dict):
-                raise BenchmarkError("Home Assistant config response must be an object")
-            if config.get("version") != dependencies["homeassistant"]:
+            report = _build_benchmark_report(args, inputs, live, started_at)
+        except Exception as err:
+            if tail := _log_tail(managed):
                 raise BenchmarkError(
-                    "Home Assistant API version differs from the verified Python distribution: "
-                    f"{config.get('version')} != {dependencies['homeassistant']}"
-                )
-            agent_id = await _create_integration_entry(session)
-            await _wait_for_agent(session)
-            prepared_languages = await _prepare_languages(
-                session,
-                tuple(
-                    {case.language for case in cases}
-                    | {command.language for command in language_smoke_commands}
-                ),
-            )
-            case_results, suite_failures = await _execute_suite(
-                session,
-                cases,
-                agent_id,
-                args.iterations,
-                args.warmup,
-            )
-            language_smoke = await _execute_language_smoke(
-                session,
-                language_smoke_commands,
-                agent_id,
-            )
-
-        summary = _aggregate(case_results)
-        case_suite_sha256 = _case_input_sha256(args.cases)
-        configuration_sha256 = _file_sha256(CONFIGURATION_PATH)
-        context_fingerprint = _canonical_payload_sha256(
-            {
-                "homeassistant_version": dependencies["homeassistant"],
-                "python_version": sys.version.split()[0],
-                "dependencies": dependencies["packages"],
-                "fixture_fingerprint": fixture_state["fingerprint"],
-                "case_suite_sha256": case_suite_sha256,
-                "configuration_sha256": configuration_sha256,
-                "integration_source_sha256": integration_source_sha256,
-                "language_smoke_manifest_sha256": language_smoke_manifest_sha256,
-                "iterations": args.iterations,
-                "warmup": args.warmup,
-                "device_id": BENCHMARK_DEVICE_ID,
-                "satellite_id": CONTEXT_SATELLITE_ID,
-            }
-        )
-        report: dict[str, Any] = {
-            "report_schema_version": BENCHMARK_SCHEMA_VERSION,
-            "authoritative": True,
-            "benchmark_mode": "managed_live",
-            "execution_tier": "managed_live",
-            "suite_id": suite_id,
-            "case_suite_sha256": case_suite_sha256,
-            "case_input_files": _case_input_files(args.cases),
-            "configuration_sha256": configuration_sha256,
-            "environment": {
-                "homeassistant_version": dependencies["homeassistant"],
-                "python_version": sys.version.split()[0],
-                "dependencies": dependencies["packages"],
-                "installed_intent_languages": [
-                    command.language for command in language_smoke_commands
-                ],
-                "integration_source_sha256": integration_source_sha256,
-                "language_smoke_manifest_sha256": language_smoke_manifest_sha256,
-                "context_fingerprint": context_fingerprint,
-                "fixture": {
-                    "fixture_id": fixture["fixture_id"],
-                    "schema_version": fixture["schema_version"],
-                    "fingerprint": fixture_state["fingerprint"],
-                    "counts": fixture["expected_counts"],
-                    "domain_counts": fixture["expected_domain_counts"],
-                    "runtime_state_count": fixture_state.get("runtime_state_count"),
-                },
-            },
-            "settings": {
-                "iterations": args.iterations,
-                "warmup": args.warmup,
-                "serial_execution": True,
-                "endpoint": f"{HOST}:{PORT}",
-                "languages": list(languages),
-                "categories": list(categories),
-                "case_limit": args.case_limit,
-                "device_id": BENCHMARK_DEVICE_ID,
-                "satellite_id": CONTEXT_SATELLITE_ID,
-                "canonical_oracle": "executed_live_default_agent_canonical_control",
-                "hassil_baseline": "paired_original_query_to_live_default_agent",
-                "observed_result": "production_default_agent_trace_and_resolved_entities",
-            },
-            "prepared_languages": prepared_languages,
-            "language_support": {
-                "accuracy_gated": sorted(ACCURACY_GATED_LANGUAGES),
-                "compatibility_smoke_count": len(language_smoke),
-                "compatibility_smoke": language_smoke,
-            },
-            "summary": summary,
-            "breakdowns": _breakdowns(case_results),
-            "cases": case_results,
-            "startup_and_run_seconds": time.perf_counter() - started_at,
-        }
-        regressions = _baseline_regressions(
-            report,
-            args.baseline,
-            args.max_p95_regression_pct,
-            args.allow_homeassistant_upgrade,
-        )
-        report["regressions"] = regressions
-        report["case_failures"] = suite_failures
-        threshold_failures = []
-        if args.min_intent_slot_accuracy is not None:
-            actual_accuracy = summary.get("intent_slot_accuracy_pct", 0.0)
-            if actual_accuracy < args.min_intent_slot_accuracy:
-                threshold_failures.append(
-                    f"intent/slot accuracy {actual_accuracy:.2f}% is below "
-                    f"{args.min_intent_slot_accuracy:.2f}%"
-                )
-        if args.max_fallback_rate is not None:
-            actual_fallback = summary.get("fallback_rate_pct", 0.0)
-            if actual_fallback > args.max_fallback_rate:
-                threshold_failures.append(
-                    f"fallback rate {actual_fallback:.2f}% is above {args.max_fallback_rate:.2f}%"
-                )
-        if args.max_mismatch_rate is not None:
-            actual_mismatch = summary.get("mismatch_rate_pct", 0.0)
-            if actual_mismatch > args.max_mismatch_rate:
-                threshold_failures.append(
-                    f"mismatch rate {actual_mismatch:.2f}% is above {args.max_mismatch_rate:.2f}%"
-                )
-        languages_breakdown = report.get("breakdowns", {}).get("languages", {})
-        for lang, lang_summary in sorted(languages_breakdown.items()):
-            if args.min_language_intent_slot_accuracy is not None:
-                actual_accuracy = lang_summary.get("intent_slot_accuracy_pct", 0.0)
-                if actual_accuracy < args.min_language_intent_slot_accuracy:
-                    threshold_failures.append(
-                        f"{lang.upper()}: intent/slot accuracy {actual_accuracy:.2f}% is below "
-                        f"{args.min_language_intent_slot_accuracy:.2f}%"
-                    )
-            if args.max_language_fallback_rate is not None:
-                actual_fallback = lang_summary.get("fallback_rate_pct", 0.0)
-                if actual_fallback > args.max_language_fallback_rate:
-                    threshold_failures.append(
-                        f"{lang.upper()}: fallback rate {actual_fallback:.2f}% is above "
-                        f"{args.max_language_fallback_rate:.2f}%"
-                    )
-            if args.max_language_mismatch_rate is not None:
-                actual_mismatch = lang_summary.get("mismatch_rate_pct", 0.0)
-                if actual_mismatch > args.max_language_mismatch_rate:
-                    threshold_failures.append(
-                        f"{lang.upper()}: mismatch rate {actual_mismatch:.2f}% is above "
-                        f"{args.max_language_mismatch_rate:.2f}%"
-                    )
-        report["threshold_failures"] = threshold_failures
-        _write_json(args.output_json, report)
-        _write_markdown(args.output_markdown, report)
-        if args.fail_on_case_failure and suite_failures:
-            raise BenchmarkError("Functional benchmark failures:\n- " + "\n- ".join(suite_failures))
-        if args.fail_on_regression and regressions:
-            raise BenchmarkError("Benchmark regressions:\n- " + "\n- ".join(regressions))
-        if threshold_failures:
-            raise BenchmarkError(
-                "Benchmark threshold failures:\n- " + "\n- ".join(threshold_failures)
-            )
+                    f"{err}\n\nHome Assistant process log tail (credentials redacted):\n{tail}"
+                ) from err
+            raise
+        _finalize_benchmark_report(args, report, live.suite_failures)
         return report
-    except Exception as err:
-        if tail := _log_tail(managed):
-            raise BenchmarkError(f"{err}\n\nSanitized Home Assistant log tail:\n{tail}") from err
-        raise
     finally:
         await _stop_home_assistant(managed)
         shutil.rmtree(config_dir)
 
 
-def _parser() -> argparse.ArgumentParser:
-    """Build the managed-live benchmark command-line parser."""
-    parser = argparse.ArgumentParser(
-        description="Benchmark Assist Canonicalizer through a fresh live Home Assistant process"
-    )
+def _add_benchmark_input_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add case-selection and execution arguments."""
     parser.add_argument(
         "--cases",
         type=Path,
@@ -2771,6 +3304,15 @@ def _parser() -> argparse.ArgumentParser:
         help="Markdown report path (default: scratch/benchmark/managed_live_report.md)",
     )
     parser.add_argument(
+        "--list-cases",
+        action="store_true",
+        help="Validate and list cases without starting Home Assistant",
+    )
+
+
+def _add_benchmark_policy_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add baseline and failure-policy arguments."""
+    parser.add_argument(
         "--baseline",
         type=Path,
         default=None,
@@ -2800,11 +3342,15 @@ def _parser() -> argparse.ArgumentParser:
             "still requiring identical fixture, cases, configuration, and run settings"
         ),
     )
+
+
+def _add_benchmark_threshold_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add whole-corpus and per-language threshold arguments."""
     parser.add_argument(
         "--min-intent-slot-accuracy",
         type=float,
         default=None,
-        help="Fail when production-flow intent/slot accuracy falls below this percentage",
+        help="Fail when HassIL-first production accuracy falls below this percentage",
     )
     parser.add_argument(
         "--max-fallback-rate",
@@ -2822,7 +3368,9 @@ def _parser() -> argparse.ArgumentParser:
         "--min-language-intent-slot-accuracy",
         type=float,
         default=None,
-        help="Fail when any language's intent/slot accuracy falls below this percentage",
+        help=(
+            "Fail when any language's HassIL-first production accuracy falls below this percentage"
+        ),
     )
     parser.add_argument(
         "--max-language-fallback-rate",
@@ -2836,18 +3384,34 @@ def _parser() -> argparse.ArgumentParser:
         default=None,
         help="Fail when any language's mismatch rate exceeds this percentage",
     )
-    parser.add_argument(
-        "--list-cases",
-        action="store_true",
-        help="Validate and list cases without starting Home Assistant",
+
+
+def _parser() -> argparse.ArgumentParser:
+    """Build the managed-live benchmark command-line parser."""
+    parser = argparse.ArgumentParser(
+        description="Benchmark Assist Canonicalizer through a fresh live Home Assistant process"
     )
+    _add_benchmark_input_arguments(parser)
+    _add_benchmark_policy_arguments(parser)
+    _add_benchmark_threshold_arguments(parser)
     return parser
 
 
-def main() -> None:
-    """Run the command-line managed-live benchmark."""
-    parser = _parser()
-    args = parser.parse_args()
+def _validate_cli_percentage(
+    parser: argparse.ArgumentParser,
+    name: str,
+    value: float | None,
+) -> None:
+    """Validate an optional command-line percentage."""
+    if value is not None and not (0.0 <= value <= 100.0):
+        parser.error(f"{name} must be between 0.0 and 100.0")
+
+
+def _validate_cli_arguments(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+) -> None:
+    """Validate managed-live command-line arguments."""
     if args.iterations < 1:
         parser.error("--iterations must be positive")
     if args.warmup < 0:
@@ -2856,78 +3420,120 @@ def main() -> None:
         parser.error("--case-limit must be positive")
     if args.max_p95_regression_pct < 0:
         parser.error("--max-p95-regression-pct must be non-negative")
-    if args.min_intent_slot_accuracy is not None and not (
-        0.0 <= args.min_intent_slot_accuracy <= 100.0
+    for name, value in (
+        ("--min-intent-slot-accuracy", args.min_intent_slot_accuracy),
+        ("--max-fallback-rate", args.max_fallback_rate),
+        ("--max-mismatch-rate", args.max_mismatch_rate),
+        (
+            "--min-language-intent-slot-accuracy",
+            args.min_language_intent_slot_accuracy,
+        ),
+        ("--max-language-fallback-rate", args.max_language_fallback_rate),
+        ("--max-language-mismatch-rate", args.max_language_mismatch_rate),
     ):
-        parser.error("--min-intent-slot-accuracy must be between 0.0 and 100.0")
-    if args.max_fallback_rate is not None and not (0.0 <= args.max_fallback_rate <= 100.0):
-        parser.error("--max-fallback-rate must be between 0.0 and 100.0")
-    if args.max_mismatch_rate is not None and not (0.0 <= args.max_mismatch_rate <= 100.0):
-        parser.error("--max-mismatch-rate must be between 0.0 and 100.0")
-    if args.min_language_intent_slot_accuracy is not None and not (
-        0.0 <= args.min_language_intent_slot_accuracy <= 100.0
-    ):
-        parser.error("--min-language-intent-slot-accuracy must be between 0.0 and 100.0")
-    if args.max_language_fallback_rate is not None and not (
-        0.0 <= args.max_language_fallback_rate <= 100.0
-    ):
-        parser.error("--max-language-fallback-rate must be between 0.0 and 100.0")
-    if args.max_language_mismatch_rate is not None and not (
-        0.0 <= args.max_language_mismatch_rate <= 100.0
-    ):
-        parser.error("--max-language-mismatch-rate must be between 0.0 and 100.0")
-    if args.output_json == args.output_markdown:
-        parser.error("--output-json and --output-markdown must be different paths")
+        _validate_cli_percentage(parser, name, value)
 
-    # Sanitize and resolve path arguments after parsing to break CodeQL taint
+
+def _safe_cli_arguments(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+) -> argparse.Namespace:
+    """Resolve path arguments within the repository and return a safe namespace."""
     try:
         safe_cases = _safe_repository_path(args.cases, "case suite")
         safe_output_json = _safe_repository_path(args.output_json, "JSON output")
-        safe_output_markdown = _safe_repository_path(args.output_markdown, "Markdown output")
+        safe_output_markdown = _safe_repository_path(
+            args.output_markdown,
+            "Markdown output",
+        )
         safe_baseline = (
             _safe_repository_path(args.baseline, "baseline") if args.baseline is not None else None
         )
     except BenchmarkError as err:
         parser.error(str(err))
-
-    # Construct safe namespace to pass to down-stream functions
-    safe_args = argparse.Namespace(
+    if safe_output_json == safe_output_markdown:
+        parser.error("--output-json and --output-markdown must be different paths")
+    safe_values = vars(args).copy()
+    safe_values.update(
         cases=safe_cases,
-        languages=args.languages,
-        categories=args.categories,
-        case_limit=args.case_limit,
-        iterations=args.iterations,
-        warmup=args.warmup,
         output_json=safe_output_json,
         output_markdown=safe_output_markdown,
         baseline=safe_baseline,
-        max_p95_regression_pct=args.max_p95_regression_pct,
-        allow_homeassistant_upgrade=args.allow_homeassistant_upgrade,
-        fail_on_regression=args.fail_on_regression,
-        fail_on_case_failure=args.fail_on_case_failure,
-        min_intent_slot_accuracy=args.min_intent_slot_accuracy,
-        max_fallback_rate=args.max_fallback_rate,
-        max_mismatch_rate=args.max_mismatch_rate,
-        min_language_intent_slot_accuracy=args.min_language_intent_slot_accuracy,
-        max_language_fallback_rate=args.max_language_fallback_rate,
-        max_language_mismatch_rate=args.max_language_mismatch_rate,
-        list_cases=args.list_cases,
     )
+    return argparse.Namespace(**safe_values)
+
+
+def _list_selected_cases(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+) -> None:
+    """Validate, select, and print benchmark cases."""
+    try:
+        suite_id, all_cases = load_cases(args.cases)
+        cases = _select_cases(
+            all_cases,
+            _comma_separated_values(args.languages),
+            _comma_separated_values(args.categories),
+            args.case_limit,
+        )
+    except BenchmarkError as err:
+        parser.error(str(err))
+    print(f"{suite_id}: {len(cases)} cases")
+    for case in cases:
+        print(f"{case.case_id}\t{case.language}\t{case.query}")
+
+
+def _benchmark_success_fields(summary: Mapping[str, Any]) -> list[str]:
+    """Return the stable successful-run console fields."""
+    fields = [
+        "BENCHMARK_SUCCESS",
+        f"cases={summary['passed_cases']}/{summary['case_count']}",
+    ]
+    if "canonicalizer_accuracy_pct" not in summary:
+        fields.extend(
+            (
+                f"accuracy={summary['accuracy_pct']:.2f}%",
+                f"mean_ms={summary['latency_ms']['mean']:.3f}",
+                f"p50_ms={summary['latency_ms']['median']:.3f}",
+                f"p95_ms={summary['latency_ms']['p95']:.3f}",
+            )
+        )
+        return fields
+    canonicalizer_latency = summary["latency_ms"]
+    hassil_latency = summary["hassil_baseline_latency_ms"]
+    fields.extend(
+        (
+            f"canonicalizer_accuracy={summary['canonicalizer_accuracy_pct']:.2f}%",
+            f"direct_canonicalizer_accuracy={summary['direct_canonicalizer_accuracy_pct']:.2f}%",
+            f"hassil_accuracy={summary['hassil_baseline_accuracy_pct']:.2f}%",
+            f"uplift_pp={summary['accuracy_uplift_pp']:+.2f}",
+            f"shortcut_protected={summary['shortcut_protected_case_count']}",
+            f"canonicalizer_fallback={summary['fallback_rate_pct']:.2f}%",
+            f"canonicalizer_mismatch={summary['mismatch_rate_pct']:.2f}%",
+            f"direct_canonicalizer_fallback="
+            f"{summary['direct_canonicalizer_fallback_rate_pct']:.2f}%",
+            f"direct_canonicalizer_mismatch="
+            f"{summary['direct_canonicalizer_mismatch_rate_pct']:.2f}%",
+            f"canonicalizer_mean_ms={canonicalizer_latency['mean']:.3f}",
+            f"canonicalizer_p50_ms={canonicalizer_latency['median']:.3f}",
+            f"canonicalizer_p95_ms={canonicalizer_latency['p95']:.3f}",
+            f"hassil_mean_ms={hassil_latency['mean']:.3f}",
+            f"hassil_p50_ms={hassil_latency['median']:.3f}",
+            f"hassil_p95_ms={hassil_latency['p95']:.3f}",
+        )
+    )
+    return fields
+
+
+def main() -> None:
+    """Run the command-line managed-live benchmark."""
+    parser = _parser()
+    args = parser.parse_args()
+    _validate_cli_arguments(parser, args)
+    safe_args = _safe_cli_arguments(parser, args)
 
     if safe_args.list_cases:
-        suite_id, all_cases = load_cases(safe_args.cases)
-        try:
-            cases = _select_cases(
-                all_cases,
-                _comma_separated_values(safe_args.languages),
-                _comma_separated_values(safe_args.categories),
-                safe_args.case_limit,
-            )
-        except BenchmarkError as err:
-            parser.error(str(err))
-        print(f"{suite_id}: {len(cases)} cases")
-        for case in cases:
-            print(f"{case.case_id}\t{case.language}\t{case.query}")
+        _list_selected_cases(parser, safe_args)
         return
 
     env_info = _benchmark_environment_summary()
@@ -2937,39 +3543,10 @@ def main() -> None:
     except (BenchmarkError, OSError, ValueError) as err:
         print(f"BENCHMARK_FAILED: {err}", file=sys.stderr, flush=True)
         raise SystemExit(1) from err
-    summary = report["summary"]
-    success_fields = [
-        "BENCHMARK_SUCCESS",
-        f"cases={summary['passed_cases']}/{summary['case_count']}",
-    ]
-    if "canonicalizer_accuracy_pct" in summary:
-        canonicalizer_lat = summary["latency_ms"]
-        hassil_lat = summary["hassil_baseline_latency_ms"]
-        success_fields.extend(
-            (
-                f"canonicalizer_accuracy={summary['canonicalizer_accuracy_pct']:.2f}%",
-                f"hassil_accuracy={summary['hassil_baseline_accuracy_pct']:.2f}%",
-                f"uplift_pp={summary['accuracy_uplift_pp']:+.2f}",
-                f"canonicalizer_fallback={summary['fallback_rate_pct']:.2f}%",
-                f"canonicalizer_mismatch={summary['mismatch_rate_pct']:.2f}%",
-                f"canonicalizer_mean_ms={canonicalizer_lat['mean']:.3f}",
-                f"canonicalizer_p50_ms={canonicalizer_lat['median']:.3f}",
-                f"canonicalizer_p95_ms={canonicalizer_lat['p95']:.3f}",
-                f"hassil_mean_ms={hassil_lat['mean']:.3f}",
-                f"hassil_p50_ms={hassil_lat['median']:.3f}",
-                f"hassil_p95_ms={hassil_lat['p95']:.3f}",
-            )
-        )
-    else:
-        success_fields.extend(
-            (
-                f"accuracy={summary['accuracy_pct']:.2f}%",
-                f"mean_ms={summary['latency_ms']['mean']:.3f}",
-                f"p50_ms={summary['latency_ms']['median']:.3f}",
-                f"p95_ms={summary['latency_ms']['p95']:.3f}",
-            )
-        )
-    print(" ".join(success_fields), flush=True)
+    print(
+        " ".join(_benchmark_success_fields(report["summary"])),
+        flush=True,
+    )
     print(f"JSON report: {safe_args.output_json}")
     print(f"Markdown report: {safe_args.output_markdown}")
 

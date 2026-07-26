@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
+import logging
 import sys
 import threading
 from collections.abc import Mapping
@@ -14,6 +16,7 @@ from unittest.mock import patch
 
 import homeassistant.helpers.event
 import homeassistant.helpers.storage
+import orjson
 import pytest
 
 import custom_components.assist_canonicalizer as integration
@@ -39,12 +42,14 @@ from custom_components.assist_canonicalizer.ranking import RankedCandidate, Scor
 from custom_components.assist_canonicalizer.runtime import (
     _INDEX_BUILD_VERSION,
     CanonicalizerRuntime,
+    IndexClearResult,
     _build_index_from_snapshot,
     _canonical_fingerprint_value,
     _create_build_snapshot_and_register_wildcards,
     _deserialize_candidates,
     _is_perfect_rank_result,
     _merge_ranked_candidates,
+    _serialize_candidate,
     _updated_optional_text,
     _valid_store_metadata,
 )
@@ -161,6 +166,32 @@ class _NormalizationTracker:
         """Record registry values normalized while building the snapshot."""
         self.normalized_values.append(text)
         return self.original_normalize_text(text)
+
+
+class _InterleavingClearDict(dict[str, int]):
+    """Pause invalidation after clearing stamps so a reader can attempt access."""
+
+    def __init__(
+        self,
+        values: Mapping[str, int],
+        start_reader: threading.Event,
+        reader_started: threading.Event,
+        reader_finished: threading.Event,
+    ) -> None:
+        """Initialize synchronization events and preserve existing stamps."""
+        super().__init__(values)
+        self.start_reader = start_reader
+        self.reader_started = reader_started
+        self.reader_finished = reader_finished
+        self.reader_completed_during_clear: bool | None = None
+
+    def clear(self) -> None:
+        """Expose the former race window and record whether the reader entered it."""
+        super().clear()
+        self.start_reader.set()
+        if not self.reader_started.wait(timeout=1):
+            raise AssertionError("cache reader did not start")
+        self.reader_completed_during_clear = self.reader_finished.wait(timeout=0.1)
 
 
 class _SourceChangingBuild:
@@ -312,6 +343,35 @@ async def test_async_rebuild_index_replaces_stale_task_with_current_generation(
     assert build_counter.calls == 1
     assert runtime.get_index("en") is index
     assert runtime.rebuild_tasks == {}
+
+
+def test_rebuild_failure_logging_prunes_generations_and_preserves_severity(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Retain only current per-language failures at their strongest severity."""
+    runtime = CanonicalizerRuntime()
+    failure = RuntimeError("rebuild failed")
+
+    with caplog.at_level(logging.INFO, logger=runtime_module.__name__):
+        runtime._log_rebuild_failure_once("vi", (0, 0), failure, log_error=True)
+        runtime._log_rebuild_failure_once("en", (0, 0), failure, log_error=False)
+        runtime._log_rebuild_failure_once("en", (0, 0), failure, log_error=True)
+        runtime._log_rebuild_failure_once("en", (0, 0), failure, log_error=False)
+        runtime._log_rebuild_failure_once("en", (0, 1), failure, log_error=False)
+        runtime._log_rebuild_failure_once("en", (0, 1), failure, log_error=True)
+        runtime._log_rebuild_failure_once("en", (0, 0), failure, log_error=True)
+
+    assert [record.levelno for record in caplog.records] == [
+        logging.ERROR,
+        logging.INFO,
+        logging.ERROR,
+        logging.INFO,
+        logging.ERROR,
+    ]
+    assert runtime._logged_rebuilds == {
+        ("en", (0, 1)): logging.ERROR,
+        ("vi", (0, 0)): logging.ERROR,
+    }
 
 
 async def test_rank_with_dynamic_candidates_includes_tail_registry_alias() -> None:
@@ -1131,8 +1191,9 @@ async def test_persistent_store_save_and_load(monkeypatch: Any) -> None:
         assert loaded_index is not None
         assert loaded_index.language == "vi"
         assert loaded_index.candidate_count == 1
-        assert len(hass.executor_jobs) == 2
-        executor_target, executor_args = hass.executor_jobs[1]
+        # save: serialize_candidates; load: snapshot, deserialize, build_index
+        assert len(hass.executor_jobs) == 4
+        executor_target, executor_args = hass.executor_jobs[-1]
         assert executor_target is build_index
         assert executor_args[0] == "vi"
         assert len(executor_args[1]) == 1
@@ -1225,7 +1286,13 @@ async def test_async_clear_index_removes_specific_and_all_stores(monkeypatch: An
         runtime.set_index(index)
         await runtime.async_save_index_to_store(hass, index, snapshot.fingerprint)
 
-    await runtime.async_clear_index(hass, "en-US")
+    clear_en_result = await runtime.async_clear_index(hass, "en-US")
+    assert clear_en_result == IndexClearResult(
+        cleared_cached_languages=("en",),
+        cleared_candidate_count=1,
+        remaining_candidate_count=1,
+        remaining_cached_languages=("vi",),
+    )
     assert "en" not in runtime.indexes
     assert "vi" in runtime.indexes
     assert "assist_canonicalizer.index_en" not in MockStore.stored_data
@@ -1233,7 +1300,13 @@ async def test_async_clear_index_removes_specific_and_all_stores(monkeypatch: An
     old_epoch = manifest["cache_epoch"]
     assert manifest["languages"] == ["vi"]
 
-    await runtime.async_clear_index(hass)
+    clear_all_result = await runtime.async_clear_index(hass)
+    assert clear_all_result == IndexClearResult(
+        cleared_cached_languages=("vi",),
+        cleared_candidate_count=1,
+        remaining_candidate_count=0,
+        remaining_cached_languages=(),
+    )
     assert runtime.indexes == {}
     assert "assist_canonicalizer.index_vi" not in MockStore.stored_data
     manifest = MockStore.stored_data["assist_canonicalizer.index_manifest"]
@@ -1683,8 +1756,11 @@ async def test_debounced_rebuild_coalesces_events(monkeypatch: Any) -> None:
     )
     monkeypatch.setattr(integration, "exposed_entities", exposed_entities_module)
 
+    # Patch the integration module's imported binding: the debounced rebuild
+    # only schedules index rebuilds when the refreshed values actually change.
     monkeypatch.setattr(
-        "custom_components.assist_canonicalizer.registry.async_registry_slot_values",
+        integration,
+        "async_registry_slot_values",
         lambda h: {"name": ("light",)},
     )
 
@@ -2119,6 +2195,53 @@ def test_deserialize_candidates_invalid() -> None:
     )
 
 
+def test_candidate_wildcard_infos_survive_store_round_trip() -> None:
+    """Persist exact wildcard positions instead of re-deriving them heuristically.
+
+    The affix heuristic would also flag the literal token "playlist" for the
+    "list" wildcard, which disables rehydration via the adjacency guard, so a
+    warm-cache boot would behave differently from a fresh build.
+    """
+    candidate = Candidate(
+        text="play playlist list",
+        intent_name="TestIntent",
+        language="en",
+        metadata={
+            "sentence_template": "play playlist {list}",
+            "wildcard_slots": "list",
+        },
+    )
+    object.__setattr__(candidate, "_wildcard_infos", ((2, "list"),))
+
+    serialized = _serialize_candidate(candidate)
+    assert serialized["wildcard_infos"] == [[2, "list"]]
+
+    restored = _deserialize_candidates({"candidates": [serialized]})
+    assert restored is not None
+    assert restored[0].wildcard_infos == ((2, "list"),)
+
+
+def test_deserialize_candidates_rejects_missing_wildcard_infos() -> None:
+    """Reject cache records without persisted wildcard positions."""
+    assert (
+        _deserialize_candidates(
+            {
+                "candidates": [
+                    {
+                        "text": "test",
+                        "intent_name": "test",
+                        "source": "generated_sample",
+                        "metadata": {},
+                        "slot_values": [],
+                        "normalized_text": "test",
+                    }
+                ]
+            }
+        )
+        is None
+    )
+
+
 def test_merge_ranked_candidates_sorting() -> None:
     """Test merge_ranked_candidates preference sorting based on source priority."""
     c1 = Candidate(text="test", intent_name="intent1", source=CandidateSource.BUILT_IN)
@@ -2203,3 +2326,246 @@ def test_registry_slot_index_caching_and_cleanup() -> None:
     runtime.cleanup()
     assert called
     assert runtime.rebuild_timer_cancel is None
+
+
+def test_registry_update_keeps_intent_source_caches(monkeypatch: Any) -> None:
+    """Registry-value changes must not invalidate per-language intent sources.
+
+    Intent sources do not depend on registry slot values, so a registry event
+    (which bumps ``source_generation`` with ``clear_sources=False``) must keep
+    serving the cached per-language sources without reloading from disk.
+    """
+    runtime = runtime_module.CanonicalizerRuntime()
+    load_calls = {"count": 0}
+
+    def counting_loader(language: str, *, config_path: Any = None) -> dict[str, Any]:
+        """Count intent-source disk loads."""
+        load_calls["count"] += 1
+        return {"builtin": {"intents": {}}}
+
+    monkeypatch.setattr(runtime_module, "load_language_intent_sources", counting_loader)
+
+    first = runtime._intent_sources_for_query("en")
+    assert load_calls["count"] == 1
+    assert runtime._intent_sources_for_query("en") == first
+    assert load_calls["count"] == 1
+
+    assert runtime.update_registry_slot_values({"name": ("lamp",)})
+    assert runtime._intent_sources_for_query("en") == first
+    assert load_calls["count"] == 1
+
+    # Genuine intent-source changes still invalidate the cache.
+    assert runtime.update_intent_sources({"conversation.new": {"intents": {}}})
+    runtime._intent_sources_for_query("en")
+    assert load_calls["count"] == 2
+
+
+def test_registry_update_diagnostics_use_published_snapshot(monkeypatch: Any) -> None:
+    """Keep registry diagnostics aligned when state changes after publication."""
+    runtime = CanonicalizerRuntime()
+
+    class InterleavingLock:
+        """Mutate public state immediately after the update releases its lock."""
+
+        def __init__(self) -> None:
+            """Initialize a real lock and count completed critical sections."""
+            self.lock = threading.Lock()
+            self.exit_count = 0
+
+        def __enter__(self) -> None:
+            """Acquire the underlying lock."""
+            self.lock.acquire()
+
+        def __exit__(self, *_args: object) -> None:
+            """Replace published state after the second critical section."""
+            self.lock.release()
+            self.exit_count += 1
+            if self.exit_count == 2:
+                runtime.registry_slot_index = build_registry_slot_index(
+                    {"name": ("new lamp", "other lamp")}
+                )
+                runtime.source_generation = 99
+
+    monkeypatch.setattr(runtime, "_source_cache_lock", InterleavingLock())
+    updated_values = {"name": ("old lamp",)}
+    expected_fingerprint = hashlib.sha256(
+        orjson.dumps(_canonical_fingerprint_value(updated_values))
+    ).hexdigest()
+
+    assert runtime.update_registry_slot_values(updated_values)
+
+    assert runtime.registry_slot_index.record_count == 2
+    assert runtime.source_generation == 99
+    assert runtime.diagnostics.registry_record_count == 1
+    assert runtime.diagnostics.registry_generation == 1
+    assert runtime.diagnostics.registry_fingerprint == expected_fingerprint
+
+
+def test_registry_invalidation_hides_stamp_clear_from_concurrent_reader() -> None:
+    """Keep registry values and their language index consistent during invalidation."""
+    runtime = CanonicalizerRuntime()
+    runtime.update_registry_slot_values({"name": ("old lamp",)})
+    runtime._registry_slot_index_for_language("en")
+    start_reader = threading.Event()
+    reader_started = threading.Event()
+    reader_finished = threading.Event()
+    observed: list[tuple[dict[str, tuple[str, ...]], Any]] = []
+    reader_errors: list[Exception] = []
+
+    def read_registry_snapshot() -> None:
+        """Read the registry snapshot exactly when its stamp is cleared."""
+        start_reader.wait()
+        reader_started.set()
+        try:
+            observed.append(runtime._registry_slot_snapshot_for_language("en"))
+        except Exception as err:
+            reader_errors.append(err)
+        finally:
+            reader_finished.set()
+
+    interleaving_stamps = _InterleavingClearDict(
+        runtime._registry_slot_index_generations,
+        start_reader,
+        reader_started,
+        reader_finished,
+    )
+    runtime._registry_slot_index_generations = interleaving_stamps
+    reader = threading.Thread(target=read_registry_snapshot, daemon=True)
+    reader.start()
+
+    assert runtime.update_registry_slot_values({"name": ("new lamp",)})
+    reader.join(timeout=1)
+
+    assert not reader.is_alive()
+    assert not reader_errors
+    assert interleaving_stamps.reader_completed_during_clear is False
+    assert observed[0][0]["name"] == ("new lamp",)
+    assert tuple(record.text for record in observed[0][1]["name"]) == ("new lamp",)
+
+
+def test_intent_source_invalidation_hides_stamp_clear_from_concurrent_reader(
+    monkeypatch: Any,
+) -> None:
+    """Do not serve stale intent sources while their cache is being invalidated."""
+    runtime = CanonicalizerRuntime()
+    monkeypatch.setattr(
+        runtime_module,
+        "load_language_intent_sources",
+        lambda _language, *, config_path=None: {},
+    )
+    runtime.update_intent_sources({"conversation": {"intents": {"OldIntent": {}}}})
+    runtime._intent_sources_for_query("en")
+    start_reader = threading.Event()
+    reader_started = threading.Event()
+    reader_finished = threading.Event()
+    observed: list[dict[str, Mapping[str, Any]]] = []
+    reader_errors: list[Exception] = []
+
+    def read_intent_sources() -> None:
+        """Read intent sources exactly when their generation stamp is cleared."""
+        start_reader.wait()
+        reader_started.set()
+        try:
+            observed.append(runtime._intent_sources_for_query("en"))
+        except Exception as err:
+            reader_errors.append(err)
+        finally:
+            reader_finished.set()
+
+    interleaving_stamps = _InterleavingClearDict(
+        runtime._language_source_generations,
+        start_reader,
+        reader_started,
+        reader_finished,
+    )
+    runtime._language_source_generations = interleaving_stamps
+    reader = threading.Thread(target=read_intent_sources, daemon=True)
+    reader.start()
+
+    assert runtime.update_intent_sources({"conversation": {"intents": {"NewIntent": {}}}})
+    reader.join(timeout=1)
+
+    assert not reader.is_alive()
+    assert not reader_errors
+    assert interleaving_stamps.reader_completed_during_clear is False
+    assert "NewIntent" in observed[0]["conversation"]["intents"]
+    assert "OldIntent" not in observed[0]["conversation"]["intents"]
+
+
+def test_dynamic_intent_invalidation_hides_stamp_clear_from_concurrent_reader(
+    monkeypatch: Any,
+) -> None:
+    """Do not serve stale compiled templates while their stamp is being cleared."""
+    runtime = CanonicalizerRuntime()
+    old_compiled: Any = (object(),)
+    new_compiled: Any = (object(),)
+
+    monkeypatch.setattr(
+        runtime_module,
+        "load_language_intent_sources",
+        lambda _language, *, config_path=None: {},
+    )
+
+    def compile_markers(
+        sources: Mapping[str, Mapping[str, Any]],
+        _language: str,
+        **_kwargs: Any,
+    ) -> Any:
+        """Return a stable marker for the subscribed intent source version."""
+        intents = sources["conversation"]["intents"]
+        return new_compiled if "NewIntent" in intents else old_compiled
+
+    monkeypatch.setattr(runtime_module, "compile_dynamic_registry_intents", compile_markers)
+    runtime.update_intent_sources({"conversation": {"intents": {"OldIntent": {}}}})
+    assert runtime._dynamic_registry_intents_for_query("en") is old_compiled
+    start_reader = threading.Event()
+    reader_started = threading.Event()
+    reader_finished = threading.Event()
+    observed: list[Any] = []
+    reader_errors: list[Exception] = []
+
+    def read_dynamic_intents() -> None:
+        """Read compiled templates exactly when their generation stamp is cleared."""
+        start_reader.wait()
+        reader_started.set()
+        try:
+            observed.append(runtime._dynamic_registry_intents_for_query("en"))
+        except Exception as err:
+            reader_errors.append(err)
+        finally:
+            reader_finished.set()
+
+    interleaving_stamps = _InterleavingClearDict(
+        runtime._dynamic_intent_generations,
+        start_reader,
+        reader_started,
+        reader_finished,
+    )
+    runtime._dynamic_intent_generations = interleaving_stamps
+    reader = threading.Thread(target=read_dynamic_intents, daemon=True)
+    reader.start()
+
+    assert runtime.update_intent_sources({"conversation": {"intents": {"NewIntent": {}}}})
+    reader.join(timeout=1)
+
+    assert not reader.is_alive()
+    assert not reader_errors
+    assert interleaving_stamps.reader_completed_during_clear is False
+    assert observed == [new_compiled]
+
+
+def test_merge_ranked_candidates_resolves_cross_pass_intent_tie() -> None:
+    """Re-run intent disambiguation on an exact cross-pass final-score tie."""
+    weak_intent = RankedCandidate(
+        Candidate(text="turn on the fan", intent_name="HassTurnOff"),
+        ScoreBreakdown(0.9, 0.9, 0.9, 0.0, 0.85),
+    )
+    strong_intent = RankedCandidate(
+        Candidate(text="turn on fan now", intent_name="HassTurnOn"),
+        ScoreBreakdown(0.9, 0.9, 0.9, 1.0, 0.85),
+    )
+
+    merged = _merge_ranked_candidates((weak_intent,), (strong_intent,), max_candidates=5)
+
+    assert merged[0] is strong_intent
+    assert merged[1] is weak_intent
