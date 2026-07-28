@@ -227,26 +227,18 @@ class AssistCanonicalizerConversationEntity(
     async def _async_try_assist_pipeline_shortcut(
         self, user_input: ConversationInput
     ) -> ConversationResult | None:
-        """Guarantee HassIL-first routing for requests from an active Assist pipeline.
+        """Try HassIL when the active Assist pipeline has not already done so.
 
-        Home Assistant's pipeline may run a local-intent pre-pass when
-        ``prefer_local_intents`` is enabled. For control-capable conversation agents,
-        that pre-pass is filtered and is therefore not equivalent to sending the
-        original text through the complete built-in conversation agent. When
-        ``prefer_local_intents`` is disabled, the pipeline delegates directly to this
-        entity without a local-intent pre-pass.
+        With ``prefer_local_intents`` enabled, Home Assistant tries local intents
+        before falling back to this conversation agent, so repeating that work here
+        would duplicate the pipeline's HassIL-first routing. When the option is
+        disabled, the pipeline delegates directly to this entity and this shortcut
+        supplies the equivalent HassIL-first behavior.
 
-        Consequently, reaching this entity never proves that full HassIL recognition
-        has already failed. Once the request is correlated with an active pipeline run,
-        always delegate the untouched text to the primary Home Assistant agent before
-        ranking, regardless of ``prefer_local_intents``. Returning a successful result
-        here is the regression-protection invariant: canonicalization cannot replace a
-        command that HassIL already handles.
-
-        Requests made directly to the conversation entity have no active pipeline run
-        and intentionally skip this pipeline-specific shortcut. A shortcut error or
-        rejected HassIL result is non-terminal: chat-log state is restored, then
-        canonical matching and the configured fallback agent remain available.
+        Direct calls without an active pipeline run skip this pipeline-specific
+        shortcut. A shortcut error or rejected HassIL result is non-terminal:
+        chat-log state is restored, then canonical matching and the configured
+        fallback agent remain available.
         """
         chat_log = self._get_active_chat_log()
         old_len = len(chat_log.content) if chat_log is not None else None
@@ -269,7 +261,7 @@ class AssistCanonicalizerConversationEntity(
                     if current_pipeline:
                         break
 
-            if current_pipeline is None:
+            if current_pipeline is None or getattr(current_pipeline, "prefer_local_intents", False):
                 return None
 
             shortcut_result = await self._delegate_with_capture(
@@ -328,11 +320,11 @@ class AssistCanonicalizerConversationEntity(
     async def _async_process_with_runtime(
         self, user_input: ConversationInput
     ) -> ConversationResult:
-        """Apply HassIL-first protection, canonicalization, and raw fallback in order.
+        """Apply pipeline-aware HassIL protection, canonicalization, and fallback.
 
-        The shortcut owns the user-visible no-regression boundary. Ranking is reached
-        only after untouched input is rejected by HassIL (or when the entity is called
-        outside an active Assist pipeline and the pipeline shortcut is unavailable).
+        Home Assistant owns the HassIL-first boundary when ``prefer_local_intents`` is
+        enabled; otherwise the shortcut supplies it before ranking. Direct entity
+        calls have no pipeline-level protection and intentionally skip the shortcut.
         Every unsuccessful local path still delegates the original text to the
         configured fallback agent.
         """

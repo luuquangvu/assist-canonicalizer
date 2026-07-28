@@ -1709,17 +1709,19 @@ async def test_conversation_delegate_and_fallback_agent_logic() -> None:
     await entity.async_prepare(None)
 
 
+@pytest.mark.parametrize(
+    ("prefer_local_intents", "uses_shortcut"),
+    [(False, True), (True, False)],
+    ids=["disabled-uses-shortcut", "enabled-skips-shortcut"],
+)
 @pytest.mark.asyncio
-async def test_async_process_prefer_local_intents_shortcut(
+async def test_assist_pipeline_shortcut_respects_prefer_local_intents(
     monkeypatch: pytest.MonkeyPatch,
+    prefer_local_intents: bool,
+    uses_shortcut: bool,
 ) -> None:
-    """Test prefer_local_intents shortcut behavior when it is False."""
+    """Use the HassIL shortcut only when Home Assistant has not already done so."""
     _mock_assist_pipeline_const(monkeypatch)
-
-    class DummyPipeline:
-        """Dummy pipeline class for testing."""
-
-        prefer_local_intents = False
 
     entry = MagicMock(entry_id="test-entry")
     entry.options = {}
@@ -1729,67 +1731,26 @@ async def test_async_process_prefer_local_intents_shortcut(
     entity.hass = MagicMock()
     user_input = MockConversationInput("tắt đèn bếp", "vi")
     entity.hass.data = {
-        "assist_pipeline": _active_pipeline_data(user_input.context, DummyPipeline())
-    }
-    validation_ok_res = MagicMock()
-    validation_ok_res.response.error_code = None
-
-    with (
-        patch.object(
-            entity, "_delegate_text", AsyncMock(return_value=validation_ok_res)
-        ) as mock_delegate,
-        patch.object(CanonicalizerRuntime, "rank_with_dynamic_candidates") as mock_rank,
-    ):
-        res = await entity.async_process(user_input)
-        assert res is validation_ok_res
-        mock_delegate.assert_called_once_with(
-            "tắt đèn bếp",
-            user_input,
-            primary=True,
+        "assist_pipeline": _active_pipeline_data(
+            user_input.context,
+            SimpleNamespace(prefer_local_intents=prefer_local_intents),
         )
-        mock_rank.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_async_process_prefer_local_intents_true_uses_shortcut(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Keep HassIL first when Home Assistant filters its local-intent pre-pass."""
-    _mock_assist_pipeline_const(monkeypatch)
-
-    class DummyPipeline:
-        """Dummy pipeline class for testing."""
-
-        prefer_local_intents = True
-
-    entry = MagicMock(entry_id="test-entry")
-    entry.options = {}
-    entry.data = {}
-    runtime = CanonicalizerRuntime()
-    entity = AssistCanonicalizerConversationEntity(entry, runtime)
-    entity.hass = MagicMock()
-
-    user_input = MockConversationInput("tắt đèn bếp", "vi")
-    entity.hass.data = {
-        "assist_pipeline": _active_pipeline_data(user_input.context, DummyPipeline())
     }
-    validation_ok_res = MagicMock()
-    validation_ok_res.response.error_code = None
+    shortcut_result = MagicMock()
 
-    with (
-        patch.object(
-            entity, "_delegate_text", AsyncMock(return_value=validation_ok_res)
-        ) as mock_delegate,
-        patch.object(CanonicalizerRuntime, "rank_with_dynamic_candidates") as mock_rank,
-    ):
-        res = await entity.async_process(user_input)
-        assert res is validation_ok_res
-        mock_delegate.assert_called_once_with(
-            "tắt đèn bếp",
-            user_input,
-            primary=True,
-        )
-        mock_rank.assert_not_called()
+    with patch.object(
+        entity,
+        "_delegate_with_capture",
+        AsyncMock(return_value=shortcut_result),
+    ) as mock_shortcut:
+        result = await entity._async_try_assist_pipeline_shortcut(user_input)
+
+    if uses_shortcut:
+        assert result is shortcut_result
+        mock_shortcut.assert_awaited_once_with(user_input.text, user_input, None, None)
+    else:
+        assert result is None
+        mock_shortcut.assert_not_awaited()
 
 
 @pytest.mark.parametrize(

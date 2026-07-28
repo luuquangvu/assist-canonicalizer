@@ -101,7 +101,7 @@ Trong thực tế, cùng một yêu cầu có thể được diễn đạt theo 
 
 ## Cách hoạt động
 
-Assist Canonicalizer luôn để tác nhân HassIL tích hợp sẵn của Home Assistant thử xử lý yêu cầu trước. Quá trình chuẩn hóa chỉ bắt đầu khi HassIL không xử lý được văn bản gốc:
+Khi pipeline Assist bật `prefer_local_intents`, Home Assistant để tác nhân HassIL tích hợp sẵn thử xử lý yêu cầu trước. Khi tùy chọn này bị tắt, Assist Canonicalizer cung cấp shortcut ưu tiên HassIL tương đương. Quá trình chuẩn hóa chỉ bắt đầu khi HassIL không xử lý được văn bản gốc:
 
 ```mermaid
 flowchart TD
@@ -127,7 +127,7 @@ flowchart TD
     K -->|Thất bại| G
 ```
 
-1. **Ưu tiên HassIL**: Yêu cầu được giữ nguyên và gửi đến tác nhân hội thoại tích hợp sẵn của Home Assistant trước khi chuẩn hóa. Luồng Assist có thể đã thử một số ý định cục bộ, nhưng mỗi khi được gọi, Assist Canonicalizer vẫn gửi nguyên văn yêu cầu đến HassIL bất kể cài đặt của luồng. Nếu HassIL xử lý thành công, kết quả được trả về ngay và các bước còn lại được bỏ qua.
+1. **Ưu tiên HassIL**: Khi bật `prefer_local_intents`, Home Assistant thử HassIL trước khi chuyển sang Assist Canonicalizer. Khi tắt tùy chọn này, pipeline chuyển thẳng đến Assist Canonicalizer và bộ tích hợp gửi nguyên văn yêu cầu đến HassIL dưới dạng shortcut. Bộ tích hợp bỏ qua shortcut khi Home Assistant đã thực hiện lượt nhận diện ý định cục bộ. Nếu HassIL xử lý thành công, kết quả được trả về ngay và các bước còn lại được bỏ qua.
 
 2. **Chuẩn hóa văn bản (Text Normalization)**: Chuẩn hóa ký tự theo NFKC, chuyển chữ hoa thành chữ thường theo Unicode, loại bỏ dấu câu và thu gọn khoảng trắng. Quy trình giống nhau được áp dụng cho câu lệnh đầu vào và các câu ứng viên.
 
@@ -158,7 +158,7 @@ flowchart TD
 
 ## Kết quả đo kiểm
 
-Benchmark `managed_live` chạy mỗi truy vấn hai lần trên cùng một môi trường Home Assistant: một lần trực tiếp qua HassIL và một lần qua đường dẫn trực tiếp của Assist Canonicalizer. Để phản ánh đúng thứ tự xử lý thực tế, kết quả Assist Canonicalizer được tính theo kết quả HassIL khi HassIL xử lý chính xác; chỉ khi HassIL thất bại mới dùng kết quả của đường dẫn chuẩn hóa. Cả hai lượt chạy đều được đối chiếu với dữ liệu kiểm soát có thể thực thi để đánh giá ý định, tham số và mục tiêu.
+Benchmark `managed_live` chạy mỗi truy vấn hai lần trên cùng một môi trường Home Assistant: một lần trực tiếp qua HassIL và một lần qua đường dẫn trực tiếp của Assist Canonicalizer. Để phản ánh đúng thứ tự xử lý thực tế, kết quả Assist Canonicalizer được tính theo kết quả HassIL khi HassIL xử lý chính xác; chỉ khi HassIL thất bại mới dùng kết quả của đường dẫn chuẩn hóa. Cách tính này mô phỏng cả hai đường dẫn ưu tiên HassIL: lượt nhận diện ý định cục bộ của Home Assistant khi bật `prefer_local_intents` và shortcut của Assist Canonicalizer khi tắt tùy chọn này. Cả hai lượt chạy đều được đối chiếu với dữ liệu kiểm soát có thể thực thi để đánh giá ý định, tham số và mục tiêu.
 
 ### Kết quả tổng quan
 
