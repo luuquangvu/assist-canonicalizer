@@ -29,6 +29,16 @@
     }
   },
   "services": {
+    "set_fallback_agent": {
+      "name": "Définir l'agent de secours",
+      "description": "Modifie l'agent de conversation de secours utilisé pour les prochaines requêtes.",
+      "fields": {
+        "agent_id": {
+          "name": "Agent de conversation",
+          "description": "L'agent de conversation à utiliser lorsqu'Assist Canonicalizer bascule vers le secours."
+        }
+      }
+    },
     "test_match": {
       "name": "Tester la correspondance",
       "description": "Renvoie les candidats classés pour une saisie de texte avec notation lexicale et seuils personnalisés.",

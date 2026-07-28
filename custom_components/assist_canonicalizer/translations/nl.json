@@ -29,6 +29,16 @@
     }
   },
   "services": {
+    "set_fallback_agent": {
+      "name": "Fallback-agent instellen",
+      "description": "Wijzigt de fallback-gespreksagent voor toekomstige verzoeken.",
+      "fields": {
+        "agent_id": {
+          "name": "Gespreksagent",
+          "description": "De gespreksagent die Assist Canonicalizer bij een fallback gebruikt."
+        }
+      }
+    },
     "test_match": {
       "name": "Match testen",
       "description": "Retourneert gerangschikte kandidaten voor een tekstinvoer met lexicale scoring en aangepaste drempels.",

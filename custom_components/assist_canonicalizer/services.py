@@ -11,6 +11,8 @@ from functools import partial
 from typing import Any
 
 import voluptuous as vol
+from homeassistant.components.conversation.agent_manager import async_get_agent
+from homeassistant.components.conversation.const import HOME_ASSISTANT_AGENT
 from homeassistant.core import ServiceCall, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
@@ -19,6 +21,7 @@ from .builtin_intents import language_variant_for
 from .candidate import Candidate
 from .const import (
     ATTR_ACCEPTED,
+    ATTR_AGENT_ID,
     ATTR_CANDIDATE_COUNT,
     ATTR_INTENT_NAME,
     ATTR_LANGUAGE,
@@ -27,6 +30,7 @@ from .const import (
     ATTR_SOURCE,
     ATTR_TEXT,
     ATTR_TOP_CANDIDATES,
+    CONF_FALLBACK_AGENT_ID,
     DATA_RUNTIME,
     DEFAULT_MAX_DYNAMIC_CANDIDATES,
     DEFAULT_MAX_DYNAMIC_SLOT_VALUES,
@@ -37,6 +41,7 @@ from .const import (
     SERVICE_DIAGNOSTICS,
     SERVICE_DUMP_CANDIDATES,
     SERVICE_REBUILD_INDEX,
+    SERVICE_SET_FALLBACK_AGENT,
     SERVICE_TEST_MATCH,
 )
 from .indexer import CanonicalIndex
@@ -83,10 +88,26 @@ DUMP_CANDIDATES_SCHEMA = vol.Schema(
         vol.Optional(ATTR_REBUILD, default=False): cv.boolean,
     }
 )
+SET_FALLBACK_AGENT_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_AGENT_ID): vol.All(
+            cv.string,
+            str.strip,
+            vol.Length(min=1),
+        )
+    }
+)
 
 
 def async_setup_services(hass: Any) -> None:
     """Register Assist Canonicalizer services."""
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SET_FALLBACK_AGENT,
+        partial(_handle_set_fallback_agent, hass),
+        schema=SET_FALLBACK_AGENT_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
     hass.services.async_register(
         DOMAIN,
         SERVICE_TEST_MATCH,
@@ -127,6 +148,7 @@ def async_setup_services(hass: Any) -> None:
 
 def async_unload_services(hass: Any) -> None:
     """Remove Assist Canonicalizer services."""
+    hass.services.async_remove(DOMAIN, SERVICE_SET_FALLBACK_AGENT)
     hass.services.async_remove(DOMAIN, SERVICE_TEST_MATCH)
     hass.services.async_remove(DOMAIN, SERVICE_REBUILD_INDEX)
     hass.services.async_remove(DOMAIN, SERVICE_CLEAR_INDEX)
@@ -165,6 +187,37 @@ def _wrap_service_errors(
         return wrapper
 
     return decorator
+
+
+@_wrap_service_errors("Fallback agent update")
+async def _handle_set_fallback_agent(hass: Any, call: ServiceCall) -> dict[str, Any]:
+    """Persist a new fallback conversation agent without reloading the entry."""
+    _runtime, entry = _runtime_entry_from_hass(hass)
+    if entry is None:
+        raise HomeAssistantError("Assist Canonicalizer config entry is not available")
+
+    agent_id = call.data[ATTR_AGENT_ID]
+    if agent_id == entry.entry_id:
+        raise HomeAssistantError("Assist Canonicalizer cannot use itself as the fallback agent")
+
+    try:
+        agent = async_get_agent(hass, agent_id)
+    except (KeyError, ValueError):
+        agent = None
+    if agent is None:
+        raise HomeAssistantError(f"Conversation agent '{agent_id}' is not available")
+    if _agent_belongs_to_entry(agent, entry.entry_id):
+        raise HomeAssistantError("Assist Canonicalizer cannot use itself as the fallback agent")
+
+    previous_agent_id = _configured_fallback_agent_id(entry)
+    options = dict(getattr(entry, "options", {}) or {})
+    options[CONF_FALLBACK_AGENT_ID] = agent_id
+    config_entry_changed = hass.config_entries.async_update_entry(entry, options=options)
+    return {
+        CONF_FALLBACK_AGENT_ID: agent_id,
+        "previous_fallback_agent_id": previous_agent_id,
+        "changed": config_entry_changed,
+    }
 
 
 @_wrap_service_errors("Matching test")
@@ -395,6 +448,24 @@ def _runtime_entry_from_hass(hass: Any) -> tuple[CanonicalizerRuntime, Any]:
         if isinstance(runtime, CanonicalizerRuntime):
             return runtime, entry_data.get("entry")
     raise HomeAssistantError("Assist Canonicalizer is not loaded")
+
+
+def _agent_belongs_to_entry(agent: Any, entry_id: str) -> bool:
+    """Return whether a conversation agent belongs to the canonicalizer entry."""
+    registry_entry = getattr(agent, "registry_entry", None)
+    return getattr(agent, "unique_id", None) == f"{entry_id}-conversation" or (
+        registry_entry is not None and getattr(registry_entry, "config_entry_id", None) == entry_id
+    )
+
+
+def _configured_fallback_agent_id(entry: Any) -> str:
+    """Return the effective fallback agent configured before a service update."""
+    options = getattr(entry, "options", {}) or {}
+    data = getattr(entry, "data", {}) or {}
+    configured = options.get(CONF_FALLBACK_AGENT_ID) or data.get(CONF_FALLBACK_AGENT_ID)
+    if not isinstance(configured, str) or configured == entry.entry_id:
+        return HOME_ASSISTANT_AGENT
+    return configured
 
 
 def _service_language(hass: Any, call: ServiceCall) -> str:
