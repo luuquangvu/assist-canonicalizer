@@ -1,5 +1,6 @@
 """Tests for lexical ranking and candidate indexing."""
 
+import unicodedata
 from dataclasses import replace
 from typing import Any, cast
 
@@ -43,13 +44,15 @@ from custom_components.assist_canonicalizer.ranking import (
     _query_slot_tokens_from_candidates,
     _query_token_coverage,
     _rank_prefilter_keys,
-    _rank_prefilter_keys_from_intersections,
     _rank_prefilter_keys_with_sparse_bm25,
     _raw_cached_fuzz_ratio,
     _ScoringContext,
+    _sparse_prefilter_keys_from_intersections,
+    _SparsePrefilterKeys,
     _top_additional_slot_indices,
     _top_additional_wildcard_indices,
     _top_prefilter_indices,
+    _top_sparse_prefilter_indices,
     _wildcard_variants_match,
     accepted_candidate,
     clear_ranking_caches,
@@ -282,6 +285,45 @@ def test_candidate_slot_tokens_ignore_non_string_static_slots_metadata(
     )
 
     assert candidate.slot_tokens_set == frozenset({"kitchen"})
+
+
+def test_candidate_surface_slot_token_properties_preserve_exclusions() -> None:
+    """Cache localized slot tokens while excluding static and wildcard slots."""
+    candidate = Candidate(
+        text="play local station",
+        intent_name="HassMediaSearchAndPlay",
+        metadata={
+            "slots": '{"domain":"media_player","name":"window","query":"free words"}',
+            "slots_raw": '{"name":"fenster","query":"freie wörter"}',
+            "static_slots": "domain",
+            "wildcard_slots": "query",
+        },
+    )
+
+    assert candidate.surface_slot_tokens == frozenset({"fenster", "freie", "wörter"})
+    assert candidate.concrete_surface_slot_tokens == frozenset({"fenster"})
+    assert candidate.surface_slot_tokens is candidate.surface_slot_tokens
+    assert candidate.concrete_surface_slot_tokens is candidate.concrete_surface_slot_tokens
+
+
+def test_concrete_surface_slot_tokens_excludes_inferred_wildcards() -> None:
+    """Exclude registered free-text slots when explicit wildcard metadata is absent."""
+    language = "candidate-property-wildcard"
+    register_custom_wildcards_from_sources(
+        language,
+        {"custom": {"lists": {"local_free_text": {"wildcard": True}}}},
+    )
+    candidate = Candidate(
+        text="say local_free_text to kitchen speaker",
+        intent_name="TestIntent",
+        language=language,
+        metadata={
+            "slots": '{"local_free_text":"message","name":"kitchen speaker"}',
+        },
+    )
+
+    assert candidate.wildcard_infos == ((1, "local_free_text"),)
+    assert candidate.concrete_surface_slot_tokens == frozenset({"kitchen", "speaker"})
 
 
 def test_rank_candidates_prefers_matching_entity_terms() -> None:
@@ -1951,6 +1993,24 @@ def test_query_slot_tokens_do_not_reuse_literal_as_slot_prefix() -> None:
     ) == frozenset({"window"})
 
 
+def test_slot_token_query_cache_evicts_only_the_oldest_entry() -> None:
+    """Keep the bounded FIFO cache warm when a ninth query is inserted."""
+    index = SlotTokenIndex.from_candidate_tokens((frozenset({"kitchen"}),))
+    query_tokens = [frozenset({f"query{position}"}) for position in range(9)]
+    for tokens in query_tokens[:8]:
+        ranking._slot_index_query_matches(tokens, index)
+
+    first_key = (query_tokens[0], None)
+    retained_keys = {(tokens, None) for tokens in query_tokens[1:8]}
+    assert ranking._slot_index_query_matches(query_tokens[0], index) == frozenset()
+
+    ranking._slot_index_query_matches(query_tokens[8], index)
+
+    assert first_key not in index.query_match_cache
+    assert retained_keys <= index.query_match_cache.keys()
+    assert len(index.query_match_cache) == 8
+
+
 def test_slot_prefilter_rescue_requires_complete_target_slot_match() -> None:
     """Rescue a typoed target without admitting a shared-area competitor."""
     candidate_slot_tokens = (
@@ -2222,15 +2282,36 @@ def test_intersection_prefilter_keys_match_dense_scores(
         index: score for index, score in enumerate(raw_bm25_scores) if score > 0.0
     }
 
-    fused_keys = _rank_prefilter_keys_from_intersections(
-        char_index.intersections(query_grams),
+    intersections, touched = char_index.intersections_with_touched(query_grams)
+    sparse_keys = _sparse_prefilter_keys_from_intersections(
+        intersections,
+        touched,
         len(query_grams),
         char_index.gram_counts,
         sparse_bm25_scores,
         inv_max,
     )
+    fused_keys = _SparsePrefilterKeys(sparse_keys, len(candidate_grams))
 
-    assert fused_keys == _rank_prefilter_keys(dense_char_scores, dense_bm25_scores)
+    dense_keys = _rank_prefilter_keys(dense_char_scores, dense_bm25_scores)
+    assert [fused_keys[index] for index in range(len(fused_keys))] == dense_keys
+    assert _top_sparse_prefilter_indices(
+        sparse_keys, len(candidate_grams), len(candidate_grams)
+    ) == _top_prefilter_indices(dense_keys, len(dense_keys))
+
+
+def test_sparse_prefilter_keys_obey_dense_sequence_bounds() -> None:
+    """Support normal negative indices and terminate sequence iteration."""
+    sparse_keys = _SparsePrefilterKeys({0: -0.5, 2: -0.2}, 3)
+
+    assert sparse_keys[-1] == -0.2
+    assert sparse_keys[-2] == 0.0
+    assert sparse_keys[1:] == [0.0, -0.2]
+    assert list(sparse_keys) == [-0.5, 0.0, -0.2]
+    with pytest.raises(IndexError):
+        _ = sparse_keys[3]
+    with pytest.raises(IndexError):
+        _ = sparse_keys[-4]
 
 
 def test_additional_wildcard_prefilter_is_bounded_by_literal_relevance() -> None:
@@ -2892,6 +2973,73 @@ def test_rank_candidates_explicit_location_overrides_intent_context() -> None:
     )
 
 
+def test_rank_candidates_unknown_vocabulary_disables_intent_context() -> None:
+    """Context must not boost candidates when the query names unknown vocabulary.
+
+    Regression: ``allume la téloche`` (slang for TV, unknown to the corpus and
+    registry) was boosted by satellite area context over the acceptance margin
+    and executed a generic light candidate instead of falling back.
+    """
+    generic = Candidate(
+        text="turn on the lamp",
+        intent_name="HassTurnOn",
+        language="en",
+        metadata={
+            "slots": '{"domain":"light"}',
+            "static_slots": "domain",
+            "literal_text": "turn on the lamp",
+        },
+    )
+    kitchen = Candidate(
+        text="turn on the kitchen",
+        intent_name="HassTurnOn",
+        language="en",
+        metadata={
+            "slots": '{"domain":"light","area":"Kitchen"}',
+            "static_slots": "domain",
+            "literal_text": "turn on the",
+        },
+    )
+    intent_context = {"area": {"value": "Kitchen", "text": "Kitchen"}}
+
+    known_with_context = rank_candidates(
+        "turn on the",
+        [generic, kitchen],
+        max_candidates=2,
+        language="en",
+        intent_context=intent_context,
+    )
+    known_without_context = rank_candidates(
+        "turn on the",
+        [generic, kitchen],
+        max_candidates=2,
+        language="en",
+    )
+
+    assert [item.candidate for item in known_with_context] == [kitchen, generic]
+    assert [item.candidate for item in known_without_context] == [generic, kitchen]
+    assert known_with_context[0].scores.final_score > known_without_context[1].scores.final_score
+
+    with_context = rank_candidates(
+        "turn on the telly",
+        [generic, kitchen],
+        max_candidates=2,
+        language="en",
+        intent_context=intent_context,
+    )
+    without_context = rank_candidates(
+        "turn on the telly",
+        [generic, kitchen],
+        max_candidates=2,
+        language="en",
+    )
+
+    assert [item.candidate for item in with_context] == [item.candidate for item in without_context]
+    assert [item.scores.final_score for item in with_context] == pytest.approx(
+        [item.scores.final_score for item in without_context]
+    )
+
+
 def test_rank_candidates_explicit_entity_overrides_intent_context() -> None:
     """Do not boost an area action over an explicitly named entity action."""
     named = Candidate(
@@ -3309,7 +3457,7 @@ def test_apply_intent_disambiguation_promotes_higher_intent_score_for_exact_tie(
 
     ranked = [first, second]
 
-    ranking._apply_intent_disambiguation(ranked)
+    ranking.apply_intent_disambiguation(ranked)
 
     # The higher intent_score candidate with a different intent should be promoted to rank 0
     assert ranked[0] is second
@@ -3343,7 +3491,7 @@ def test_apply_intent_disambiguation_does_not_promote_lower_final_score() -> Non
 
     ranked = [first, second]
 
-    ranking._apply_intent_disambiguation(ranked)
+    ranking.apply_intent_disambiguation(ranked)
 
     assert ranked[0] is first
     assert ranked[1] is second
@@ -3376,7 +3524,7 @@ def test_apply_intent_disambiguation_keeps_order_for_same_intent() -> None:
 
     ranked = [first, second]
 
-    ranking._apply_intent_disambiguation(ranked)
+    ranking.apply_intent_disambiguation(ranked)
 
     # Because the intents are identical, the original ordering should be preserved
     assert ranked[0] is first
@@ -3399,7 +3547,7 @@ def test_apply_intent_disambiguation_skips_same_intent_variants() -> None:
     )
     ranked = [first, same_intent, competitor]
 
-    ranking._apply_intent_disambiguation(ranked)
+    ranking.apply_intent_disambiguation(ranked)
 
     assert ranked == [competitor, same_intent, first]
 
@@ -4586,6 +4734,42 @@ def test_rehydration_edge_cases() -> None:
     assert rehydrate_wildcard_slots(slots, "play {song}", "invalid query", "en") == slots
 
 
+def test_rehydration_spaced_unit_suffix_keeps_token_alignment() -> None:
+    """Keep normalized indices aligned around spaced unit suffixes like "50 %".
+
+    Whole-string normalization preserves a standalone "%"/"°" token after a
+    digit, while naive per-token normalization drops it, shifting every later
+    token index and silently leaking the placeholder into the output.
+    """
+    candidate = Candidate(
+        text="regle 50 % puis joue media maintenant",
+        intent_name="TestIntent",
+        language="fr",
+        metadata={
+            "sentence_template": "regle 50 % puis joue {media} maintenant",
+            "wildcard_slots": "media",
+        },
+    )
+    assert candidate.wildcard_infos == ((5, "media"),)
+
+    text, replacements = get_wildcard_rehydration(
+        candidate, "regle 50 % puis joue Les Feuilles Mortes maintenant"
+    )
+    assert replacements == {"media": "Les Feuilles Mortes"}
+    assert "media" not in text
+
+
+def test_extract_original_span_composes_nfd_input() -> None:
+    """Slice NFD (decomposed) surface tokens against NFC normalized tokens."""
+    nfd_query = unicodedata.normalize("NFD", "allume Café-Lampe maintenant")
+    assert _extract_original_span(nfd_query, 1, 2) == unicodedata.normalize("NFD", "Café")
+
+
+def test_trim_wildcard_overlaps_handles_casefold_expansion() -> None:
+    """Trim glued literal prefixes whose casefold changes length ("ß" → "ss")."""
+    assert _trim_wildcard_overlaps("Straßenlampe eins", "strassenitem", "item") == "lampe eins"
+
+
 def test_ranking_internal_helpers() -> None:
     """Directly test internal ranking helpers to ensure their stability."""
     # Non-trivial slot penalty path: conflicting slot tokens.
@@ -4608,6 +4792,7 @@ def test_ranking_internal_helpers() -> None:
         max_raw_score=0.0,
         positional_lookup={},
         positional_literal_tokens=None,
+        short_fuzzy_query_tokens=frozenset(),
         non_entity_tokens=None,
         candidate_slot_tokens=None,
         slot_tokens_by_index={},
@@ -4669,6 +4854,7 @@ def test_ranking_internal_helpers() -> None:
         max_raw_score=0.0,
         positional_lookup={},
         positional_literal_tokens=None,
+        short_fuzzy_query_tokens=frozenset(),
         non_entity_tokens=None,
         candidate_slot_tokens=None,
         slot_tokens_by_index={},
@@ -4739,3 +4925,204 @@ def test_ranking_internal_helpers() -> None:
     )
     assert "thriller" in wildcard_toks
     assert "song" not in cand_slot
+
+
+def test_registry_slot_token_fuzzy_match_short_token_gate() -> None:
+    """Block stopword-length bleed while keeping non-literal short-typo anchors.
+
+    ``la``/``loa`` is the FR article vs VI alias cross-language bleed; it must
+    stay blocked because ``la`` is a grammar literal. ``fn``/``fan`` is a
+    truncated target with no literal reading and must keep its anchor.
+    """
+    assert not ranking._registry_slot_token_fuzzy_match("loa", "la", frozenset())
+    assert not ranking._registry_slot_token_fuzzy_match("fan", "fn", frozenset())
+    assert ranking._registry_slot_token_fuzzy_match("fan", "fn", frozenset({"fn"}))
+    # The slot side always requires three characters, even for exempt tokens.
+    assert not ranking._registry_slot_token_fuzzy_match("la", "lah", frozenset({"la", "lah"}))
+    # Three-or-more-character pairs keep plain threshold behavior.
+    assert ranking._registry_slot_token_fuzzy_match("het", "hhet", frozenset())
+
+
+def test_short_nonliteral_query_tokens_excludes_grammar_words() -> None:
+    """Only sub-three-character tokens absent from corpus literals are exempt."""
+    literals = frozenset({"allume", "la", "lampe", "turn", "off"})
+    tokens = frozenset({"la", "fn", "off", "tivi"})
+    assert ranking._short_nonliteral_query_tokens(tokens, literals) == frozenset({"fn"})
+    assert ranking._short_nonliteral_query_tokens(tokens, None) == frozenset()
+
+
+def test_prepare_rank_query_state_preserves_missing_literal_inventory() -> None:
+    """Keep strict short-token gating when no literal inventory was supplied."""
+    missing_literals = ranking._prepare_rank_query_state("fn", None)
+    empty_literals = ranking._prepare_rank_query_state("fn", frozenset())
+
+    assert missing_literals.short_fuzzy_tokens == frozenset()
+    assert empty_literals.short_fuzzy_tokens == frozenset({"fn"})
+
+
+def test_query_unknown_content_tokens_accepts_slot_value_typos() -> None:
+    """A bounded typo of an evidenced slot value is not unknown vocabulary.
+
+    ``query_slot_tokens`` records the slot-side spelling of fuzzy matches, so
+    the guard must apply the same fuzzy matcher in reverse; otherwise a
+    one-edit typo in a registry-only target word would suppress context
+    disambiguation for the whole query.
+    """
+    query_tokens = frozenset({"turn", "on", "the", "lightt"})
+    literals = frozenset({"turn", "on", "the"})
+    unknown = ranking._query_unknown_content_tokens(
+        query_tokens,
+        literals,
+        {},
+        frozenset({"light"}),
+    )
+    assert unknown == frozenset()
+
+    genuinely_unknown = ranking._query_unknown_content_tokens(
+        frozenset({"turn", "on", "the", "teloche"}),
+        literals,
+        {},
+        frozenset({"light"}),
+    )
+    assert genuinely_unknown == frozenset({"teloche"})
+
+
+def test_has_unanchored_entity_slot_short_typo_exemption() -> None:
+    """A truncated entity name anchors only when exempt from the literal gate."""
+    slots = {"name": "fan"}
+    query = ("turn", "off", "fn")
+    assert ranking._has_unanchored_entity_slot(slots, frozenset(), query)
+    assert not ranking._has_unanchored_entity_slot(slots, frozenset(), query, frozenset({"fn"}))
+    # The FR article never anchors the VI alias regardless of exemptions
+    # computed from FR grammar literals (which always contain "la").
+    assert ranking._has_unanchored_entity_slot(
+        {"name": "loa"}, frozenset(), ("allume", "la", "lampe")
+    )
+
+
+def test_chars_conflict_in_marks_tone_semantics() -> None:
+    """Disjoint explicit marks over one base conflict; shared or absent marks do not."""
+    assert ranking._chars_conflict_in_marks("ó", "ộ")
+    assert not ranking._chars_conflict_in_marks("á", "ắ")
+    assert not ranking._chars_conflict_in_marks("é", "e")
+    assert not ranking._chars_conflict_in_marks("a", "b")
+
+
+def test_is_fuzzy_slot_token_match_rejects_conflicting_tone_substitution() -> None:
+    """A single substitution between deliberately distinct tones is not a typo."""
+    assert not ranking._is_fuzzy_slot_token_match("bóng", "bộng")
+    assert not ranking._is_fuzzy_slot_token_match("phóng", "phộng")
+    # A marked character against its bare base stays a plausible slip.
+    assert ranking._is_fuzzy_slot_token_match("phóng", "phong")
+
+
+def test_rank_candidates_unknown_filler_pins_context_suppression() -> None:
+    """Document the conservative trade-off for out-of-corpus filler tokens.
+
+    An unknown token that appears in no candidate suppresses intent-context
+    boosts even when the target itself is resolvable. The delegated text
+    retains live context, so area resolution still happens downstream; this
+    test pins the ranking-level semantics so any future change is deliberate.
+    """
+    generic = Candidate(
+        text="turn on the light",
+        intent_name="HassTurnOn",
+        language="en",
+        metadata={
+            "slots": '{"domain":"light"}',
+            "static_slots": "domain",
+            "literal_text": "turn on the light",
+        },
+    )
+    kitchen = Candidate(
+        text="turn on the kitchen light",
+        intent_name="HassTurnOn",
+        language="en",
+        metadata={
+            "slots": '{"domain":"light","area":"Kitchen"}',
+            "static_slots": "domain",
+            "literal_text": "turn on the light",
+        },
+    )
+
+    with_context = rank_candidates(
+        "euhh turn on the light",
+        [generic, kitchen],
+        max_candidates=2,
+        language="en",
+        intent_context={"area": {"value": "Kitchen", "text": "Kitchen"}},
+    )
+    without_context = rank_candidates(
+        "euhh turn on the light",
+        [generic, kitchen],
+        max_candidates=2,
+        language="en",
+    )
+
+    assert [item.candidate for item in with_context] == [item.candidate for item in without_context]
+    assert [item.scores.final_score for item in with_context] == pytest.approx(
+        [item.scores.final_score for item in without_context]
+    )
+
+
+def test_prepare_bm25_scoring_rescales_dynamic_scores_to_reference_max() -> None:
+    """Normalize weak dynamic sets by the stronger reference-corpus match."""
+    candidates = [
+        Candidate(text="kitchen radio", intent_name="HassTurnOn", language="en"),
+    ]
+    reference_bm25_index = BM25Index.from_normalized_texts(
+        ("turn on the kitchen light", "turn off the hall lamp"),
+    )
+    query_tokens = ("turn", "on", "the", "kitchen", "light")
+
+    scoring = ranking._prepare_bm25_scoring(
+        candidates,
+        query_tokens,
+        None,
+        reference_bm25_index,
+    )
+
+    reference_max_raw = max(
+        reference_bm25_index.raw_scores_sparse(query_tokens).values(),
+    )
+    dynamic_raw = reference_bm25_index.raw_score_tokens(
+        candidates[0].normalized_tokens,
+        query_tokens,
+    )
+    assert scoring.max_raw_score == reference_max_raw
+    assert scoring.score_at(0) == pytest.approx(dynamic_raw / reference_max_raw)
+    assert scoring.score_at(0) < 1.0
+
+
+def test_multiwildcard_partial_rehydration_fails_closed() -> None:
+    """Never leak a literal placeholder token from a partly aligned template."""
+    register_custom_wildcards_from_sources(
+        "de",
+        {
+            "custom": {
+                "lists": {
+                    "timer_name": {"wildcard": True},
+                    "timer_duration": {"wildcard": True},
+                }
+            }
+        },
+    )
+    candidate = Candidate(
+        text="timer timer_name auf timer_duration minuten",
+        intent_name="HassTimerSet",
+        language="de",
+        metadata={
+            "sentence_template": "timer {timer_name} auf {timer_duration} minuten",
+            "wildcard_slots": "timer_name,timer_duration",
+            "slots": '{"timer_name":"timer_name","timer_duration":"timer_duration"}',
+        },
+        slot_values=("timer_name", "timer_duration"),
+    )
+
+    rehydrated_text, replacements = get_wildcard_rehydration(
+        candidate,
+        "timer Nudeln kochen auf zehn Minuten",
+    )
+
+    assert rehydrated_text == candidate.text
+    assert replacements == {}

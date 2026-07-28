@@ -143,32 +143,45 @@ def _fallback_agent_choices(
     return choices
 
 
-def _available_fallback_agents(hass: Any, exclude_agent_id: str | None) -> dict[str, str]:
-    """Return conversation agent IDs and labels that can be used as fallback targets."""
-    agents = {}
-    entity_component = hass.data.get(DATA_COMPONENT)
-    if entity_component is not None:
-        for entity in entity_component.entities:
-            agent_id = getattr(entity, "entity_id", None)
-            if not isinstance(agent_id, str) or not agent_id:
-                continue
-            if (
-                agent_id == exclude_agent_id
-                or getattr(entity, "unique_id", None) == f"{exclude_agent_id}-conversation"
-                or (
-                    hasattr(entity, "registry_entry")
-                    and entity.registry_entry is not None
-                    and getattr(entity.registry_entry, "config_entry_id", None) == exclude_agent_id
-                )
-            ):
-                continue
-            agent_name = None
-            if hasattr(hass, "states") and (state := hass.states.get(agent_id)):
-                agent_name = state.name
-            if not agent_name:
-                agent_name = getattr(entity, "name", None)
-            agents[agent_id] = str(agent_name) if agent_name else agent_id
+def _entity_is_excluded(entity: Any, agent_id: str, exclude_agent_id: str | None) -> bool:
+    """Return whether a conversation entity belongs to the canonicalizer entry."""
+    registry_entry = getattr(entity, "registry_entry", None)
+    return exclude_agent_id is not None and (
+        agent_id == exclude_agent_id
+        or getattr(entity, "unique_id", None) == f"{exclude_agent_id}-conversation"
+        or (
+            registry_entry is not None
+            and getattr(registry_entry, "config_entry_id", None) == exclude_agent_id
+        )
+    )
 
+
+def _conversation_entity_agents(
+    hass: Any,
+    exclude_agent_id: str | None,
+) -> dict[str, str]:
+    """Return eligible conversation entity IDs and display labels."""
+    agents: dict[str, str] = {}
+    entity_component = hass.data.get(DATA_COMPONENT)
+    if entity_component is None:
+        return agents
+    for entity in entity_component.entities:
+        agent_id = getattr(entity, "entity_id", None)
+        if (
+            not isinstance(agent_id, str)
+            or not agent_id
+            or _entity_is_excluded(entity, agent_id, exclude_agent_id)
+        ):
+            continue
+        state = hass.states.get(agent_id) if hasattr(hass, "states") else None
+        agent_name = getattr(state, "name", None) or getattr(entity, "name", None)
+        agents[agent_id] = str(agent_name) if agent_name else agent_id
+    return agents
+
+
+def _managed_fallback_agents(hass: Any, exclude_agent_id: str | None) -> dict[str, str]:
+    """Return eligible non-entity agents registered with the agent manager."""
+    agents: dict[str, str] = {}
     manager = get_agent_manager(hass)
     for agent_info in manager.async_get_agent_info():
         agent_id = getattr(agent_info, "id", None)
@@ -180,4 +193,11 @@ def _available_fallback_agents(hass: Any, exclude_agent_id: str | None) -> dict[
                 continue
         agent_name = getattr(agent_info, "name", None)
         agents[agent_id] = str(agent_name) if agent_name else agent_id
+    return agents
+
+
+def _available_fallback_agents(hass: Any, exclude_agent_id: str | None) -> dict[str, str]:
+    """Return fallback agent IDs and labels sorted by display name."""
+    agents = _conversation_entity_agents(hass, exclude_agent_id)
+    agents.update(_managed_fallback_agents(hass, exclude_agent_id))
     return dict(sorted(agents.items(), key=lambda item: item[1].casefold()))

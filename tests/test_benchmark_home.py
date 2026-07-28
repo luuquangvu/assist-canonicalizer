@@ -270,13 +270,14 @@ def test_live_response_oracle_separates_entities_from_area_targets() -> None:
 
 
 def test_managed_summary_reports_paired_hassil_effectiveness() -> None:
-    """Keep recovered and regressed cases distinct from absolute accuracy."""
+    """Model HassIL-first protection without hiding the direct agent result."""
 
     def case_result(
         case_id: str,
         *,
         canonicalizer_correct: bool,
         hassil_correct: bool,
+        fallback_observed: bool = False,
     ) -> dict[str, Any]:
         return {
             "id": case_id,
@@ -291,6 +292,7 @@ def test_managed_summary_reports_paired_hassil_effectiveness() -> None:
             "hassil_baseline_passed": hassil_correct,
             "hassil_baseline_last_observation": {
                 "execution_success": hassil_correct,
+                "fallback_observed": False,
             },
             "last_observation": {
                 "execution_success": canonicalizer_correct,
@@ -299,7 +301,7 @@ def test_managed_summary_reports_paired_hassil_effectiveness() -> None:
                 "canonical_oracle_unmatched_count": 0,
                 "corpus_label_intent_matches_oracle": True,
                 "corpus_label_slots_match_oracle": True,
-                "fallback_observed": False,
+                "fallback_observed": fallback_observed,
                 "intent_correct": canonicalizer_correct,
                 "slots_correct": canonicalizer_correct,
                 "slot_match_method": "raw_slots" if canonicalizer_correct else "none",
@@ -314,19 +316,69 @@ def test_managed_summary_reports_paired_hassil_effectiveness() -> None:
                 hassil_correct=False,
             ),
             case_result(
-                "regressed",
+                "protected-mismatch",
                 canonicalizer_correct=False,
                 hassil_correct=True,
             ),
+            case_result(
+                "protected-fallback",
+                canonicalizer_correct=False,
+                hassil_correct=True,
+                fallback_observed=True,
+            ),
+            case_result(
+                "unhandled-mismatch",
+                canonicalizer_correct=False,
+                hassil_correct=False,
+            ),
+            case_result(
+                "unhandled-fallback",
+                canonicalizer_correct=False,
+                hassil_correct=False,
+                fallback_observed=True,
+            ),
+            {
+                "id": "language-smoke",
+                "oracle": "state",
+                "passed": True,
+                "measured_passes": 1,
+                "measured_requests": 1,
+                "latency_samples_ms": [5.0],
+                "last_observation": {
+                    "execution_success": True,
+                    "canonical_match": True,
+                },
+            },
         ]
     )
 
-    assert summary["canonicalizer_accuracy_pct"] == 50.0
-    assert summary["hassil_baseline_accuracy_pct"] == 50.0
-    assert summary["accuracy_uplift_pp"] == 0.0
+    assert summary["canonicalizer_accuracy_pct"] == 60.0
+    assert summary["canonicalizer_correct_count"] == 3
+    assert summary["fallback_count"] == 1
+    assert summary["fallback_rate_pct"] == 20.0
+    assert summary["mismatch_count"] == 1
+    assert summary["mismatch_rate_pct"] == 20.0
+    assert summary["direct_canonicalizer_accuracy_pct"] == 20.0
+    assert summary["direct_canonicalizer_correct_count"] == 1
+    assert summary["direct_canonicalizer_fallback_count"] == 2
+    assert summary["direct_canonicalizer_fallback_rate_pct"] == 40.0
+    assert summary["direct_canonicalizer_mismatch_count"] == 2
+    assert summary["direct_canonicalizer_mismatch_rate_pct"] == 40.0
+    assert summary["hassil_baseline_accuracy_pct"] == 40.0
+    assert summary["accuracy_uplift_pp"] == 20.0
     assert summary["recovered_case_count"] == 1
-    assert summary["regressed_case_count"] == 1
-    assert summary["net_recovered_case_count"] == 0
+    assert summary["shortcut_protected_case_count"] == 2
+    assert summary["shortcut_protected_rate_pct"] == 40.0
+    assert summary["both_correct_count"] == 0
+    assert summary["both_incorrect_count"] == 2
+    assert summary["canonical_match_count"] == 1
+    assert summary["canonical_match_pct"] == 20.0
+    assert (
+        summary["canonicalizer_accuracy_pct"]
+        + summary["mismatch_rate_pct"]
+        + summary["fallback_rate_pct"]
+        == 100.0
+    )
 
 
 def test_baseline_context_requires_explicit_home_assistant_upgrade() -> None:

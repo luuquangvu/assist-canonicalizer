@@ -20,13 +20,13 @@ class BM25Document:
     tokens: tuple[str, ...]
 
 
-@lru_cache(maxsize=65536)
+@lru_cache(maxsize=8192)
 def _analyze_tokens(tokens: tuple[str, ...]) -> tuple[Counter[str], int]:
     """Compute term frequencies and length for a tokenized document."""
     return Counter(tokens), len(tokens)
 
 
-@lru_cache(maxsize=65536)
+@lru_cache(maxsize=8192)
 def _analyze_document(text: str) -> tuple[tuple[str, ...], Counter[str], int]:
     """Tokenize and compute term frequencies and length for a document text."""
     tokens = tokenize_normalized(text)

@@ -66,6 +66,10 @@ DEFAULT_MAX_REGISTRY_VALUES_SCORED_PER_QUERY = 128
 REGISTRY_FUZZY_TOKEN_MIN_LENGTH = 5
 DEFAULT_RAPIDFUZZ_PREFILTER_CANDIDATES = 500
 DEFAULT_SLOT_PREFILTER_RESCUE_CANDIDATES = 32
+# Wildcard rescue candidates run the most expensive per-candidate scoring path
+# (stem-alignment rehydration plus rescoring), so their budget is much smaller
+# than the general prefilter. Selection is by literal-coverage relevance.
+DEFAULT_WILDCARD_PREFILTER_RESCUE_CANDIDATES = 64
 
 RAPIDFUZZ_WEIGHT = 0.33
 CHAR_NGRAM_WEIGHT = 0.32

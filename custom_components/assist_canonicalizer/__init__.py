@@ -98,9 +98,12 @@ async def _async_update_options(
 
 def _refresh_registry_slot_values(
     hass: HomeAssistantInstance, runtime: CanonicalizerRuntime
-) -> None:
-    """Refresh registry-derived slot values used for template expansion."""
-    runtime.update_registry_slot_values(async_registry_slot_values(hass))
+) -> bool:
+    """Refresh registry-derived slot values used for template expansion.
+
+    Returns whether the cached values actually changed.
+    """
+    return runtime.update_registry_slot_values(async_registry_slot_values(hass))
 
 
 def _subscribe_registry_updates(hass: HomeAssistantInstance, runtime: CanonicalizerRuntime) -> None:
@@ -138,7 +141,8 @@ def _handle_intent_updates(
     if runtime.closed:
         return
     active_languages = list(runtime.indexes)
-    runtime.update_intent_sources(intents_update)
+    if not runtime.update_intent_sources(intents_update):
+        return
     for language in active_languages:
         hass.add_job(runtime.async_rebuild_index, hass, language)
 
@@ -154,7 +158,8 @@ def _debounced_registry_rebuild(
         return
     runtime.rebuild_timer_cancel = None
     active_languages = list(runtime.indexes)
-    _refresh_registry_slot_values(hass, runtime)
+    if not _refresh_registry_slot_values(hass, runtime):
+        return
     for language in active_languages:
         hass.add_job(runtime.async_rebuild_index, hass, language)
 

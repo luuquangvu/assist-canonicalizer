@@ -22,6 +22,7 @@ import uuid
 from collections.abc import Generator, Sequence
 from pathlib import Path
 from string import ascii_letters, digits
+from time import monotonic
 from typing import Any, TypedDict
 
 import orjson
@@ -60,6 +61,7 @@ _COMPATIBILITY_METADATA_PROBE_TIMEOUT_SECONDS = 60
 _VENV_CREATE_TIMEOUT_SECONDS = 120
 _INSTALL_TIMEOUT_SECONDS = 300
 _CLEANUP_TIMEOUT_SECONDS = 30
+_CLEANUP_ISSUE_LIMIT = 10
 _COMPATIBILITY_PYTEST_TIMEOUT_SECONDS = 300
 
 _ALNUM_CHARS = ascii_letters + digits
@@ -679,6 +681,140 @@ def _reset_venv(venv_path: Path, py_ver: str) -> bool:
     return _ensure_venv(venv_path, py_ver)
 
 
+def _run_uv_pip_install(
+    python_bin: Path,
+    ha_version: str,
+    package_args: Sequence[str],
+    step_label: str,
+) -> None:
+    """Run uv pip install with constraints overrides and step logging."""
+    print(f"STEP_START: uv pip install {step_label}", flush=True)
+    with _overrides_file(ha_version) as overrides_path:
+        subprocess.run(
+            [
+                "uv",
+                "--no-config",
+                "pip",
+                "install",
+                "--upgrade",
+                "--overrides",
+                overrides_path,
+                "--python",
+                python_bin,
+                *package_args,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd=_REPO_ROOT,
+            timeout=_INSTALL_TIMEOUT_SECONDS,
+        )
+    print(f"STEP_OK: uv pip install {step_label}", flush=True)
+
+
+def _install_compatibility_dependencies(
+    python_bin: Path,
+    ha_version: str,
+    test_dependency_versions: dict[str, str],
+) -> None:
+    """Install Home Assistant and required test dependencies."""
+    required_test_deps = _required_test_deps(test_dependency_versions)
+    ha_spec = f"homeassistant=={ha_version}"
+    _run_uv_pip_install(
+        python_bin,
+        ha_version,
+        [ha_spec, *required_test_deps],
+        ha_spec,
+    )
+
+
+def _refresh_compatibility_dependencies(
+    python_bin: Path,
+    ha_version: str,
+    refresh_dependencies: tuple[str, ...],
+) -> None:
+    """Upgrade selected compatibility dependencies."""
+    _run_uv_pip_install(
+        python_bin,
+        ha_version,
+        refresh_dependencies,
+        " ".join(refresh_dependencies),
+    )
+
+
+def _cleanup_compatibility_bytecode(target_dir: Path) -> None:
+    """Remove stale bytecode caches, reporting missing targets as nonfatal no-ops."""
+    print("STEP_START: cleanup __pycache__", flush=True)
+    if target_dir.is_symlink():
+        message = f"refusing to clean symlinked target directory {target_dir}"
+        print(f"STEP_FAILED: cleanup __pycache__: {message}", file=sys.stderr, flush=True)
+        raise RuntimeError(message)
+    if not target_dir.exists():
+        print(
+            f"STEP_WARNING: cleanup __pycache__: target directory does not exist: {target_dir}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return
+    if not target_dir.is_dir():
+        message = f"cleanup target path is not a directory: {target_dir}"
+        print(f"STEP_FAILED: cleanup __pycache__: {message}", file=sys.stderr, flush=True)
+        raise RuntimeError(message)
+
+    deadline = monotonic() + _CLEANUP_TIMEOUT_SECONDS
+    issues: list[str] = []
+    issue_count = 0
+
+    def report_issue(message: str) -> None:
+        nonlocal issue_count
+        issue_count += 1
+        if len(issues) < _CLEANUP_ISSUE_LIMIT:
+            issues.append(message)
+            print(
+                f"STEP_WARNING: cleanup __pycache__: {message}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    def report_walk_error(err: OSError) -> None:
+        report_issue(f"unable to scan {err.filename or target_dir}: {err}")
+
+    try:
+        for root, dirnames, _filenames in os.walk(
+            target_dir,
+            topdown=True,
+            onerror=report_walk_error,
+            followlinks=False,
+        ):
+            if monotonic() > deadline:
+                report_issue(f"timed out after {_CLEANUP_TIMEOUT_SECONDS} seconds")
+                break
+            bytecode_names = [name for name in dirnames if name == "__pycache__"]
+            dirnames[:] = [name for name in dirnames if name != "__pycache__"]
+            timed_out = False
+            for name in bytecode_names:
+                if monotonic() > deadline:
+                    timed_out = True
+                    break
+                bytecode_dir = Path(root, name)
+                try:
+                    shutil.rmtree(bytecode_dir)
+                except OSError as err:
+                    report_issue(f"unable to remove {bytecode_dir}: {err}")
+            if timed_out:
+                report_issue(f"timed out after {_CLEANUP_TIMEOUT_SECONDS} seconds")
+                break
+    except OSError as err:
+        report_issue(f"unable to traverse {target_dir}: {err}")
+    if issue_count:
+        omitted_count = issue_count - len(issues)
+        if omitted_count:
+            issues.append(f"{omitted_count} additional issue(s) omitted")
+        print("STEP_FAILED: cleanup __pycache__", file=sys.stderr, flush=True)
+        raise RuntimeError("Compatibility bytecode cleanup failed: " + "; ".join(issues))
+    print("STEP_OK: cleanup __pycache__", flush=True)
+
+
 def _install_dependencies(
     venv_path: Path,
     python_bin: Path,
@@ -694,81 +830,20 @@ def _install_dependencies(
     if needs_install:
         if reset_before_install:
             _reset_venv(venv_path, py_ver)
-        required_test_deps = _required_test_deps(test_dependency_versions)
-        ha_spec = f"homeassistant=={ha_ver_to_install}"
-        print(f"STEP_START: uv pip install {ha_spec}", flush=True)
-        with _overrides_file(ha_ver_to_install) as overrides_path:
-            subprocess.run(
-                [
-                    "uv",
-                    "--no-config",
-                    "pip",
-                    "install",
-                    "--upgrade",
-                    "--overrides",
-                    overrides_path,
-                    "--python",
-                    python_bin,
-                    ha_spec,
-                    *required_test_deps,
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-                cwd=_REPO_ROOT,
-                timeout=_INSTALL_TIMEOUT_SECONDS,
-            )
-        print(f"STEP_OK: uv pip install {ha_spec}", flush=True)
-
-    elif refresh_deps:
-        refresh_label = " ".join(refresh_deps)
-        print(f"STEP_START: uv pip install {refresh_label}", flush=True)
-        with _overrides_file(ha_ver_to_install) as overrides_path:
-            subprocess.run(
-                [
-                    "uv",
-                    "--no-config",
-                    "pip",
-                    "install",
-                    "--upgrade",
-                    "--overrides",
-                    overrides_path,
-                    "--python",
-                    python_bin,
-                    *refresh_deps,
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-                cwd=_REPO_ROOT,
-                timeout=_INSTALL_TIMEOUT_SECONDS,
-            )
-        print(f"STEP_OK: uv pip install {refresh_label}", flush=True)
-
-    if needs_install or refresh_deps:
-        _write_venv_dependency_marker(venv_path, test_dependency_versions)
-        print("STEP_START: cleanup __pycache__", flush=True)
-        subprocess.run(
-            [
-                "find",
-                ".",
-                "-name",
-                "__pycache__",
-                "-type",
-                "d",
-                "-exec",
-                "rm",
-                "-rf",
-                "{}",
-                "+",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            cwd=_REPO_ROOT,
-            timeout=_CLEANUP_TIMEOUT_SECONDS,
+        _install_compatibility_dependencies(
+            python_bin,
+            ha_ver_to_install,
+            test_dependency_versions,
         )
-        print("STEP_OK: cleanup __pycache__", flush=True)
+    elif refresh_deps:
+        _refresh_compatibility_dependencies(
+            python_bin,
+            ha_ver_to_install,
+            refresh_deps,
+        )
+    if needs_install or refresh_deps:
+        _cleanup_compatibility_bytecode(venv_path)
+        _write_venv_dependency_marker(venv_path, test_dependency_versions)
 
 
 def _get_installed_ha_version(python_bin: Path) -> str:

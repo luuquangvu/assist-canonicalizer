@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from functools import lru_cache
 from itertools import pairwise
 from math import ceil
@@ -18,6 +19,8 @@ from .const import (
 )
 from .normalization import normalize_text
 from .utils import wildcard_slot_names
+
+_TRAILING_DIGIT_RE = re.compile(r"\d\Z")
 
 
 class WildcardVariantAnalysis(NamedTuple):
@@ -45,6 +48,35 @@ def _normalize_and_split(text: str) -> tuple[str, tuple[str, ...]]:
     """Normalize text and return both the normalized text and its tokens tuple."""
     norm = normalize_text(text)
     return norm, tuple(norm.split())
+
+
+def _contextual_norm_token_lists(
+    original_tokens: tuple[str, ...],
+) -> tuple[tuple[str, ...], ...]:
+    """Return each original token's normalized tokens, honoring left context.
+
+    Whole-string normalization preserves unit suffixes through a
+    digit lookbehind that may cross a whitespace boundary ("50 %" keeps
+    the "%" token), while normalizing a token in isolation drops it. All
+    other placeholder patterns require adjacency, so replaying a
+    digit-plus-space left context reproduces the whole-string reading and
+    keeps token indices aligned between both views.
+    """
+    lists: list[tuple[str, ...]] = []
+    previous_ends_with_digit = False
+    for original_token in original_tokens:
+        folded = unicodedata.normalize("NFKC", original_token).casefold()
+        if previous_ends_with_digit:
+            with_context = normalize_text(f"0 {original_token}")
+            context_tokens = tuple(with_context.split())
+            if context_tokens and context_tokens[0] == "0":
+                lists.append(context_tokens[1:])
+            else:
+                lists.append(tuple(normalize_text(original_token).split()))
+        else:
+            lists.append(tuple(normalize_text(original_token).split()))
+        previous_ends_with_digit = _TRAILING_DIGIT_RE.search(folded) is not None
+    return tuple(lists)
 
 
 @lru_cache(maxsize=1024)
@@ -106,17 +138,127 @@ def _extract_wc_value(
     return wc_value
 
 
+def _surface_prefix_length(value: str, folded_prefix: str) -> int:
+    """Return the surface char count whose casefold equals folded_prefix, or -1.
+
+    Casefolding can change string length ("ß" folds to "ss"), so the
+    surface slice boundary must be found by accumulating per-character
+    fold lengths instead of reusing ``len(folded_prefix)``.
+    """
+    target = len(folded_prefix)
+    total = 0
+    for index in range(len(value)):
+        total += len(value[index].casefold())
+        if total >= target:
+            if total == target and value[: index + 1].casefold() == folded_prefix:
+                return index + 1
+            return -1
+    return -1
+
+
+def _surface_suffix_length(value: str, folded_suffix: str) -> int:
+    """Return the surface char count whose casefold equals folded_suffix, or -1."""
+    target = len(folded_suffix)
+    total = 0
+    for count, index in enumerate(range(len(value) - 1, -1, -1), start=1):
+        total += len(value[index].casefold())
+        if total >= target:
+            if total == target and value[index:].casefold() == folded_suffix:
+                return count
+            return -1
+    return -1
+
+
 def _trim_wildcard_overlaps(wc_value: str, c_tok: str, matched_wc: str) -> str:
     """Trim partial prefix and suffix overlaps of the wildcard placeholder token from wc_value."""
     wc_pos = c_tok.find(matched_wc)
     if wc_pos != -1:
-        c_prefix_part = c_tok[:wc_pos]
         c_suffix_part = c_tok[wc_pos + len(matched_wc) :]
-        if c_prefix_part and wc_value.lower().startswith(c_prefix_part.lower()):
-            wc_value = wc_value[len(c_prefix_part) :]
-        if c_suffix_part and wc_value.lower().endswith(c_suffix_part.lower()):
-            wc_value = wc_value[: -len(c_suffix_part)]
+        if c_prefix_part := c_tok[:wc_pos]:
+            prefix_length = _surface_prefix_length(wc_value, c_prefix_part.casefold())
+            if prefix_length != -1:
+                wc_value = wc_value[prefix_length:]
+        if c_suffix_part:
+            suffix_length = _surface_suffix_length(wc_value, c_suffix_part.casefold())
+            if suffix_length != -1:
+                wc_value = wc_value[:-suffix_length]
     return wc_value
+
+
+def _has_adjacent_wildcards(wildcard_infos: tuple[tuple[int, str], ...]) -> bool:
+    """Return whether any two wildcards occupy adjacent normalized token indices."""
+    return any(
+        next_index <= current_index + 1
+        for (current_index, _), (next_index, _) in pairwise(wildcard_infos)
+    )
+
+
+def _extract_wildcard_replacement(
+    norm_tokens: tuple[str, ...],
+    wc_idx: int,
+    wc_name: str,
+    wildcard_indices: frozenset[int],
+    query: str,
+    query_tokens: tuple[str, ...],
+) -> str | None:
+    """Align, extract, and trim one wildcard value, or None when unresolvable.
+
+    Stem alignment locates query token boundaries for this specific wildcard.
+    Other registered wildcards are treated as position-agnostic wildcard tokens,
+    which allows prefix/suffix stems to align successfully around overlapping
+    wildcards. The raw matched substring is then extracted from the query, and
+    overlapping literals are trimmed (e.g. if stem alignment fuzzily matched
+    template suffix/prefix words).
+    """
+    boundaries = _find_rehydration_boundaries(
+        norm_tokens,
+        wc_idx,
+        query_tokens,
+        wildcard_indices,
+    )
+    if boundaries is None:
+        return None
+    prefix_boundary, suffix_boundary = boundaries
+
+    wc_value = _extract_wc_value(query, query_tokens, prefix_boundary, suffix_boundary)
+    if not wc_value:
+        return None
+
+    c_tok = norm_tokens[wc_idx]
+    wc_value = _trim_wildcard_overlaps(wc_value, c_tok, wc_name)
+
+    return wc_value if wc_value.strip() else None
+
+
+def _apply_wildcard_replacements(
+    candidate_text: str,
+    replacements_list: list[tuple[int, str, str]],
+    wildcard_count: int,
+) -> tuple[str, dict[str, str]]:
+    """Substitute extracted wildcard values into the original candidate text.
+
+    Replacements are sorted descending by token index to substitute from right
+    to left, which keeps indices of wildcards further left stable during
+    replacements. Fails closed on partial rehydration: a leftover literal
+    placeholder token ("timer_duration") in delegated text can match a live
+    wildcard slot downstream and execute with the placeholder as the slot value.
+    """
+    replacements_list.sort(key=lambda x: x[0], reverse=True)
+
+    current_text = candidate_text
+    final_replacements: dict[str, str] = {}
+    replaced_count = 0
+    for wc_idx, wc_name, wc_value in replacements_list:
+        new_text = _replace_wildcard_in_original(current_text, wc_idx, wc_value, wc_name)
+        if new_text and new_text != current_text:
+            current_text = new_text
+            final_replacements[wc_name] = wc_value
+            replaced_count += 1
+
+    if replaced_count != wildcard_count:
+        return candidate_text, {}
+
+    return current_text, final_replacements
 
 
 def get_wildcard_rehydration(
@@ -134,10 +276,7 @@ def get_wildcard_rehydration(
     wildcard_infos = candidate.wildcard_infos
     if not wildcard_infos:
         return candidate.text, {}
-    if any(
-        next_index <= current_index + 1
-        for (current_index, _), (next_index, _) in pairwise(wildcard_infos)
-    ):
+    if _has_adjacent_wildcards(wildcard_infos):
         return candidate.text, {}
 
     if query_tokens is None:
@@ -149,50 +288,22 @@ def get_wildcard_rehydration(
     replacements_list: list[tuple[int, str, str]] = []
 
     for wc_idx, wc_name in wildcard_infos:
-        # 1. Align stems to find query token boundaries for this specific wildcard.
-        # Other registered wildcards are treated as position-agnostic wildcard tokens,
-        # which allows prefix/suffix stems to align successfully around overlapping wildcards.
-        boundaries = _find_rehydration_boundaries(
+        wc_value = _extract_wildcard_replacement(
             norm_tokens,
             wc_idx,
-            query_tokens,
+            wc_name,
             wildcard_indices,
+            query,
+            query_tokens,
         )
-        if boundaries is None:
+        if wc_value is None:
             continue
-        prefix_boundary, suffix_boundary = boundaries
-
-        # 2. Extract the raw matched substring from the query.
-        wc_value = _extract_wc_value(query, query_tokens, prefix_boundary, suffix_boundary)
-        if not wc_value:
-            continue
-
-        # 3. Trim overlapping literals (e.g. if stem alignment fuzzily
-        # matched template suffix/prefix words).
-        c_tok = norm_tokens[wc_idx]
-        wc_value = _trim_wildcard_overlaps(wc_value, c_tok, wc_name)
-
-        if not wc_value.strip():
-            continue
-
         replacements_list.append((wc_idx, wc_name, wc_value))
 
     if not replacements_list:
         return candidate.text, {}
 
-    # Sort replacements descending by token index to substitute from right to left.
-    # This ensures indices of wildcards further left remain stable during replacements.
-    replacements_list.sort(key=lambda x: x[0], reverse=True)
-
-    current_text = candidate.text
-    final_replacements = {}
-    for wc_idx, wc_name, wc_value in replacements_list:
-        new_text = _replace_wildcard_in_original(current_text, wc_idx, wc_value, wc_name)
-        if new_text and new_text != current_text:
-            current_text = new_text
-            final_replacements[wc_name] = wc_value
-
-    return current_text, final_replacements
+    return _apply_wildcard_replacements(candidate.text, replacements_list, len(wildcard_infos))
 
 
 def rehydrate_wildcard_text(candidate_text: str, query: str, language: str | None = None) -> str:
@@ -243,23 +354,76 @@ def rehydrate_wildcard_slots(
     }
 
 
+@lru_cache(maxsize=4096)
+def _folded_with_offsets(o_tok: str) -> tuple[str, tuple[int, ...]]:
+    """Return NFKC-casefolded text with original-index offsets per folded char.
+
+    Normalized tokens come from ``normalize_text`` (NFKC + casefold), so
+    matching against ``str.lower()`` breaks for casefold-divergent characters
+    (``ß`` → ``ss``, ligatures, full-width forms). Folding per character keeps
+    an index map back into the original string for slicing.
+    """
+    if o_tok.isascii():
+        return o_tok.lower(), tuple(range(len(o_tok) + 1))
+    parts: list[str] = []
+    offsets: list[int] = []
+    length = len(o_tok)
+    index = 0
+    while index < length:
+        # Fold each base character together with its trailing combining
+        # marks so decomposed (NFD) input composes to the NFC forms that
+        # whole-string normalization produces; folding characters one at a
+        # time would leave "e" + U+0301 decomposed and break `find`.
+        end = index + 1
+        while end < length and unicodedata.category(o_tok[end]).startswith("M"):
+            end += 1
+        folded = unicodedata.normalize("NFKC", o_tok[index:end]).casefold()
+        parts.append(folded)
+        offsets.extend([index] * len(folded))
+        index = end
+    offsets.append(length)
+    return "".join(parts), tuple(offsets)
+
+
 def _get_token_slice(
-    o_tok: str, norm_tokens: list[str], start_norm_idx: int, end_norm_idx: int
+    o_tok: str, norm_tokens: tuple[str, ...] | list[str], start_norm_idx: int, end_norm_idx: int
 ) -> str:
     """Return slice of o_tok matching norm_tokens[start_norm_idx:end_norm_idx]."""
     if start_norm_idx == 0 and end_norm_idx == len(norm_tokens):
         return o_tok
+    folded, offsets = _folded_with_offsets(o_tok)
     idx = 0
     start_char = 0
-    o_tok_lower = o_tok.lower()
     for k in range(end_norm_idx):
-        sub_idx = o_tok_lower.find(norm_tokens[k], idx)
+        sub_idx = folded.find(norm_tokens[k], idx)
         if sub_idx == -1:
             break
         idx = sub_idx + len(norm_tokens[k])
         if k == start_norm_idx - 1:
             start_char = idx
-    return o_tok[start_char:idx]
+    last_offset = len(offsets) - 1
+    return o_tok[offsets[min(start_char, last_offset)] : offsets[min(idx, last_offset)]]
+
+
+@lru_cache(maxsize=256)
+def _query_norm_token_lists(
+    original_query: str,
+) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
+    """Return query tokens and their normalized token lists, cached per query.
+
+    Ranking can rehydrate hundreds of wildcard candidates against the same
+    query; this work depends only on the query text.
+    """
+    original_tokens = tuple(original_query.split())
+    return original_tokens, _contextual_norm_token_lists(original_tokens)
+
+
+@lru_cache(maxsize=1024)
+def _candidate_norm_token_lists(
+    candidate_text: str,
+) -> tuple[tuple[str, ...], ...]:
+    """Return contextual normalized token lists cached by candidate text."""
+    return _contextual_norm_token_lists(tuple(candidate_text.split()))
 
 
 def _extract_original_span(
@@ -268,9 +432,7 @@ def _extract_original_span(
     suffix_boundary: int,
 ) -> str:
     """Extract original case span from original_query for the normalized tokens slice."""
-    original_tokens = original_query.split()
-
-    norm_token_lists = [normalize_text(tok).split() for tok in original_tokens]
+    original_tokens, norm_token_lists = _query_norm_token_lists(original_query)
 
     normalized_index = 0
     start_oi = -1
@@ -313,7 +475,7 @@ def _extract_original_span(
     end_norm_tokens = norm_token_lists[end_oi]
     end_part = _get_token_slice(end_tok, end_norm_tokens, 0, end_sub_idx)
 
-    middle_parts = original_tokens[start_oi + 1 : end_oi]
+    middle_parts = list(original_tokens[start_oi + 1 : end_oi])
 
     parts = []
     if start_part:
@@ -339,66 +501,59 @@ def _token_similarity(c_tok: str, q_tok: str, is_wildcard: bool = False) -> floa
     return _cached_fuzz_ratio(c_tok, q_tok) / 100.0
 
 
+def _best_alignment_start(
+    candidate_tokens: tuple[str, ...],
+    query_tokens: tuple[str, ...],
+    starts: range,
+    wildcard_indices: frozenset[int],
+) -> int:
+    """Return the strongest matching window start in the supplied priority order."""
+    has_wildcard = not wildcard_indices.isdisjoint(range(len(candidate_tokens)))
+    if not has_wildcard:
+        for start in starts:
+            if query_tokens[start : start + len(candidate_tokens)] == candidate_tokens:
+                return start
+
+    best_start = -1
+    best_score = -1.0
+    for start in starts:
+        score = 0.0
+        for index, candidate_token in enumerate(candidate_tokens):
+            similarity = _token_similarity(
+                candidate_token,
+                query_tokens[start + index],
+                is_wildcard=index in wildcard_indices,
+            )
+            if similarity < WILDCARD_STEM_ALIGNMENT_THRESHOLD:
+                break
+            score += similarity
+        else:
+            if score > best_score:
+                best_start = start
+                best_score = score
+    return best_start
+
+
 def _align_prefix_boundary(
     c_prefix: tuple[str, ...],
     query_tokens: tuple[str, ...],
     wildcard_indices: frozenset[int] = frozenset(),
 ) -> int:
-    """Return the query token index where the wildcard span begins.
-
-    Aligns the candidate prefix tokens against a sliding window of the query
-    starting at position 0.  Each candidate token must positionally match a
-    query token at the corresponding offset.  Returns the index immediately
-    after the matched window, or -1 if alignment fails.
-    """
+    """Return the boundary after the strongest candidate-prefix alignment."""
     q_len = len(query_tokens)
     p_len = len(c_prefix)
     if p_len == 0:
         return 0
-    has_wildcard = any(i in wildcard_indices for i in range(p_len))
-    if not has_wildcard and q_len >= p_len and query_tokens[:p_len] == c_prefix:
-        return p_len
     max_start = q_len - p_len
     if max_start < 0:
         return -1
-
-    # Fast path: exact sub-slice match of c_prefix in query_tokens
-    if not has_wildcard:
-        for start_idx in range(max_start + 1):
-            if query_tokens[start_idx : start_idx + p_len] == c_prefix:
-                return start_idx + p_len
-
-    best_boundary = -1
-    best_score = -1.0
-
-    start = 0
-    i = 0
-    score = 0.0
-    while start <= max_start:
-        q_tok = query_tokens[start + i]
-        c_tok = c_prefix[i]
-
-        is_wc = i in wildcard_indices
-        sim = _token_similarity(c_tok, q_tok, is_wildcard=is_wc)
-
-        if sim < WILDCARD_STEM_ALIGNMENT_THRESHOLD:
-            start += 1
-            i = 0
-            score = 0.0
-            continue
-
-        score += sim
-        i += 1
-
-        if i == p_len:
-            if score > best_score:
-                best_score = score
-                best_boundary = start + p_len
-            start += 1
-            i = 0
-            score = 0.0
-
-    return min(best_boundary, q_len)
+    start = _best_alignment_start(
+        c_prefix,
+        query_tokens,
+        range(max_start + 1),
+        wildcard_indices,
+    )
+    return -1 if start < 0 else min(start + p_len, q_len)
 
 
 def _align_suffix_boundary(
@@ -407,60 +562,20 @@ def _align_suffix_boundary(
     prefix_boundary: int,
     wildcard_indices: frozenset[int] = frozenset(),
 ) -> int:
-    """Return the query token index where the wildcard span ends.
-
-    Aligns the candidate suffix tokens in reverse against the query tokens
-    starting from the end.  Returns the index (from the left) immediately
-    before the matched window, or -1 if alignment fails.
-    """
+    """Return the boundary before the strongest candidate-suffix alignment."""
     q_len = len(query_tokens)
     s_len = len(c_suffix)
     if s_len == 0:
         return q_len
-    has_wildcard = any(i in wildcard_indices for i in range(s_len))
-    if not has_wildcard and q_len - prefix_boundary >= s_len and query_tokens[-s_len:] == c_suffix:
-        return q_len - s_len
     max_end = q_len - s_len
     if max_end < prefix_boundary:
         return -1
-
-    # Fast path: exact sub-slice match of c_suffix in query_tokens (rightmost first)
-    if not has_wildcard:
-        for end_idx in range(max_end, prefix_boundary - 1, -1):
-            if query_tokens[end_idx : end_idx + s_len] == c_suffix:
-                return end_idx
-
-    best_boundary = -1
-    best_score = -1.0
-
-    end = max_end
-    i = 0
-    score = 0.0
-    while end >= prefix_boundary:
-        q_tok = query_tokens[end + i]
-        c_tok = c_suffix[i]
-
-        is_wc = i in wildcard_indices
-        sim = _token_similarity(c_tok, q_tok, is_wildcard=is_wc)
-
-        if sim < WILDCARD_STEM_ALIGNMENT_THRESHOLD:
-            end -= 1
-            i = 0
-            score = 0.0
-            continue
-
-        score += sim
-        i += 1
-
-        if i == s_len:
-            if score > best_score:
-                best_score = score
-                best_boundary = end
-            end -= 1
-            i = 0
-            score = 0.0
-
-    return best_boundary if best_boundary >= prefix_boundary else -1
+    return _best_alignment_start(
+        c_suffix,
+        query_tokens,
+        range(max_end, prefix_boundary - 1, -1),
+        wildcard_indices,
+    )
 
 
 @lru_cache(maxsize=256)
@@ -482,10 +597,10 @@ def _replace_wildcard_in_original(
     substring substitution.
     """
     original_tokens = original_text.split()
+    norm_token_lists = _candidate_norm_token_lists(original_text)
     normalized_index = 0
     for oi, o_tok in enumerate(original_tokens):
-        o_tok_norm = normalize_text(o_tok)
-        o_tok_norm_tokens = o_tok_norm.split()
+        o_tok_norm_tokens = norm_token_lists[oi]
         if not o_tok_norm_tokens:
             continue
         if (
@@ -590,3 +705,6 @@ def clear_rehydration_caches() -> None:
     _get_escaped_pattern.cache_clear()
     _wildcard_variants_analysis_cached.cache_clear()
     _raw_cached_fuzz_ratio.cache_clear()
+    _folded_with_offsets.cache_clear()
+    _query_norm_token_lists.cache_clear()
+    _candidate_norm_token_lists.cache_clear()

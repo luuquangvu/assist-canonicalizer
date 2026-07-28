@@ -128,6 +128,20 @@ def test_available_fallback_agents_excludes_own_agent_and_entity(
     }
 
 
+def test_entity_exclusion_is_disabled_without_an_agent_id() -> None:
+    """Do not infer canonicalizer ownership when no exclusion ID is available."""
+    entity = SimpleNamespace(
+        unique_id="None-conversation",
+        registry_entry=SimpleNamespace(config_entry_id=None),
+    )
+
+    assert not config_flow._entity_is_excluded(
+        entity,
+        "conversation.unowned",
+        None,
+    )
+
+
 def test_config_schema_types(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify that _config_schema returns correct types and validation fields."""
     monkeypatch.setattr(config_flow, "HOME_ASSISTANT_AGENT", "conversation.home_assistant")

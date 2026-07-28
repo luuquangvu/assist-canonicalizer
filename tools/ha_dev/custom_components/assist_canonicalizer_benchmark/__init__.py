@@ -106,175 +106,264 @@ _BENCHMARK_PLATFORMS = (
 )
 
 
-async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
-    """Set up deterministic floors, areas, entities, aliases, and exposure."""
-    manifest = await hass.async_add_executor_job(_load_manifest)
-    _validate_manifest(manifest)
+@callback
+def _handle_timer_event(_event: Any, _timer: Any) -> None:
+    """Acknowledge benchmark timer events without external device I/O."""
+
+
+def _initialize_domain_data(
+    hass: HomeAssistant,
+    manifest: dict[str, Any],
+) -> dict[str, Any]:
+    """Initialize benchmark domain data and timer handling."""
     domain_data = hass.data.setdefault(DOMAIN, {})
     domain_data["lock"] = asyncio.Lock()
     domain_data["manifest"] = manifest
     domain_data["timer_handlers"] = {}
-
-    @callback
-    def async_handle_timer_event(_event: Any, _timer: Any) -> None:
-        """Acknowledge benchmark timer events without external device I/O."""
-
-    domain_data["timer_event_handler"] = async_handle_timer_event
+    domain_data["timer_event_handler"] = _handle_timer_event
     _register_timer_device(hass, BENCHMARK_DEVICE_ID)
+    return domain_data
 
+
+def _load_benchmark_platforms(
+    hass: HomeAssistant,
+    config: ConfigType,
+) -> None:
+    """Schedule loading of every benchmark entity platform."""
     for platform in _BENCHMARK_PLATFORMS:
         hass.async_create_task(
             async_load_platform(hass, platform, DOMAIN, {}, config),
             f"{DOMAIN}_load_{platform}",
         )
 
-    async def async_handle_reapply(_call: ServiceCall) -> None:
-        """Reapply and verify the tracked fixture contract."""
+
+async def _handle_clear_conversation_traces(_call: ServiceCall) -> None:
+    """Clear Home Assistant's bounded passive conversation trace buffer."""
+    async_clear_traces()
+
+
+async def _handle_get_conversation_traces(
+    _call: ServiceCall,
+) -> dict[str, Any]:
+    """Return passive traces emitted by the production conversation request."""
+    return {"traces": [trace.as_dict() for trace in async_get_traces()]}
+
+
+async def _recognize_canonical(
+    hass: HomeAssistant,
+    call: ServiceCall,
+) -> dict[str, Any]:
+    """Recognize a canonical control without handling it."""
+    default_agent = async_get_agent(hass, HOME_ASSISTANT_AGENT)
+    recognize = getattr(default_agent, "async_recognize_intent", None)
+    if recognize is None:
+        raise RuntimeError("Home Assistant Default Agent recognition is unavailable")
+    result = await recognize(
+        ConversationInput(
+            text=call.data["text"],
+            context=call.context,
+            conversation_id=None,
+            device_id=call.data.get("device_id"),
+            satellite_id=call.data.get("satellite_id"),
+            language=call.data["language"],
+            agent_id=HOME_ASSISTANT_AGENT,
+        )
+    )
+    if result is None:
+        return {"intent": None, "slots": {}, "unmatched_count": 0}
+    return {
+        "intent": result.intent.name,
+        "slots": {entity.name: entity.value for entity in result.entities_list},
+        "unmatched_count": len(result.unmatched_entities),
+    }
+
+
+async def _prepare_media_case(
+    hass: HomeAssistant,
+    intent_name: str,
+) -> None:
+    """Start exposed media players when an intent requires playback."""
+    if intent_name not in _MEDIA_INTENTS_REQUIRING_PLAYBACK:
+        return
+    if media_players := [
+        entity_id
+        for entity_id in hass.states.async_entity_ids(MEDIA_PLAYER_DOMAIN)
+        if async_should_expose(hass, ASSISTANT_CONVERSATION, entity_id)
+    ]:
+        await hass.services.async_call(
+            MEDIA_PLAYER_DOMAIN,
+            "media_play",
+            target={"entity_id": media_players},
+            blocking=True,
+        )
+
+
+def _prepare_timer_case(
+    hass: HomeAssistant,
+    domain_data: Mapping[str, Any],
+    intent_name: str,
+    language: str,
+    slots: dict[str, Any],
+) -> None:
+    """Reset timers and create an existing timer when required."""
+    if intent_name not in _TIMER_INTENTS:
+        return
+    timer_manager = hass.data[TIMER_DATA]
+    for timer_id in tuple(timer_manager.timers):
+        timer_manager.cancel_timer(timer_id)
+    if intent_name not in _TIMER_INTENTS_WITH_EXISTING_TIMER:
+        return
+    start_hours = _optional_int_slot(slots, "start_hours")
+    start_minutes = _optional_int_slot(slots, "start_minutes")
+    start_seconds = _optional_int_slot(slots, "start_seconds")
+    if all(value is None for value in (start_hours, start_minutes, start_seconds)):
+        start_minutes = 10
+    timer_id = timer_manager.start_timer(
+        domain_data.get("timer_device_id", BENCHMARK_DEVICE_ID),
+        hours=start_hours,
+        minutes=start_minutes,
+        seconds=start_seconds,
+        language=language,
+        name=_optional_string_slot(slots, "name"),
+    )
+    if intent_name == "HassUnpauseTimer":
+        timer_manager.pause_timer(timer_id)
+
+
+def _prepare_list_case(
+    domain_data: Mapping[str, Any],
+    intent_name: str,
+    slots: dict[str, Any],
+) -> None:
+    """Reset the benchmark to-do list when required."""
+    if intent_name not in _LIST_INTENTS:
+        return
+    todo_entity = domain_data.get("todo_entity")
+    reset_items = getattr(todo_entity, "reset_items", None)
+    if reset_items is None:
+        raise RuntimeError("Benchmark to-do entity is unavailable")
+    item = _optional_string_slot(slots, "item") if intent_name != "HassListAddItem" else None
+    reset_items(item)
+
+
+async def _prepare_shopping_list_case(
+    hass: HomeAssistant,
+    intent_name: str,
+    slots: dict[str, Any],
+) -> None:
+    """Reset the benchmark shopping list when required."""
+    if intent_name not in _SHOPPING_LIST_INTENTS:
+        return
+    if not hass.services.has_service("shopping_list", "complete_all"):
+        raise RuntimeError("Shopping list benchmark dependency is unavailable")
+    await hass.services.async_call("shopping_list", "complete_all", blocking=True)
+    await hass.services.async_call(
+        "shopping_list",
+        "clear_completed_items",
+        blocking=True,
+    )
+    if intent_name != "HassShoppingListCompleteItem":
+        return
+    item = _optional_string_slot(slots, "item")
+    if item is None:
+        raise RuntimeError("Shopping-list completion oracle has no item slot")
+    await hass.services.async_call(
+        "shopping_list",
+        "add_item",
+        {"name": item},
+        blocking=True,
+    )
+
+
+async def _prepare_case(
+    hass: HomeAssistant,
+    domain_data: Mapping[str, Any],
+    call: ServiceCall,
+) -> None:
+    """Reset stateful live-intent prerequisites for one request."""
+    intent_name = call.data["intent"]
+    language = call.data["language"]
+    slots = cast(dict[str, Any], call.data["slots"])
+    await _prepare_media_case(hass, intent_name)
+    _prepare_timer_case(hass, domain_data, intent_name, language, slots)
+    _prepare_list_case(domain_data, intent_name, slots)
+    await _prepare_shopping_list_case(hass, intent_name, slots)
+
+
+def _register_benchmark_services(
+    hass: HomeAssistant,
+    manifest: dict[str, Any],
+    domain_data: Mapping[str, Any],
+) -> None:
+    """Register benchmark control, trace, and preparation services."""
+
+    async def handle_reapply(_call: ServiceCall) -> None:
+        """Reapply the benchmark fixture manifest."""
         await _async_provision_safely(hass, manifest)
 
-    hass.services.async_register(DOMAIN, SERVICE_REAPPLY, async_handle_reapply)
+    async def handle_recognize(call: ServiceCall) -> dict[str, Any]:
+        """Recognize canonical text for one service request."""
+        return await _recognize_canonical(hass, call)
 
-    async def async_handle_clear_conversation_traces(_call: ServiceCall) -> None:
-        """Clear Home Assistant's bounded passive conversation trace buffer."""
-        async_clear_traces()
+    async def handle_prepare(call: ServiceCall) -> None:
+        """Prepare stateful prerequisites for one benchmark case."""
+        await _prepare_case(hass, domain_data, call)
 
-    async def async_handle_get_conversation_traces(
-        _call: ServiceCall,
-    ) -> dict[str, Any]:
-        """Return passive traces emitted by the production conversation request."""
-        return {"traces": [trace.as_dict() for trace in async_get_traces()]}
-
+    hass.services.async_register(DOMAIN, SERVICE_REAPPLY, handle_reapply)
     hass.services.async_register(
         DOMAIN,
         SERVICE_CLEAR_CONVERSATION_TRACES,
-        async_handle_clear_conversation_traces,
+        _handle_clear_conversation_traces,
     )
     hass.services.async_register(
         DOMAIN,
         SERVICE_GET_CONVERSATION_TRACES,
-        async_handle_get_conversation_traces,
+        _handle_get_conversation_traces,
         supports_response=SupportsResponse.ONLY,
     )
-
-    async def async_handle_recognize_canonical(call: ServiceCall) -> dict[str, Any]:
-        """Recognize a canonical control through the live Default Agent without handling it."""
-        default_agent = async_get_agent(hass, HOME_ASSISTANT_AGENT)
-        recognize = getattr(default_agent, "async_recognize_intent", None)
-        if recognize is None:
-            raise RuntimeError("Home Assistant Default Agent recognition is unavailable")
-        result = await recognize(
-            ConversationInput(
-                text=call.data["text"],
-                context=call.context,
-                conversation_id=None,
-                device_id=call.data.get("device_id"),
-                satellite_id=call.data.get("satellite_id"),
-                language=call.data["language"],
-                agent_id=HOME_ASSISTANT_AGENT,
-            )
-        )
-        if result is None:
-            return {"intent": None, "slots": {}, "unmatched_count": 0}
-        return {
-            "intent": result.intent.name,
-            "slots": {entity.name: entity.value for entity in result.entities_list},
-            "unmatched_count": len(result.unmatched_entities),
-        }
-
     hass.services.async_register(
         DOMAIN,
         SERVICE_RECOGNIZE_CANONICAL,
-        async_handle_recognize_canonical,
+        handle_recognize,
         schema=RECOGNIZE_CANONICAL_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
-
-    async def async_handle_prepare_case(call: ServiceCall) -> None:
-        """Reset stateful live-intent prerequisites before one benchmark request."""
-        intent_name = call.data["intent"]
-        language = call.data["language"]
-        slots = cast(dict[str, Any], call.data["slots"])
-
-        if intent_name in _MEDIA_INTENTS_REQUIRING_PLAYBACK:
-            media_players = [
-                entity_id
-                for entity_id in hass.states.async_entity_ids(MEDIA_PLAYER_DOMAIN)
-                if async_should_expose(hass, ASSISTANT_CONVERSATION, entity_id)
-            ]
-            if media_players:
-                await hass.services.async_call(
-                    MEDIA_PLAYER_DOMAIN,
-                    "media_play",
-                    target={"entity_id": media_players},
-                    blocking=True,
-                )
-
-        if intent_name in _TIMER_INTENTS:
-            timer_manager = hass.data[TIMER_DATA]
-            for timer_id in tuple(timer_manager.timers):
-                timer_manager.cancel_timer(timer_id)
-            if intent_name in _TIMER_INTENTS_WITH_EXISTING_TIMER:
-                start_hours = _optional_int_slot(slots, "start_hours")
-                start_minutes = _optional_int_slot(slots, "start_minutes")
-                start_seconds = _optional_int_slot(slots, "start_seconds")
-                if all(value is None for value in (start_hours, start_minutes, start_seconds)):
-                    start_minutes = 10
-                timer_id = timer_manager.start_timer(
-                    domain_data.get("timer_device_id", BENCHMARK_DEVICE_ID),
-                    hours=start_hours,
-                    minutes=start_minutes,
-                    seconds=start_seconds,
-                    language=language,
-                    name=_optional_string_slot(slots, "name"),
-                )
-                if intent_name == "HassUnpauseTimer":
-                    timer_manager.pause_timer(timer_id)
-
-        if intent_name in _LIST_INTENTS:
-            todo_entity = domain_data.get("todo_entity")
-            reset_items = getattr(todo_entity, "reset_items", None)
-            if reset_items is None:
-                raise RuntimeError("Benchmark to-do entity is unavailable")
-            item = (
-                _optional_string_slot(slots, "item") if intent_name != "HassListAddItem" else None
-            )
-            reset_items(item)
-
-        if intent_name in _SHOPPING_LIST_INTENTS:
-            if not hass.services.has_service("shopping_list", "complete_all"):
-                raise RuntimeError("Shopping list benchmark dependency is unavailable")
-            await hass.services.async_call("shopping_list", "complete_all", blocking=True)
-            await hass.services.async_call("shopping_list", "clear_completed_items", blocking=True)
-            if intent_name == "HassShoppingListCompleteItem":
-                item = _optional_string_slot(slots, "item")
-                if item is None:
-                    raise RuntimeError("Shopping-list completion oracle has no item slot")
-                await hass.services.async_call(
-                    "shopping_list",
-                    "add_item",
-                    {"name": item},
-                    blocking=True,
-                )
-
     hass.services.async_register(
         DOMAIN,
         SERVICE_PREPARE_CASE,
-        async_handle_prepare_case,
+        handle_prepare,
         schema=PREPARE_CASE_SCHEMA,
     )
 
+
+def _schedule_fixture_provisioning(
+    hass: HomeAssistant,
+    manifest: dict[str, Any],
+) -> None:
+    """Provision now or after Home Assistant has started."""
+
     @callback
-    def async_start_fixture(_event: Event | None = None) -> None:
-        """Start provisioning without blocking Home Assistant startup."""
+    def start_fixture(_event: Event | None = None) -> None:
         hass.async_create_task(
             _async_provision_safely(hass, manifest),
             f"{DOMAIN}_provision",
         )
 
     if hass.is_running:
-        async_start_fixture()
+        start_fixture()
     else:
-        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, async_start_fixture)
+        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, start_fixture)
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Set up deterministic floors, areas, entities, aliases, and exposure."""
+    manifest = await hass.async_add_executor_job(_load_manifest)
+    _validate_manifest(manifest)
+    domain_data = _initialize_domain_data(hass, manifest)
+    _load_benchmark_platforms(hass, config)
+    _register_benchmark_services(hass, manifest, domain_data)
+
+    _schedule_fixture_provisioning(hass, manifest)
     return True
 
 
@@ -619,6 +708,117 @@ def _apply_exposure(hass: HomeAssistant, exposed_entity_ids: set[str]) -> None:
         )
 
 
+def _verify_exposure(
+    hass: HomeAssistant,
+    expected_exposed: set[str],
+) -> None:
+    """Verify that exactly the fixture entities are exposed."""
+    actual_exposed = {
+        entity_id
+        for entity_id in hass.states.async_entity_ids()
+        if async_should_expose(hass, ASSISTANT_CONVERSATION, entity_id)
+    }
+    if actual_exposed != expected_exposed:
+        raise RuntimeError(
+            f"Benchmark exposure differs: expected={sorted(expected_exposed)} "
+            f"actual={sorted(actual_exposed)}"
+        )
+
+
+def _verify_entity_registry_entry(
+    registry: entity_registry.EntityRegistry,
+    entity: dict[str, Any],
+    entity_id: str,
+    area_ids: Mapping[str, str],
+) -> None:
+    """Verify one fixture entity's registry state."""
+    entry = registry.async_get(entity_id)
+    if entry is None:
+        raise RuntimeError(f"Benchmark entity disappeared: {entity_id}")
+    expected_aliases = [entity_registry.COMPUTED_NAME, *_string_list(entity, "aliases")]
+    expected_area_id = area_ids[_required_string(entity, "area")]
+    expected_vacuum_options = (
+        _vacuum_options(entity, area_ids) if "vacuum_area_segment" in entity else None
+    )
+    if (
+        entry.name != _required_string(entity, "name")
+        or entry.aliases != expected_aliases
+        or entry.area_id != expected_area_id
+        or (
+            expected_vacuum_options is not None
+            and entry.options.get("vacuum") != expected_vacuum_options
+        )
+    ):
+        raise RuntimeError(f"Benchmark entity registry state differs: {entity_id}")
+
+
+def _verify_entity_registry(
+    hass: HomeAssistant,
+    entities: list[dict[str, Any]],
+    resolved_entities: Mapping[str, str],
+    area_ids: Mapping[str, str],
+) -> None:
+    """Verify every fixture entity's registry state."""
+    registry = entity_registry.async_get(hass)
+    for entity in entities:
+        entity_id = resolved_entities[_entity_identity(entity)]
+        _verify_entity_registry_entry(registry, entity, entity_id, area_ids)
+
+
+def _verify_floor_registry(
+    hass: HomeAssistant,
+    floors: list[dict[str, Any]],
+    floor_ids: Mapping[str, str],
+) -> None:
+    """Verify every fixture floor's registry state."""
+    registry = floor_registry.async_get(hass)
+    for floor in floors:
+        entry = registry.async_get_floor(floor_ids[_required_string(floor, "key")])
+        if (
+            entry is None
+            or entry.aliases != set(_string_list(floor, "aliases"))
+            or entry.level != floor.get("level")
+        ):
+            raise RuntimeError(f"Benchmark floor registry state differs: {floor['key']}")
+
+
+def _verify_area_registry(
+    hass: HomeAssistant,
+    areas: list[dict[str, Any]],
+    area_ids: Mapping[str, str],
+    floor_ids: Mapping[str, str],
+) -> None:
+    """Verify every fixture area's registry state."""
+    registry = area_registry.async_get(hass)
+    for area in areas:
+        entry = registry.async_get_area(area_ids[_required_string(area, "key")])
+        if (
+            entry is None
+            or entry.aliases != set(_string_list(area, "aliases"))
+            or entry.floor_id != floor_ids[_required_string(area, "floor")]
+        ):
+            raise RuntimeError(f"Benchmark area registry state differs: {area['key']}")
+
+
+def _fixture_summary(
+    hass: HomeAssistant,
+    manifest: Mapping[str, Any],
+    entities: list[dict[str, Any]],
+    floor_ids: Mapping[str, str],
+    area_ids: Mapping[str, str],
+    exposed_entity_ids: set[str],
+) -> dict[str, Any]:
+    """Build the stable summary for a verified fixture."""
+    return {
+        "fingerprint": fixture_fingerprint(manifest),
+        "floor_count": len(floor_ids),
+        "area_count": len(area_ids),
+        "exposed_entity_count": len(exposed_entity_ids),
+        "runtime_state_count": len(hass.states.async_entity_ids()),
+        "domain_counts": dict(sorted(Counter(entity["domain"] for entity in entities).items())),
+    }
+
+
 def _verified_summary(
     hass: HomeAssistant,
     manifest: dict[str, Any],
@@ -627,71 +827,25 @@ def _verified_summary(
     area_ids: dict[str, str],
 ) -> dict[str, Any]:
     """Verify the applied fixture and return its stable fingerprint summary."""
-    entity_reg = entity_registry.async_get(hass)
-    floor_reg = floor_registry.async_get(hass)
-    area_reg = area_registry.async_get(hass)
     entities = _object_list(manifest, "entities")
-
-    actual_exposed = {
-        entity_id
-        for entity_id in hass.states.async_entity_ids()
-        if async_should_expose(hass, ASSISTANT_CONVERSATION, entity_id)
-    }
     expected_exposed = set(resolved_entities.values())
-    if actual_exposed != expected_exposed:
-        raise RuntimeError(
-            f"Benchmark exposure differs: expected={sorted(expected_exposed)} "
-            f"actual={sorted(actual_exposed)}"
-        )
-
-    for entity in entities:
-        entity_id = resolved_entities[_entity_identity(entity)]
-        entry = entity_reg.async_get(entity_id)
-        if entry is None:
-            raise RuntimeError(f"Benchmark entity disappeared: {entity_id}")
-        expected_aliases = [entity_registry.COMPUTED_NAME, *_string_list(entity, "aliases")]
-        expected_area_id = area_ids[_required_string(entity, "area")]
-        expected_vacuum_options = (
-            _vacuum_options(entity, area_ids) if "vacuum_area_segment" in entity else None
-        )
-        if (
-            entry.name != _required_string(entity, "name")
-            or entry.aliases != expected_aliases
-            or entry.area_id != expected_area_id
-            or (
-                expected_vacuum_options is not None
-                and entry.options.get("vacuum") != expected_vacuum_options
-            )
-        ):
-            raise RuntimeError(f"Benchmark entity registry state differs: {entity_id}")
-
-    for floor in _object_list(manifest, "floors"):
-        entry = floor_reg.async_get_floor(floor_ids[_required_string(floor, "key")])
-        if (
-            entry is None
-            or entry.aliases != set(_string_list(floor, "aliases"))
-            or entry.level != floor.get("level")
-        ):
-            raise RuntimeError(f"Benchmark floor registry state differs: {floor['key']}")
-    for area in _object_list(manifest, "areas"):
-        entry = area_reg.async_get_area(area_ids[_required_string(area, "key")])
-        if (
-            entry is None
-            or entry.aliases != set(_string_list(area, "aliases"))
-            or entry.floor_id != floor_ids[_required_string(area, "floor")]
-        ):
-            raise RuntimeError(f"Benchmark area registry state differs: {area['key']}")
-
-    domain_counts = dict(sorted(Counter(entity["domain"] for entity in entities).items()))
-    fingerprint = fixture_fingerprint(manifest)
-    return {
-        "fingerprint": fingerprint,
-        "floor_count": len(floor_ids),
-        "area_count": len(area_ids),
-        "exposed_entity_count": len(expected_exposed),
-        "runtime_state_count": len(hass.states.async_entity_ids()),
-        "domain_counts": domain_counts,
-    }
+    _verify_exposure(hass, expected_exposed)
+    _verify_entity_registry(hass, entities, resolved_entities, area_ids)
+    _verify_floor_registry(hass, _object_list(manifest, "floors"), floor_ids)
+    _verify_area_registry(
+        hass,
+        _object_list(manifest, "areas"),
+        area_ids,
+        floor_ids,
+    )
+    return _fixture_summary(
+        hass,
+        manifest,
+        entities,
+        floor_ids,
+        area_ids,
+        expected_exposed,
+    )
 
 
 def fixture_fingerprint(manifest: Mapping[str, Any]) -> str:
@@ -719,7 +873,7 @@ def _entity_identity(entity: dict[str, Any]) -> str:
 
 
 def _vacuum_options(
-    entity: dict[str, Any], area_ids: dict[str, str]
+    entity: dict[str, Any], area_ids: Mapping[str, str]
 ) -> dict[str, dict[str, list[str]]]:
     """Return the deterministic all-area segment mapping for one vacuum."""
     segment = _required_string(entity, "vacuum_area_segment")

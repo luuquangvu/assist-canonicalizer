@@ -24,7 +24,7 @@ from custom_components.assist_canonicalizer.const import (
 )
 from custom_components.assist_canonicalizer.indexer import build_index
 from custom_components.assist_canonicalizer.ranking import RankedCandidate, ScoreBreakdown
-from custom_components.assist_canonicalizer.runtime import CanonicalizerRuntime
+from custom_components.assist_canonicalizer.runtime import CanonicalizerRuntime, IndexClearResult
 from custom_components.assist_canonicalizer.services import (
     CLEAR_INDEX_SCHEMA,
     DIAGNOSTICS_SCHEMA,
@@ -161,12 +161,16 @@ async def test_handle_test_match_entry_none_and_data_fallback() -> None:
     hass_none.data[DOMAIN]["mock_entry_id"]["entry"] = None
     result = await _handle_test_match(hass_none, cast(ServiceCall, call))
     assert result["accepted"] is True
-    assert result["decision_scope"] == "lexical"
-    assert result["candidate_metadata_authoritative"] is False
-    assert result["live_recognition"] == "not_run"
-    assert result["production_decision_path"] == "/api/conversation/process"
+    assert result["evaluation"] == {
+        "scope": "lexical",
+        "candidate_metadata_authoritative": False,
+        "live_recognition": "not_run",
+        "production_decision_path": "/api/conversation/process",
+    }
     assert result["confidence_gate"]["accepted"] is True
     assert result["confidence_gate"]["margin_policy"] == "no_competitor"
+    assert "score" not in result["selected_candidate"]
+    assert result["selected_candidate"]["scores"]["final"] == 1.0
 
     # Case 2: entry is not None, options is empty, fallback to data
     entry_data = MockConfigEntry(
@@ -210,6 +214,7 @@ async def test_handle_test_match_rehydrates_from_candidate_metadata_with_cold_ca
         result = await _handle_test_match(hass, cast(ServiceCall, call))
 
     assert result["selected_candidate"]["text"] == "add milk to shopping list"
+    assert result["selected_candidate"]["wildcard_replacements"] == {"shopping_list_item": "milk"}
     assert result["top_candidates"][0]["text"] == "add milk to shopping list"
     get_intents.assert_not_called()
     wildcard_slot_names.cache_clear("en")
@@ -228,42 +233,147 @@ async def test_rebuild_index_service() -> None:
         result = await _handle_rebuild_index(hass, cast(ServiceCall, call))
         assert result["language"] == "vi"
         assert result["candidate_count"] == 0
+        assert result["rebuild_latency_ms"] >= 0
+        assert "index_cached" not in result
 
 
 @pytest.mark.asyncio
 async def test_clear_index_service() -> None:
     """Test clear_index service handler."""
     runtime = CanonicalizerRuntime()
-    runtime.set_index(build_index("en", []))
+    runtime.set_index(
+        build_index("en", [Candidate(text="turn on", intent_name="HassTurnOn", language="en")])
+    )
+    runtime.set_index(
+        build_index(
+            "vi",
+            [
+                Candidate(text="bật đèn", intent_name="HassTurnOn", language="vi"),
+                Candidate(text="tắt đèn", intent_name="HassTurnOff", language="vi"),
+            ],
+        )
+    )
     hass = MockHass(runtime)
+
+    def clear_index(_hass: Any, language: str | None = None) -> IndexClearResult:
+        """Return the cache state captured by the mocked atomic clear."""
+        cached_candidate_counts = {
+            cached_language: index.candidate_count
+            for cached_language, index in runtime.indexes.items()
+        }
+        cleared_cached_languages = (
+            tuple(sorted(cached_candidate_counts))
+            if language is None
+            else ((language,) if language in cached_candidate_counts else ())
+        )
+        cleared_candidate_count = sum(
+            cached_candidate_counts[cached_language] for cached_language in cleared_cached_languages
+        )
+        runtime.clear_index(language)
+        return IndexClearResult(
+            cleared_cached_languages=cleared_cached_languages,
+            cleared_candidate_count=cleared_candidate_count,
+            remaining_candidate_count=runtime.total_candidate_count(),
+            remaining_cached_languages=tuple(sorted(runtime.indexes)),
+        )
 
     with patch.object(
         CanonicalizerRuntime,
         "async_clear_index",
-        AsyncMock(side_effect=lambda h, language=None: runtime.clear_index(language)),
+        AsyncMock(side_effect=clear_index),
     ) as mock_clear:
         call = MockServiceCall({"language": "en-US"})
         result = await _handle_clear_index(hass, cast(ServiceCall, call))
-        assert result["candidate_count"] == 0
+        assert result == {
+            "language": "en",
+            "scope": "language",
+            "cleared_cached_languages": ["en"],
+            "cleared_candidate_count": 1,
+            "remaining_candidate_count": 2,
+            "remaining_cached_languages": ["vi"],
+        }
         assert "en" not in runtime.indexes
         mock_clear.assert_awaited_once_with(hass, "en")
 
-        runtime.set_index(build_index("en", []))
+        runtime.set_index(
+            build_index(
+                "en",
+                [Candidate(text="turn off", intent_name="HassTurnOff", language="en")],
+            )
+        )
         call_all = MockServiceCall({})
         result_all = await _handle_clear_index(hass, cast(ServiceCall, call_all))
-        assert result_all["candidate_count"] == 0
+        assert result_all == {
+            "language": None,
+            "scope": "all",
+            "cleared_cached_languages": ["en", "vi"],
+            "cleared_candidate_count": 3,
+            "remaining_candidate_count": 0,
+            "remaining_cached_languages": [],
+        }
         mock_clear.assert_awaited_with(hass, None)
+
+
+@pytest.mark.asyncio
+async def test_clear_index_service_uses_atomic_runtime_result() -> None:
+    """Build the response from the clear snapshot instead of mutable runtime state."""
+    runtime = CanonicalizerRuntime()
+    runtime.set_index(
+        build_index("en", [Candidate(text="turn on", intent_name="HassTurnOn", language="en")])
+    )
+    hass = MockHass(runtime)
+    clear_result = IndexClearResult(
+        cleared_cached_languages=("en",),
+        cleared_candidate_count=1,
+        remaining_candidate_count=0,
+        remaining_cached_languages=(),
+    )
+
+    with patch.object(
+        CanonicalizerRuntime,
+        "async_clear_index",
+        AsyncMock(return_value=clear_result),
+    ):
+        result = await _handle_clear_index(
+            hass,
+            cast(ServiceCall, MockServiceCall({"language": "en"})),
+        )
+
+    assert result["cleared_cached_languages"] == ["en"]
+    assert result["cleared_candidate_count"] == 1
+    assert result["remaining_candidate_count"] == 0
+    assert result["remaining_cached_languages"] == []
 
 
 @pytest.mark.asyncio
 async def test_diagnostics_service() -> None:
     """Test diagnostics service handler."""
     runtime = CanonicalizerRuntime()
+    runtime.set_index(
+        build_index("en", [Candidate(text="turn on", intent_name="HassTurnOn", language="en")])
+    )
+    runtime.set_index(
+        build_index(
+            "vi",
+            [
+                Candidate(text="bật đèn", intent_name="HassTurnOn", language="vi"),
+                Candidate(text="tắt đèn", intent_name="HassTurnOff", language="vi"),
+            ],
+        )
+    )
     hass = MockHass(runtime)
     call = MockServiceCall({})
 
     result = await _handle_diagnostics(hass, cast(ServiceCall, call))
-    assert "cached_languages" in result
+    assert result["total_cached_candidate_count"] == 3
+    assert result["cached_indexes"] == {
+        "en": {"candidate_count": 1, "version": 1},
+        "vi": {"candidate_count": 2, "version": 1},
+    }
+    assert "candidate_count" not in result
+    assert "index_version" not in result
+    assert "cached_languages" not in result
+    assert "cached_candidate_counts" not in result
     assert "dynamic_candidate_generation" in result
     assert "registry_retrieval" in result
     assert result["registry_retrieval"]["values_scored"] == 0
@@ -278,21 +388,82 @@ async def test_dump_candidates_service() -> None:
     # 1. Uncached index, no rebuild
     call_no_rebuild = MockServiceCall({"language": "vi", "rebuild": False})
     result = await _handle_dump_candidates(hass, cast(ServiceCall, call_no_rebuild))
-    assert result["index_cached"] is False
-    assert result["candidate_count"] == 0
+    intent_source_counts = result.pop("intent_source_counts")
+    assert intent_source_counts.get("built_in", 0) > 0
+    assert result == {
+        "language": "vi",
+        "candidate_count": 0,
+        "index_status": "missing",
+        "rebuild_latency_ms": None,
+        "candidate_source_counts": {},
+        "intent_counts": {},
+        "registry_slot_counts": {},
+        "candidate_sample": {"truncated": False, "candidates": []},
+    }
 
-    # 2. Uncached index with rebuild
+    # 2. Rebuild is forced even when a stale index is already cached.
+    runtime.set_index(build_index("vi", [Candidate(text="cũ", intent_name="Old", language="vi")]))
     call_rebuild = MockServiceCall({"language": "vi", "rebuild": True})
+    rebuilt_candidate = Candidate(
+        text="bật shopping_list_item",
+        intent_name="On",
+        language="vi",
+        metadata={
+            "sentence_template": "bật {shopping_list_item}",
+            "wildcard_slots": "shopping_list_item",
+            "slots": '{"domain":"light"}',
+        },
+    )
     with patch.object(
         CanonicalizerRuntime,
         "async_rebuild_index",
-        AsyncMock(return_value=build_index("vi", [Candidate(text="bật", intent_name="On")])),
-    ):
+        AsyncMock(return_value=build_index("vi", [rebuilt_candidate])),
+    ) as mock_rebuild:
         result = await _handle_dump_candidates(hass, cast(ServiceCall, call_rebuild))
-        assert result["index_cached"] is True
+        mock_rebuild.assert_awaited_once()
+        assert result["index_status"] == "rebuilt"
+        assert result["rebuild_latency_ms"] >= 0
         assert result["candidate_count"] == 1
-        assert len(result["sample_candidates"]) == 1
-        assert result["sample_candidates"][0]["text"] == "bật"
+        assert result["candidate_sample"] == {
+            "truncated": False,
+            "candidates": [
+                {
+                    "text": "bật shopping_list_item",
+                    "intent_name": "On",
+                    "source": "generated_sample",
+                    "normalized_text": "bật shopping_list_item",
+                    "slots": {"domain": "light"},
+                    "wildcard_slots": ["shopping_list_item"],
+                    "sentence_template": "bật {shopping_list_item}",
+                }
+            ],
+        }
+
+
+@pytest.mark.asyncio
+async def test_dump_candidates_reports_sample_truncation() -> None:
+    """Report when the bounded candidate sample omits indexed candidates."""
+    runtime = CanonicalizerRuntime()
+    runtime.set_index(
+        build_index(
+            "en",
+            [
+                Candidate(text=f"sample {index}", intent_name="Sample", language="en")
+                for index in range(51)
+            ],
+        )
+    )
+    hass = MockHass(runtime)
+
+    result = await _handle_dump_candidates(
+        hass,
+        cast(ServiceCall, MockServiceCall({"language": "en"})),
+    )
+
+    assert result["index_status"] == "cached"
+    assert result["candidate_count"] == 51
+    assert result["candidate_sample"]["truncated"] is True
+    assert len(result["candidate_sample"]["candidates"]) == 50
 
 
 def test_runtime_from_hass_error() -> None:
@@ -440,9 +611,10 @@ async def test_services_exception_wrapping() -> None:
 
     # 4. _handle_dump_candidates raising error
     with (
-        patch(
-            "custom_components.assist_canonicalizer.services._index_for_language",
-            AsyncMock(side_effect=TypeError("Test type error")),
+        patch.object(
+            CanonicalizerRuntime,
+            "get_index",
+            side_effect=TypeError("Test type error"),
         ),
         pytest.raises(HomeAssistantError, match="Dump candidates failed; see logs for details"),
     ):

@@ -17,7 +17,7 @@ from .normalization import (
     normalize_text_no_diacritics_from_normalized,
     tokenize_normalized,
 )
-from .utils import wildcard_slot_names_sorted
+from .utils import normalized_slot_value_tokens, wildcard_slot_names_sorted
 
 
 class CandidateSource(StrEnum):
@@ -83,6 +83,12 @@ class Candidate:
         default=None, init=False, repr=False, compare=False
     )
     _parsed_raw_slots: dict[str, Any] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _surface_slot_tokens: frozenset[str] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _concrete_surface_slot_tokens: frozenset[str] | None = field(
         default=None, init=False, repr=False, compare=False
     )
 
@@ -273,6 +279,52 @@ class Candidate:
             val = candidate_raw_slot_map(self)
             object.__setattr__(self, "_parsed_raw_slots", val)
         return val
+
+    @property
+    def surface_slot_tokens(self) -> frozenset[str]:
+        """Return localized non-static slot tokens."""
+        val = self._surface_slot_tokens
+        if val is None:
+            slots = self.parsed_slots
+            raw_slots = self.parsed_raw_slots
+            static_slots = _metadata_slot_names(self.metadata, "static_slots")
+            val = frozenset(
+                token
+                for slot_name, slot_value in slots.items()
+                if slot_name not in static_slots
+                for token in normalized_slot_value_tokens(raw_slots.get(slot_name, slot_value))
+            )
+            object.__setattr__(self, "_surface_slot_tokens", val)
+        return val
+
+    @property
+    def concrete_surface_slot_tokens(self) -> frozenset[str]:
+        """Return localized non-static slot tokens excluding free-text wildcards."""
+        val = self._concrete_surface_slot_tokens
+        if val is None:
+            slots = self.parsed_slots
+            raw_slots = self.parsed_raw_slots
+            excluded_slots = (
+                _metadata_slot_names(self.metadata, "static_slots")
+                | _metadata_slot_names(self.metadata, "wildcard_slots")
+                | frozenset(wildcard_name for _, wildcard_name in self.wildcard_infos)
+            )
+            val = frozenset(
+                token
+                for slot_name, slot_value in slots.items()
+                if slot_name not in excluded_slots
+                for token in normalized_slot_value_tokens(raw_slots.get(slot_name, slot_value))
+            )
+            object.__setattr__(self, "_concrete_surface_slot_tokens", val)
+        return val
+
+
+def _metadata_slot_names(metadata: Mapping[str, str], key: str) -> frozenset[str]:
+    """Return comma-separated slot names from candidate metadata."""
+    slot_names_text = metadata.get(key, "")
+    if not isinstance(slot_names_text, str) or not slot_names_text:
+        return frozenset()
+    return frozenset(slot for slot in slot_names_text.split(",") if slot)
 
 
 def _non_static_slot_values(metadata: Mapping[str, str]) -> tuple[str, ...] | None:

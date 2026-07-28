@@ -1710,10 +1710,10 @@ async def test_async_process_prefer_local_intents_shortcut(
 
 
 @pytest.mark.asyncio
-async def test_async_process_prefer_local_intents_true_no_shortcut(
+async def test_async_process_prefer_local_intents_true_uses_shortcut(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Test prefer_local_intents behavior when it is True (should not run shortcut)."""
+    """Keep HassIL first when Home Assistant filters its local-intent pre-pass."""
     _mock_assist_pipeline_const(monkeypatch)
 
     class DummyPipeline:
@@ -1727,7 +1727,6 @@ async def test_async_process_prefer_local_intents_true_no_shortcut(
     runtime = CanonicalizerRuntime()
     entity = AssistCanonicalizerConversationEntity(entry, runtime)
     entity.hass = MagicMock()
-    entity.hass.async_add_executor_job = AsyncMock(side_effect=lambda target, *args: target(*args))
 
     user_input = MockConversationInput("tắt đèn bếp", "vi")
     entity.hass.data = {
@@ -1740,21 +1739,16 @@ async def test_async_process_prefer_local_intents_true_no_shortcut(
         patch.object(
             entity, "_delegate_text", AsyncMock(return_value=validation_ok_res)
         ) as mock_delegate,
-        patch.object(
-            CanonicalizerRuntime, "rank_with_dynamic_candidates", return_value=()
-        ) as mock_rank,
-        patch.object(
-            entity, "_delegate_raw_text", AsyncMock(return_value=validation_ok_res)
-        ) as mock_delegate_raw,
-        patch.object(
-            CanonicalizerRuntime, "async_rebuild_index", AsyncMock(return_value=MagicMock())
-        ) as mock_rebuild_index,
+        patch.object(CanonicalizerRuntime, "rank_with_dynamic_candidates") as mock_rank,
     ):
-        await entity.async_process(user_input)
-        mock_delegate.assert_not_called()
-        mock_rebuild_index.assert_awaited_once()
-        mock_rank.assert_called_once()
-        mock_delegate_raw.assert_awaited_once_with(user_input)
+        res = await entity.async_process(user_input)
+        assert res is validation_ok_res
+        mock_delegate.assert_called_once_with(
+            "tắt đèn bếp",
+            user_input,
+            primary=True,
+        )
+        mock_rank.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -2208,3 +2202,78 @@ async def test_async_process_fallback_missing(
         # Should return a default error response when fallback completely fails
         assert res is not None
         assert res.response.error_code == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_execution_phase_exception_delegates_to_fallback_agent() -> None:
+    """Unexpected execution errors must reach the fallback agent, not an error result."""
+    entry = MagicMock()
+    entry.options = {"min_confidence": 0.60, "min_margin": 0.05}
+    entry.entry_id = "test_entry"
+    runtime = CanonicalizerRuntime()
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+
+    hass = MagicMock()
+    hass.async_create_task = lambda coro: asyncio.create_task(coro)
+    hass.async_add_executor_job = AsyncMock(
+        side_effect=_executor_job_returning_empty_snapshot_index
+    )
+    entity.hass = hass
+    runtime.indexes["vi"] = MagicMock(candidate_count=5)
+
+    accepted = RankedCandidate(
+        candidate=Candidate(text="tắt đèn bếp", intent_name="HassTurnOff"),
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.9,
+            char_ngram_score=0.9,
+            bm25_score=0.9,
+            intent_score=1.0,
+            final_score=0.9,
+        ),
+    )
+    user_input = MockConversationInput("tắt đèn bếp", "vi")
+
+    with (
+        patch.object(
+            CanonicalizerRuntime, "rank_with_dynamic_candidates", return_value=(accepted,)
+        ),
+        patch.object(
+            entity,
+            "_async_execute_accepted_candidates",
+            AsyncMock(side_effect=RuntimeError("registry vanished")),
+        ),
+        patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw_delegated")) as raw,
+    ):
+        res = await entity._async_process_with_runtime(user_input)
+
+    assert res == "raw_delegated"
+    raw.assert_awaited_once_with(user_input)
+    assert runtime.diagnostics.last_fallback_reason == FallbackReason.UNEXPECTED_EXCEPTION
+    assert runtime.diagnostics.last_error == "registry vanished"
+
+
+@pytest.mark.asyncio
+async def test_store_load_failure_delegates_to_fallback_agent() -> None:
+    """Index acquisition errors must forward the raw text, not error out."""
+    entry = MagicMock()
+    entry.entry_id = "test_entry"
+    runtime = CanonicalizerRuntime()
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    entity.hass = MagicMock()
+
+    user_input = MockConversationInput("tắt đèn bếp", "vi")
+
+    with (
+        patch.object(
+            CanonicalizerRuntime,
+            "async_load_index_from_store",
+            AsyncMock(side_effect=Exception("malformed custom sentences YAML")),
+        ),
+        patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw_delegated")) as raw,
+    ):
+        res = await entity._async_process_with_runtime(user_input)
+
+    assert res == "raw_delegated"
+    assert runtime.diagnostics.last_fallback_reason == FallbackReason.EMPTY_INDEX
+    assert "malformed custom sentences YAML" in (runtime.diagnostics.last_error or "")
+    raw.assert_awaited_once_with(user_input)

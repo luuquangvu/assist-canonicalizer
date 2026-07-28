@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import unicodedata
 from collections import Counter
+from types import SimpleNamespace
 
 import home_assistant_intents
 import pytest
+from hassil.errors import MissingListError, MissingRuleError
 
 from custom_components.assist_canonicalizer.normalization import normalize_text
 from tools.benchmark_language_smoke import (
     ACCURACY_GATED_LANGUAGES,
     HAS_SAMPLE_SENTENCE,
     LANGUAGE_ENTITY_NAMES,
+    _fixture_sentence_sample,
+    _intent_data_supports_domain,
     build_language_smoke_commands,
 )
 
@@ -25,6 +29,60 @@ pytestmark = pytest.mark.skipif(
 def test_accuracy_gated_language_manifest_is_explicit() -> None:
     """Keep corpus-backed accuracy claims limited to the reviewed five languages."""
     assert {"de", "en", "fr", "nl", "vi"} == ACCURACY_GATED_LANGUAGES
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        MissingListError("missing list"),
+        MissingRuleError("missing rule"),
+    ],
+)
+def test_fixture_sentence_sample_skips_missing_grammar_references(error: Exception) -> None:
+    """Skip a sentence whose fixture-slot discovery references missing grammar."""
+
+    class MissingGrammarSentence:
+        """Raise the supplied missing-grammar error during list discovery."""
+
+        def list_names(self, _expansion_rules: object) -> set[str]:
+            raise error
+
+    assert (
+        _fixture_sentence_sample(
+            MissingGrammarSentence(),
+            {},
+            {},
+            {"name": "lamp"},
+            "en",
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("requires_domain", "excludes_domain", "target_domain", "expected"),
+    [
+        ({"value": "light", "slot": True}, None, "light", True),
+        ({"value": "light", "slot": True}, None, "switch", False),
+        (["light", "switch"], None, "switch", True),
+        (None, {"value": ["light", "switch"]}, "light", False),
+        ({"value": {"unsupported": "light"}}, None, "light", False),
+    ],
+)
+def test_intent_data_supports_normalized_domain_directives(
+    requires_domain: object,
+    excludes_domain: object,
+    target_domain: str,
+    expected: bool,
+) -> None:
+    """Evaluate scalar, list, and mapping-style domain directives safely."""
+    intent_data = SimpleNamespace(
+        slots={},
+        requires_context=({} if requires_domain is None else {"domain": requires_domain}),
+        excludes_context=({} if excludes_domain is None else {"domain": excludes_domain}),
+    )
+
+    assert _intent_data_supports_domain(intent_data, target_domain) is expected
 
 
 def test_every_installed_language_has_a_deterministic_fixture_command() -> None:

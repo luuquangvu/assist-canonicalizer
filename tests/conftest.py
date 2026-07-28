@@ -1,8 +1,10 @@
 """Fixture configurations for Assist Canonicalizer tests."""
 
-import shutil
 from collections.abc import Callable, Generator, Mapping, Sequence
+from contextlib import suppress
+from errno import ENOTEMPTY
 from pathlib import Path
+from shutil import rmtree
 from types import SimpleNamespace
 from typing import Any
 
@@ -62,5 +64,10 @@ def cleanup_magicmock_dir() -> Generator[None]:
         yield
     finally:
         magicmock_dir = Path("MagicMock")
-        if magicmock_dir.is_dir():
-            shutil.rmtree(magicmock_dir)
+        if magicmock_dir.is_dir() and not magicmock_dir.is_symlink():
+            with suppress(FileNotFoundError):
+                try:
+                    rmtree(magicmock_dir)
+                except OSError as err:
+                    if err.errno != ENOTEMPTY:
+                        raise

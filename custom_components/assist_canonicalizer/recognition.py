@@ -74,19 +74,10 @@ async def async_observe_delegated_text(
     """Recognize delegated text without invoking a trigger or intent handler."""
     started_at = time.monotonic()
     forwarded_context = _forwarded_context_fields(user_input)
-    try:
-        default_agent = async_get_agent(hass, HOME_ASSISTANT_AGENT)
-    except Exception:
-        return _error_observation(started_at, forwarded_context, "agent_lookup_failed")
-    if default_agent is None:
-        return _error_observation(started_at, forwarded_context, "agent_unavailable")
-
-    recognize_trigger = getattr(default_agent, "async_recognize_sentence_trigger", None)
-    recognize_intent = getattr(default_agent, "async_recognize_intent", None)
-    if not callable(recognize_trigger) or not callable(recognize_intent):
-        return _error_observation(started_at, forwarded_context, "recognition_api_unavailable")
-    recognize_trigger_call = cast(Callable[[ConversationInput], Awaitable[Any]], recognize_trigger)
-    recognize_intent_call = cast(Callable[[ConversationInput], Awaitable[Any]], recognize_intent)
+    calls = _recognition_calls_or_error(hass)
+    if isinstance(calls, str):
+        return _error_observation(started_at, forwarded_context, calls)
+    recognize_trigger_call, recognize_intent_call = calls
 
     try:
         recognition_input = copy(user_input)
@@ -110,6 +101,42 @@ async def async_observe_delegated_text(
             latency_ms=elapsed_ms(started_at),
         )
 
+    return _observation_from_result(result, started_at, forwarded_context)
+
+
+def _recognition_calls_or_error(
+    hass: Any,
+) -> (
+    tuple[
+        Callable[[ConversationInput], Awaitable[Any]],
+        Callable[[ConversationInput], Awaitable[Any]],
+    ]
+    | str
+):
+    """Return the default agent's recognition callables or an error category."""
+    try:
+        default_agent = async_get_agent(hass, HOME_ASSISTANT_AGENT)
+    except Exception:
+        return "agent_lookup_failed"
+    if default_agent is None:
+        return "agent_unavailable"
+
+    recognize_trigger = getattr(default_agent, "async_recognize_sentence_trigger", None)
+    recognize_intent = getattr(default_agent, "async_recognize_intent", None)
+    if not callable(recognize_trigger) or not callable(recognize_intent):
+        return "recognition_api_unavailable"
+    return (
+        cast(Callable[[ConversationInput], Awaitable[Any]], recognize_trigger),
+        cast(Callable[[ConversationInput], Awaitable[Any]], recognize_intent),
+    )
+
+
+def _observation_from_result(
+    result: Any,
+    started_at: float,
+    forwarded_context: tuple[str, ...],
+) -> RecognitionObservation:
+    """Build a bounded observation from one successful intent recognition result."""
     unmatched = tuple(
         sorted(
             {
@@ -131,7 +158,7 @@ async def async_observe_delegated_text(
         name = getattr(entity, "name", None)
         if isinstance(name, str) and name:
             slot_items.append((name, _bounded_serializable_value(getattr(entity, "value", None))))
-    slots = tuple(sorted(slot_items))
+    slots = tuple(sorted(slot_items, key=lambda item: item[0]))
     return RecognitionObservation(
         kind=(RecognitionKind.UNMATCHED_TARGET if unmatched else RecognitionKind.INTENT),
         intent_name=intent_name,
@@ -151,8 +178,11 @@ def metadata_matches_observation(
 ) -> tuple[bool, bool]:
     """Compare non-authoritative candidate metadata with a live observation."""
     intent_matches = observation.intent_name == intent_name
+    # Observed values were bounded by _bounded_serializable_value before
+    # storage; expected values must pass through the same bound or slot
+    # values longer than the cap always report a false divergence.
     expected = {
-        name: _normalized_observed_value(value)
+        name: _normalized_observed_value(_bounded_serializable_value(value))
         for name, value in slots.items()
         if isinstance(name, str)
     }
@@ -163,14 +193,16 @@ def metadata_matches_observation(
 def _forwarded_context_fields(user_input: ConversationInput) -> tuple[str, ...]:
     """Return request-context field names preserved by the copied input."""
     fields = ["context", "language"]
-    for field_name in (
-        "conversation_id",
-        "device_id",
-        "satellite_id",
-        "extra_system_prompt",
-    ):
-        if getattr(user_input, field_name, None) is not None:
-            fields.append(field_name)
+    fields.extend(
+        field_name
+        for field_name in (
+            "conversation_id",
+            "device_id",
+            "satellite_id",
+            "extra_system_prompt",
+        )
+        if getattr(user_input, field_name, None) is not None
+    )
     if (
         getattr(user_input, "device_id", None) is not None
         or getattr(user_input, "satellite_id", None) is not None

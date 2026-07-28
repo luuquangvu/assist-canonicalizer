@@ -16,6 +16,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 
 from .builtin_intents import language_variant_for
+from .candidate import Candidate
 from .const import (
     ATTR_ACCEPTED,
     ATTR_CANDIDATE_COUNT,
@@ -48,6 +49,7 @@ from .utils import elapsed_ms, normalize_language, resolve_entry_thresholds
 _LOGGER = logging.getLogger(__name__)
 
 ATTR_REBUILD = "rebuild"
+_CANDIDATE_SAMPLE_LIMIT = 50
 
 
 def validate_supported_language(value: Any) -> str:
@@ -200,12 +202,13 @@ async def _handle_test_match(hass: Any, call: ServiceCall) -> dict[str, Any]:
         ATTR_LANGUAGE: language,
         ATTR_NORMALIZED_TEXT: normalize_text(text),
         ATTR_CANDIDATE_COUNT: index.candidate_count,
-        "index_cached": True,
         "dynamic_candidate_count": runtime.diagnostics.dynamic_candidate_count,
-        "decision_scope": "lexical",
-        "candidate_metadata_authoritative": False,
-        "live_recognition": "not_run",
-        "production_decision_path": "/api/conversation/process",
+        "evaluation": {
+            "scope": "lexical",
+            "candidate_metadata_authoritative": False,
+            "live_recognition": "not_run",
+            "production_decision_path": "/api/conversation/process",
+        },
         "confidence_gate": decision.as_dict(),
         ATTR_ACCEPTED: selected is not None,
         ATTR_SELECTED_CANDIDATE: (
@@ -228,7 +231,6 @@ async def _handle_rebuild_index(hass: Any, call: ServiceCall) -> dict[str, Any]:
         ATTR_LANGUAGE: language,
         ATTR_CANDIDATE_COUNT: index.candidate_count,
         "rebuild_latency_ms": elapsed_ms(started_at),
-        "index_cached": True,
     }
 
 
@@ -236,12 +238,19 @@ async def _handle_rebuild_index(hass: Any, call: ServiceCall) -> dict[str, Any]:
 async def _handle_clear_index(hass: Any, call: ServiceCall) -> dict[str, Any]:
     """Clear one language index or all indexes."""
     runtime = _runtime_from_hass(hass)
-    language = call.data.get(ATTR_LANGUAGE)
-    await runtime.async_clear_index(
-        hass,
-        normalize_language(language) if isinstance(language, str) else None,
+    requested_language = call.data.get(ATTR_LANGUAGE)
+    language = (
+        normalize_language(requested_language) if isinstance(requested_language, str) else None
     )
-    return {ATTR_CANDIDATE_COUNT: runtime.total_candidate_count()}
+    clear_result = await runtime.async_clear_index(hass, language)
+    return {
+        ATTR_LANGUAGE: language,
+        "scope": "all" if language is None else "language",
+        "cleared_cached_languages": list(clear_result.cleared_cached_languages),
+        "cleared_candidate_count": clear_result.cleared_candidate_count,
+        "remaining_candidate_count": clear_result.remaining_candidate_count,
+        "remaining_cached_languages": list(clear_result.remaining_cached_languages),
+    }
 
 
 @_wrap_service_errors("Diagnostics")
@@ -249,13 +258,19 @@ async def _handle_diagnostics(hass: Any, call: ServiceCall) -> dict[str, Any]:
     """Return runtime diagnostics."""
     runtime = _runtime_from_hass(hass)
     diagnostics = runtime.diagnostics.as_dict()
+    diagnostics.pop(ATTR_CANDIDATE_COUNT, None)
+    diagnostics.pop("index_version", None)
+    cached_indexes = {
+        language: {
+            ATTR_CANDIDATE_COUNT: index.candidate_count,
+            "version": index.version,
+        }
+        for language, index in sorted(runtime.indexes.items())
+    }
     diagnostics.update(
         {
-            "cached_languages": sorted(runtime.indexes),
-            "cached_candidate_counts": {
-                language: index.candidate_count
-                for language, index in sorted(runtime.indexes.items())
-            },
+            "total_cached_candidate_count": runtime.total_candidate_count(),
+            "cached_indexes": cached_indexes,
             "pending_rebuild_languages": sorted(runtime.rebuild_tasks),
             "registry_slot_counts": _registry_slot_counts(runtime),
             "dynamic_candidate_generation": {
@@ -279,45 +294,55 @@ async def _handle_dump_candidates(hass: Any, call: ServiceCall) -> dict[str, Any
     runtime = _runtime_from_hass(hass)
     language = _service_language(hass, call)
     should_rebuild = bool(call.data.get(ATTR_REBUILD, False))
-    started_at = time.monotonic()
-    index = await _index_for_language(
-        hass,
-        runtime,
-        language,
-        rebuild_if_missing=should_rebuild,
-    )
+    rebuild_latency_ms: float | None = None
+    if should_rebuild:
+        started_at = time.monotonic()
+        index = await _rebuild_index(hass, runtime, language)
+        if index is None:
+            raise HomeAssistantError("Index rebuild failed or was cancelled")
+        rebuild_latency_ms = elapsed_ms(started_at)
+        index_status = "rebuilt"
+    else:
+        index = runtime.get_index(language)
+        index_status = "cached" if index is not None else "missing"
+
+    intent_source_counts = await hass.async_add_executor_job(runtime.source_counts, language)
     if index is None:
-        intent_source_counts = await hass.async_add_executor_job(runtime.source_counts, language)
         return {
             ATTR_LANGUAGE: language,
             ATTR_CANDIDATE_COUNT: 0,
-            "index_cached": False,
-            "rebuild_required": True,
+            "index_status": index_status,
+            "rebuild_latency_ms": rebuild_latency_ms,
             "intent_source_counts": intent_source_counts,
             "candidate_source_counts": {},
             "intent_counts": {},
             "registry_slot_counts": _registry_slot_counts(runtime),
-            "sample_candidates": [],
+            "candidate_sample": {
+                "truncated": False,
+                "candidates": [],
+            },
         }
 
-    source_counts: dict[str, int] = {}
-    intent_counts: dict[str, int] = {}
-    for candidate in index.candidates:
-        source_counts[candidate.source.value] = source_counts.get(candidate.source.value, 0) + 1
-        intent_counts[candidate.intent_name] = intent_counts.get(candidate.intent_name, 0) + 1
-    intent_source_counts = await hass.async_add_executor_job(runtime.source_counts, language)
+    source_counts, intent_counts = await hass.async_add_executor_job(
+        _count_candidate_sources_and_intents, index
+    )
+    sample_candidates = [
+        _ranked_candidate_candidate_response(candidate)
+        for candidate in index.candidates[:_CANDIDATE_SAMPLE_LIMIT]
+    ]
     return {
         ATTR_LANGUAGE: language,
         ATTR_CANDIDATE_COUNT: index.candidate_count,
-        "index_cached": True,
-        "rebuild_latency_ms": elapsed_ms(started_at) if should_rebuild else None,
+        "index_status": index_status,
+        "rebuild_latency_ms": rebuild_latency_ms,
         "intent_source_counts": intent_source_counts,
         "candidate_source_counts": source_counts,
         "intent_counts": dict(sorted(intent_counts.items())),
         "registry_slot_counts": _registry_slot_counts(runtime),
-        "sample_candidates": [
-            _ranked_candidate_candidate_response(candidate) for candidate in index.candidates[:50]
-        ],
+        "candidate_sample": {
+            "truncated": index.candidate_count > len(sample_candidates),
+            "candidates": sample_candidates,
+        },
     }
 
 
@@ -342,6 +367,18 @@ async def _rebuild_index(
 ) -> CanonicalIndex | None:
     """Rebuild an index once outside the Home Assistant event loop."""
     return await runtime.async_rebuild_index(hass, language, log_error=False, raise_on_error=True)
+
+
+def _count_candidate_sources_and_intents(
+    index: CanonicalIndex,
+) -> tuple[dict[str, int], dict[str, int]]:
+    """Count candidates by source and intent outside the event loop."""
+    source_counts: dict[str, int] = {}
+    intent_counts: dict[str, int] = {}
+    for candidate in index.candidates:
+        source_counts[candidate.source.value] = source_counts.get(candidate.source.value, 0) + 1
+        intent_counts[candidate.intent_name] = intent_counts.get(candidate.intent_name, 0) + 1
+    return source_counts, intent_counts
 
 
 def _runtime_from_hass(hass: Any) -> CanonicalizerRuntime:
@@ -373,13 +410,18 @@ def _registry_slot_counts(runtime: CanonicalizerRuntime) -> dict[str, int]:
     }
 
 
-def _ranked_candidate_candidate_response(candidate: Any) -> dict[str, Any]:
+def _ranked_candidate_candidate_response(candidate: Candidate) -> dict[str, Any]:
     """Return serializable candidate metadata without scores."""
     return {
         ATTR_TEXT: candidate.text,
         ATTR_INTENT_NAME: candidate.intent_name,
         ATTR_SOURCE: candidate.source.value,
         ATTR_NORMALIZED_TEXT: candidate.normalized_text,
+        "slots": candidate.parsed_slots,
+        "wildcard_slots": sorted(
+            {wildcard_name for _index, wildcard_name in candidate.wildcard_infos}
+        ),
+        "sentence_template": candidate.metadata.get("sentence_template"),
     }
 
 
@@ -388,15 +430,17 @@ def _ranked_candidate_response(ranked: RankedCandidate, query: str | None = None
     candidate = ranked.candidate
     text = candidate.text
     normalized_text = candidate.normalized_text
+    replacements: dict[str, str] = {}
     if query is not None:
-        text, _replacements = get_wildcard_rehydration(candidate, query)
+        text, replacements = get_wildcard_rehydration(candidate, query)
         normalized_text = normalize_text(text)
     return {
         ATTR_TEXT: text,
         ATTR_INTENT_NAME: candidate.intent_name,
         ATTR_SOURCE: candidate.source.value,
         ATTR_NORMALIZED_TEXT: normalized_text,
-        "score": ranked.scores.final_score,
+        "slots": candidate.parsed_slots,
+        "wildcard_replacements": replacements,
         "scores": {
             "rapidfuzz": ranked.scores.rapidfuzz_score,
             "char_ngram": ranked.scores.char_ngram_score,

@@ -68,25 +68,21 @@ def _render_md_table(
     """
     ncols = len(headers)
 
-    # Compute maximum column widths from headers and all data cells
     widths = [len(h) for h in headers]
     for row in rows:
         for i, cell in enumerate(row):
             widths[i] = max(widths[i], len(cell))
 
-    # Expand alignment specifier
     if len(alignments) == 1:
         aligns = [alignments] * ncols
     else:
         aligns = list(alignments)
         if len(aligns) < ncols:
-            # Pad with last alignment character to match column count
             aligns.extend([aligns[-1]] * (ncols - len(aligns)))
         aligns = aligns[:ncols]
 
     hdr = _format_md_table_row(headers, aligns, widths)
 
-    # Markdown separator with alignment colons (colon uses 1 char of width)
     sep_parts: list[str] = []
     for a, w in zip(aligns, widths, strict=True):
         dashes = w - 1
@@ -235,7 +231,14 @@ def _generate_versions_note(report: dict[str, Any], is_vi: bool) -> str:
 
 
 def _generate_overall_section(report: dict[str, Any], is_vi: bool) -> str:
-    """Generate the overall benchmark table and summary paragraph.
+    """Generate the shortcut-aware overall benchmark table.
+
+    Accuracy, mismatch, and fallback use the same HassIL-first outcome partition, so
+    their unrounded rates total 100 percent. The user-facing table also pairs them with
+    ``shortcut_protected_case_count`` so a HassIL success that shields a weaker direct
+    result is presented as protection, never as regression. Explicitly named
+    ``direct_canonicalizer_*`` fields retain the unprotected diagnostics in the raw
+    report.
 
     Args:
         report: Parsed JSON report dict.
@@ -265,7 +268,7 @@ def _generate_overall_section(report: dict[str, Any], is_vi: bool) -> str:
             f"{hassil_accuracy:.1f}%",
             f"{uplift:+.1f}",
             str(summary["recovered_case_count"]),
-            str(summary["regressed_case_count"]),
+            str(summary["shortcut_protected_case_count"]),
             f"{mismatch:.1f}%",
             f"{fallback:.1f}%",
             f"{p50:.1f}",
@@ -276,11 +279,11 @@ def _generate_overall_section(report: dict[str, Any], is_vi: bool) -> str:
     if is_vi:
         headers = (
             "Chế độ",
-            "Canonicalizer",
+            "Assist Canonicalizer",
             "HassIL trực tiếp",
             "Tăng điểm %",
             "Khôi phục",
-            "Hồi quy",
+            "Ngăn hồi quy",
             "Nhận diện sai",
             "Dự phòng",
             "P50 ms",
@@ -289,11 +292,11 @@ def _generate_overall_section(report: dict[str, Any], is_vi: bool) -> str:
     else:
         headers = (
             "Mode",
-            "Canonicalizer",
+            "Assist Canonicalizer",
             "Direct HassIL",
             "Uplift pp",
             "Recovered",
-            "Regressed",
+            "Regressions prevented",
             "Mismatch",
             "Fallback",
             "P50 ms",
@@ -306,7 +309,12 @@ def _generate_overall_section(report: dict[str, Any], is_vi: bool) -> str:
 
 
 def _generate_langs_section(report: dict[str, Any], is_vi: bool) -> str:
-    """Generate the per-language breakdown benchmark table.
+    """Generate shortcut-aware per-language benchmark rows.
+
+    Language aggregates use the same mutually exclusive HassIL-first accuracy,
+    mismatch, and fallback outcomes as the overall summary. Direct canonicalizer
+    diagnostics remain available in the raw report but are intentionally omitted from
+    the compact README table.
 
     Args:
         report: Parsed JSON report dict.
@@ -318,11 +326,11 @@ def _generate_langs_section(report: dict[str, Any], is_vi: bool) -> str:
     if is_vi:
         headers = (
             "Ngôn ngữ",
-            "Canonicalizer",
+            "Assist Canonicalizer",
             "HassIL trực tiếp",
             "Tăng điểm %",
             "Khôi phục",
-            "Hồi quy",
+            "Ngăn hồi quy",
             "Nhận diện sai",
             "Dự phòng",
             "P50 ms",
@@ -331,11 +339,11 @@ def _generate_langs_section(report: dict[str, Any], is_vi: bool) -> str:
     else:
         headers = (
             "Language",
-            "Canonicalizer",
+            "Assist Canonicalizer",
             "Direct HassIL",
             "Uplift pp",
             "Recovered",
-            "Regressed",
+            "Regressions prevented",
             "Mismatch",
             "Fallback",
             "P50 ms",
@@ -356,7 +364,7 @@ def _generate_langs_section(report: dict[str, Any], is_vi: bool) -> str:
                 f"{_get_metric_pct(lang_data, 'hassil_baseline_accuracy_pct'):.1f}%",
                 f"{_get_metric_pct(lang_data, 'accuracy_uplift_pp'):+.1f}",
                 str(lang_data["recovered_case_count"]),
-                str(lang_data["regressed_case_count"]),
+                str(lang_data["shortcut_protected_case_count"]),
                 f"{_get_metric_pct(lang_data, 'mismatch_rate_pct'):.1f}%",
                 f"{_get_metric_pct(lang_data, 'fallback_rate_pct'):.1f}%",
                 f"{_get_metric_pct(latency, 'median'):.1f}",

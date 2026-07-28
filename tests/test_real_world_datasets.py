@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -806,6 +807,107 @@ def test_benchmark_accuracy_report_exposes_schema_metadata(tmp_path: Path) -> No
     assert payload["report_schema_version"] == benchmark.ACCURACY_REPORT_SCHEMA_VERSION
     assert f"**Report schema:** v{benchmark.ACCURACY_REPORT_SCHEMA_VERSION}" in markdown
     assert f"Report Schema: v{benchmark.ACCURACY_REPORT_SCHEMA_VERSION}" in text
+
+
+def test_performance_report_tables_keep_header_and_row_widths(
+    tmp_path: Path,
+) -> None:
+    """Keep consolidated text and Markdown timing tables column-aligned."""
+    stats = {
+        "mean": 0.1,
+        "median": 0.1,
+        "p95": 0.2,
+        "p99": 0.3,
+        "stddev": 0.01,
+        "min": 0.05,
+        "max": 0.4,
+        "cov_pct": 10.0,
+    }
+    report = {
+        "target": "rank",
+        "aggregate": {"rank": stats},
+        "phases": {
+            "rank": {
+                "elapsed": stats,
+                "memory_delta_mb": {"mean": 1.0},
+            }
+        },
+    }
+    text_path = tmp_path / "profile.txt"
+    markdown_path = tmp_path / "profile.md"
+
+    benchmark._write_profile_all_text({"rank": report}, str(text_path))
+    benchmark.ReportGenerator.markdown_report(report, str(markdown_path))
+
+    text_lines = text_path.read_text(encoding="utf-8").splitlines()
+    aggregate_index = text_lines.index("Aggregate Performance:")
+    aggregate_header = text_lines[aggregate_index + 1].split(" | ")
+    aggregate_row = text_lines[aggregate_index + 3].split(" | ")
+    assert len(aggregate_header) == len(aggregate_row) == 9
+
+    markdown_lines = markdown_path.read_text(encoding="utf-8").splitlines()
+    phase_index = markdown_lines.index("## Phase Timing")
+    phase_header = markdown_lines[phase_index + 2].strip("|").split("|")
+    phase_row = markdown_lines[phase_index + 4].strip("|").split("|")
+    assert len(phase_header) == len(phase_row) == 7
+
+
+def test_all_target_profile_outputs_preserve_aggregate_paths(tmp_path: Path) -> None:
+    """Derive distinct target reports without consuming the aggregate path."""
+    aggregate_path = tmp_path / "profile.json"
+    target_paths = {
+        benchmark._default_profile_output(target, "json", str(aggregate_path))
+        for target in ("build_index", "rank", "runtime", "components", "evaluate")
+    }
+
+    assert str(aggregate_path) not in target_paths
+    assert target_paths == {
+        str(tmp_path / "profile_build_index.json"),
+        str(tmp_path / "profile_rank.json"),
+        str(tmp_path / "profile_runtime.json"),
+        str(tmp_path / "profile_components.json"),
+        str(tmp_path / "profile_evaluate.json"),
+    }
+
+
+def test_component_profile_reports_every_skipped_dataset(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Expose unreadable and structurally invalid component-profile datasets."""
+    malformed_path = tmp_path / "malformed.json"
+    malformed_path.write_text("{", encoding="utf-8")
+    non_object_path = tmp_path / "non_object.json"
+    non_object_path.write_bytes(orjson.dumps([]))
+
+    inputs = benchmark._load_component_profile_inputs(
+        {
+            "malformed": str(malformed_path),
+            "non_object": str(non_object_path),
+        }
+    )
+
+    assert inputs.queries == ()
+    assert inputs.candidates == ()
+    error = capsys.readouterr().err
+    assert f"dataset malformed at {malformed_path}" in error
+    assert f"dataset non_object at {non_object_path}" in error
+    assert "root must be a JSON object, got list" in error
+
+
+def test_invalid_profile_target_uses_standard_error_exit(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Report allowed targets while using the shared benchmark error exit."""
+    args = argparse.Namespace(target="invalid", mode=benchmark.MODE_PERFORMANCE)
+
+    with pytest.raises(SystemExit) as exc_info:
+        benchmark._validated_target(args)
+
+    assert exc_info.value.code == 1
+    error = capsys.readouterr().err
+    assert f"Allowed targets: {', '.join(sorted(benchmark.PROFILING_TARGETS))}" in error
+    assert "Error: Target 'invalid' is not a valid benchmark target." in error
 
 
 def test_benchmark_ablation_payload_keeps_only_meaningful_counts(

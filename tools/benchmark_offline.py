@@ -1,7 +1,7 @@
 """Offline performance profiler and diagnostic evaluator for Assist Canonicalizer.
 
 This tool is intended for micro-profiling and regression detection of the
-ranking pipeline.  Its accuracy mode is **non-authoritative** — it evaluates
+ranking pipeline. Its accuracy mode is **non-authoritative** because it evaluates
 candidates without a live Home Assistant instance and therefore cannot
 reproduce production recognition, registry, or pipeline behavior.
 
@@ -30,7 +30,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from string import ascii_letters, ascii_lowercase, digits
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import hassil
 import hassil.errors
@@ -240,7 +240,7 @@ _rank_prefilter_limit: Any = None
 _rank_query_setup: Any = None
 _top_prefilter_indices: Any = None
 literal_token_variants: Any = None
-_apply_intent_disambiguation: Any = None
+apply_intent_disambiguation: Any = None
 _prefilter_wildcard_candidates: Any = None
 _is_perfect_rank_result: Any = None
 rehydrate_wildcard_text: Any = None
@@ -264,7 +264,7 @@ def _bootstrap_project_imports() -> None:
     global _normalized_bm25_scores_from_raw, _positional_intent_score_from_lookup
     global _query_slot_tokens_from_candidates, _rank_prefilter_keys, _rank_prefilter_limit
     global _rank_query_setup, _top_prefilter_indices
-    global literal_token_variants, _apply_intent_disambiguation, _prefilter_wildcard_candidates
+    global literal_token_variants, apply_intent_disambiguation, _prefilter_wildcard_candidates
     global _is_perfect_rank_result
     global rehydrate_wildcard_text, rehydrate_wildcard_slots
     global _IMPORTED_LOAD_LANGUAGE_INTENT_SOURCES
@@ -317,9 +317,6 @@ def _bootstrap_project_imports() -> None:
         ScoreBreakdown as ImportedScoreBreakdown,
     )
     from custom_components.assist_canonicalizer.ranking import (
-        _apply_intent_disambiguation as imported_apply_intent_disambiguation,
-    )
-    from custom_components.assist_canonicalizer.ranking import (
         _build_positional_lookup as imported_build_positional_lookup,
     )
     from custom_components.assist_canonicalizer.ranking import (
@@ -354,6 +351,9 @@ def _bootstrap_project_imports() -> None:
     )
     from custom_components.assist_canonicalizer.ranking import (
         accepted_candidate as imported_accepted_candidate,
+    )
+    from custom_components.assist_canonicalizer.ranking import (
+        apply_intent_disambiguation as imported_apply_intent_disambiguation,
     )
     from custom_components.assist_canonicalizer.ranking import (
         confidence_gate_rejection_reason as imported_confidence_gate_rejection_reason,
@@ -412,7 +412,7 @@ def _bootstrap_project_imports() -> None:
     _rank_query_setup = imported_rank_query_setup
     _top_prefilter_indices = imported_top_prefilter_indices
     literal_token_variants = imported_literal_token_variants
-    _apply_intent_disambiguation = imported_apply_intent_disambiguation
+    apply_intent_disambiguation = imported_apply_intent_disambiguation
     _prefilter_wildcard_candidates = imported_prefilter_wildcard_candidates
     _is_perfect_rank_result = imported_is_perfect_rank_result
 
@@ -540,7 +540,7 @@ def _load_benchmark_slot_preferences(datasets: Mapping[str, str]) -> set[tuple[s
                 slots = case.get("expected_slots", {})
                 for slot_name, val in slots.items():
                     if isinstance(val, str):
-                        mapping.add((slot_name, val.lower()))
+                        mapping.add((slot_name, val.casefold()))
         except Exception as err:
             print(
                 f"Warning: failed to load benchmark slot preferences from {real_path} - {err}",
@@ -551,7 +551,7 @@ def _load_benchmark_slot_preferences(datasets: Mapping[str, str]) -> set[tuple[s
 
 def align_table(
     headers: tuple[str, ...],
-    rows: list[tuple[str, ...]],
+    rows: Sequence[tuple[str, ...]],
     *,
     alignments: str = "<",
     padding: int = 1,
@@ -1956,6 +1956,17 @@ class _MarkdownReportRow:
         self.avg_ms_s = f"{stats.get('average_latency_ms', 0):.1f}"
 
 
+_MARKDOWN_REPORT_HEADERS = (
+    "Mode",
+    "Total",
+    "Intent/Slot",
+    "Exact Canonical",
+    "Mismatch",
+    "Fallback",
+    "Avg ms",
+)
+
+
 def _markdown_separator_line(col_widths: list[int], col_aligns: tuple[str, ...]) -> str:
     """Return a Markdown table separator line."""
     parts: list[str] = []
@@ -2042,29 +2053,20 @@ def _markdown_ablation_lines(payload: Mapping[str, Any]) -> list[str]:
     return lines
 
 
-def _markdown_report(report: Mapping[str, Any]) -> str:
-    """Return a human-readable Markdown report with dynamically aligned columns."""
-    _headers = (
-        "Mode",
-        "Total",
-        "Intent/Slot",
-        "Exact Canonical",
-        "Mismatch",
-        "Fallback",
-        "Avg ms",
-    )
-    _col_aligns = ("<", ">", ">", ">", ">", ">", ">")
-    _col_widths: list[int] = [len(h) for h in _headers]
-
-    _all_rows: list[_MarkdownReportRow] = []
-    for lang, payload in sorted(report.get("languages", {}).items()):
+def _markdown_report_rows(
+    report: Mapping[str, Any],
+) -> tuple[list[_MarkdownReportRow], list[int]]:
+    """Return report rows and their dynamic column widths."""
+    widths = [len(header) for header in _MARKDOWN_REPORT_HEADERS]
+    rows = []
+    for language, payload in sorted(report.get("languages", {}).items()):
         for mode_name, summary in payload.get("summary", {}).items():
             stats = summary.get("overall", {})
             if not stats.get("total"):
                 continue
-            row = _MarkdownReportRow(lang, mode_name, stats)
-            _all_rows.append(row)
-            cols = (
+            row = _MarkdownReportRow(language, mode_name, stats)
+            rows.append(row)
+            columns = (
                 row.backticked_mode,
                 row.total_s,
                 row.intent_slot_s,
@@ -2073,11 +2075,13 @@ def _markdown_report(report: Mapping[str, Any]) -> str:
                 row.fallback_s,
                 row.avg_ms_s,
             )
-            for i, s in enumerate(cols):
-                _col_widths[i] = max(_col_widths[i], len(s))
+            for index, value in enumerate(columns):
+                widths[index] = max(widths[index], len(value))
+    return rows, [max(width, 3) for width in widths]
 
-    _col_widths = [max(w, 3) for w in _col_widths]
 
+def _markdown_overall_lines(report: Mapping[str, Any]) -> list[str]:
+    """Return Markdown metadata and overall metrics."""
     overall_summary = report["overall"]["summary"]
     versions = _format_dependency_versions(report.get("dependency_versions", {}))
     lines = [
@@ -2103,113 +2107,165 @@ def _markdown_report(report: Mapping[str, Any]) -> str:
     ]:
         global_ablations = _ablation_results_from_payloads(language_ablation_payloads)
         lines.extend(["", *_markdown_ablation_lines(_ablation_payload(global_ablations))])
-    last_lang: str | None = None
-    for row in _all_rows:
-        if row.lang != last_lang:
-            last_lang = row.lang
-            payload = report["languages"][row.lang]
-            coverage = payload["coverage"]
-            lines.extend(
-                [
-                    "",
-                    f"## {row.lang.upper()}",
-                    "",
-                    f"- Builtin intents: {len(coverage['builtin_intents'])}",
-                    f"- Candidate intents: {len(coverage['candidate_intents'])}",
-                    f"- Dataset intents: {len(coverage['dataset_intents'])}",
-                    f"- Candidates: {coverage['candidate_count']} "
-                    f"(build latency: {coverage['build_latency_ms']:.1f}ms)",
-                    f"- Missing candidate intents: {len(coverage['missing_candidate_intents'])}",
-                    f"- Untested candidate intents: {len(coverage['untested_candidate_intents'])}",
-                    "",
-                    _markdown_header_line(_headers, _col_widths),
-                    _markdown_separator_line(_col_widths, _col_aligns),
-                ]
-            )
-        lines.append(_markdown_data_row(row, _col_widths))
+    return lines
 
+
+def _markdown_language_lines(
+    language: str,
+    coverage: Mapping[str, Any],
+    widths: list[int],
+) -> list[str]:
+    """Return a Markdown language heading and table header."""
+    return [
+        "",
+        f"## {language.upper()}",
+        "",
+        f"- Builtin intents: {len(coverage['builtin_intents'])}",
+        f"- Candidate intents: {len(coverage['candidate_intents'])}",
+        f"- Dataset intents: {len(coverage['dataset_intents'])}",
+        f"- Candidates: {coverage['candidate_count']} "
+        f"(build latency: {coverage['build_latency_ms']:.1f}ms)",
+        f"- Missing candidate intents: {len(coverage['missing_candidate_intents'])}",
+        f"- Untested candidate intents: {len(coverage['untested_candidate_intents'])}",
+        "",
+        _markdown_header_line(_MARKDOWN_REPORT_HEADERS, widths),
+        _markdown_separator_line(
+            widths,
+            ("<", ">", ">", ">", ">", ">", ">"),
+        ),
+    ]
+
+
+def _markdown_report(report: Mapping[str, Any]) -> str:
+    """Return a human-readable Markdown report with aligned columns."""
+    rows, widths = _markdown_report_rows(report)
+    lines = _markdown_overall_lines(report)
+    last_language: str | None = None
+    for row in rows:
+        if row.lang != last_language:
+            last_language = row.lang
+            lines.extend(
+                _markdown_language_lines(
+                    row.lang,
+                    report["languages"][row.lang]["coverage"],
+                    widths,
+                )
+            )
+        lines.append(_markdown_data_row(row, widths))
     if threshold_failures := report["overall"].get("threshold_failures", []):
         lines.extend(["", "## Threshold Failures", ""])
         lines.extend(f"- {failure}" for failure in threshold_failures)
     return "\n".join(lines) + "\n"
 
 
-def _text_report(report: Mapping[str, Any]) -> str:
-    """Return a plain-text report matching the full console output."""
-    lines: list[str] = [
+def _text_report_header(report: Mapping[str, Any]) -> list[str]:
+    """Return offline diagnostic report metadata."""
+    return [
         "=" * 120,
-        "ASSIST CANONICALIZER OFFLINE DIAGNOSTIC REPORT — NON_AUTHORITATIVE",
+        "ASSIST CANONICALIZER OFFLINE DIAGNOSTIC REPORT: NON_AUTHORITATIVE",
         "=" * 120,
         f"Dataset Directory: {report.get('datasets_dir', 'tests/real_world')}/",
+        f"Total Languages: {report.get('total_languages', 0)}",
+        f"Failure Detail Limit: {report.get('failure_limit', 0)}",
+        f"Report Schema: v{report.get('report_schema_version', 1)}",
+        "Dependency Versions: "
+        f"{_format_dependency_versions(report.get('dependency_versions', {}))}",
+        "=" * 120,
     ]
-    lines.append(f"Total Languages: {report.get('total_languages', 0)}")
-    versions = _format_dependency_versions(report.get("dependency_versions", {}))
-    lines.extend(
+
+
+def _text_coverage_lines(
+    language: str,
+    coverage: Mapping[str, Any],
+) -> list[str]:
+    """Return language coverage lines."""
+    lines = [
+        f"\nLanguage: {language.upper()} ({coverage.get('case_count', 0)} cases)",
+        "Coverage: "
+        f"builtin_intents={len(coverage.get('builtin_intents', []))} | "
+        f"candidate_intents={len(coverage.get('candidate_intents', []))} | "
+        f"dataset_intents={len(coverage.get('dataset_intents', []))} | "
+        f"candidates={coverage.get('candidate_count', 0)} | "
+        f"build_latency={coverage.get('build_latency_ms', 0):.1f}ms",
+    ]
+    for key, label in (
+        ("missing_candidate_intents", "Missing candidate intents"),
+        ("untested_candidate_intents", "Untested candidate intents"),
         (
-            f"Failure Detail Limit: {report.get('failure_limit', 0)}",
-            f"Report Schema: v{report.get('report_schema_version', 1)}",
-            f"Dependency Versions: {versions}",
-            "=" * 120,
+            "dataset_intents_without_candidates",
+            "Dataset intents without candidates",
+        ),
+    ):
+        if values := coverage.get(key, []):
+            lines.append(f"{label}: {len(values)} ({_short_names(list(values))})")
+    return lines
+
+
+def _text_failure_lines(
+    failures: Sequence[Mapping[str, Any]],
+    failure_limit: int,
+) -> list[str]:
+    """Return bounded case failure details."""
+    if failure_limit <= 0 or not failures:
+        return []
+    count = min(len(failures), failure_limit)
+    lines = [f"\nFailure details (first {count} of {len(failures)}):"]
+    for item in failures[:failure_limit]:
+        final_score = item.get("final_score")
+        final_score_text = "none" if final_score is None else f"{final_score:.3f}"
+        lines.extend(
+            (
+                f"- [{item.get('mode', '')}][{item.get('category', '')}] "
+                f"{item.get('query', '')!r} "
+                f"reason={item.get('reason', '')} final={final_score_text}",
+                f"  expected={item.get('expected', '')!r} "
+                f"({item.get('expected_intent', '')}, "
+                f"slots={item.get('expected_slots', {})})",
+                f"  actual={item.get('actual', '')!r} "
+                f"({item.get('actual_intent', '')}, "
+                f"slots={item.get('actual_slots', {})})",
+            )
+        )
+    return lines
+
+
+def _text_language_report(
+    language: str,
+    payload: Mapping[str, Any],
+    failure_limit: int,
+) -> list[str]:
+    """Return one language section of the diagnostic report."""
+    lines = _text_coverage_lines(language, payload.get("coverage", {}))
+    lines.append(f"\nProcessing {language.upper()} ...")
+    lines.extend(
+        _text_summary_table(
+            f"Summary: {language.upper()}",
+            payload.get("summary", {}),
         )
     )
-    for lang, payload in sorted(report.get("languages", {}).items()):
-        coverage = payload.get("coverage", {})
-        lines.append(f"\nLanguage: {lang.upper()} ({coverage.get('case_count', 0)} cases)")
-        lines.append(
-            f"Coverage: "
-            f"builtin_intents={len(coverage.get('builtin_intents', []))} | "
-            f"candidate_intents={len(coverage.get('candidate_intents', []))} | "
-            f"dataset_intents={len(coverage.get('dataset_intents', []))} | "
-            f"candidates={coverage.get('candidate_count', 0)} | "
-            f"build_latency={coverage.get('build_latency_ms', 0):.1f}ms"
+    if ablations := payload.get("ablations"):
+        lines.extend(
+            _text_ablation_table(
+                f"{ABLATION_REPORT_TITLE}: {language.upper()}",
+                ablations,
+            )
         )
-        if _miss := coverage.get("missing_candidate_intents", []):
-            lines.append(f"Missing candidate intents: {len(_miss)} ({_short_names(list(_miss))})")
-        if _untested := coverage.get("untested_candidate_intents", []):
-            lines.append(
-                f"Untested candidate intents: {len(_untested)} ({_short_names(list(_untested))})"
-            )
-        if _missing_ds := coverage.get("dataset_intents_without_candidates", []):
-            lines.append(
-                f"Dataset intents without candidates: "
-                f"{len(_missing_ds)} ({_short_names(list(_missing_ds))})"
-            )
-        lines.append(f"\nProcessing {lang.upper()} ...")
+    lines.extend(
+        _text_failure_lines(
+            payload.get("failures", []),
+            failure_limit,
+        )
+    )
+    return lines
 
-        _summary_lines = _text_summary_table(f"Summary: {lang.upper()}", payload.get("summary", {}))
-        lines.extend(_summary_lines)
 
-        if payload.get("ablations"):
-            _lbl_lines = _text_ablation_table(
-                f"{ABLATION_REPORT_TITLE}: {lang.upper()}", payload.get("ablations", {})
-            )
-            lines.extend(_lbl_lines)
-
-        _failure_limit = report.get("failure_limit", 0)
-        _failures = payload.get("failures", [])
-        if _failure_limit > 0 and _failures:
-            _cnt = min(len(_failures), _failure_limit)
-            lines.append(f"\nFailure details (first {_cnt} of {len(_failures)}):")
-            for item in _failures[:_failure_limit]:
-                _fs = item.get("final_score")
-                _fs_str = "none" if _fs is None else f"{_fs:.3f}"
-                lines.append(
-                    f"- [{item.get('mode', '')}][{item.get('category', '')}] "
-                    f"{item.get('query', '')!r} "
-                    f"reason={item.get('reason', '')} final={_fs_str}"
-                )
-                lines.append(
-                    f"  expected={item.get('expected', '')!r} "
-                    f"({item.get('expected_intent', '')}, slots={item.get('expected_slots', {})})"
-                )
-                lines.append(
-                    f"  actual={item.get('actual', '')!r} "
-                    f"({item.get('actual_intent', '')}, slots={item.get('actual_slots', {})})"
-                )
-
+def _text_overall_report(report: Mapping[str, Any]) -> list[str]:
+    """Return overall diagnostic summary and threshold sections."""
     overall = report.get("overall", {})
-    _global_summary = _text_summary_table("Summary: ALL LANGUAGES", overall.get("summary", {}))
-    lines.extend(_global_summary)
+    lines = _text_summary_table(
+        "Summary: ALL LANGUAGES",
+        overall.get("summary", {}),
+    )
     if language_ablation_payloads := [
         payload.get("ablations", {})
         for payload in report.get("languages", {}).values()
@@ -2228,6 +2284,16 @@ def _text_report(report: Mapping[str, Any]) -> str:
         lines.append("\nThreshold failures:")
         lines.extend(f"- {failure}" for failure in threshold_failures)
     lines.append("\nEvaluation Complete.")
+    return lines
+
+
+def _text_report(report: Mapping[str, Any]) -> str:
+    """Return a plain-text report matching the full console output."""
+    lines = _text_report_header(report)
+    failure_limit = int(report.get("failure_limit", 0))
+    for language, payload in sorted(report.get("languages", {}).items()):
+        lines.extend(_text_language_report(language, payload, failure_limit))
+    lines.extend(_text_overall_report(report))
     return "\n".join(lines) + "\n"
 
 
@@ -2658,7 +2724,7 @@ def _print_evaluation_header(
 ) -> None:
     """Print the header section of the performance evaluation report."""
     print("=" * 120)
-    print("ASSIST CANONICALIZER OFFLINE DIAGNOSTIC REPORT — NON_AUTHORITATIVE")
+    print("ASSIST CANONICALIZER OFFLINE DIAGNOSTIC REPORT: NON_AUTHORITATIVE")
     print("=" * 120)
     print(f"Dataset Directory: {datasets_dir}/")
     print(f"Total Languages: {len(datasets)}")
@@ -2867,6 +2933,169 @@ def _evaluate_dataset_language(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _EvaluationThresholds:
+    """Accuracy thresholds for aggregate and per-language reports."""
+
+    intent_slot_accuracy: float | None
+    fallback_rate: float | None
+    mismatch_rate: float | None
+    language_intent_slot_accuracy: float | None
+    language_fallback_rate: float | None
+    language_mismatch_rate: float | None
+
+
+@dataclass(slots=True)
+class _EvaluationState:
+    """Mutable cross-language evaluation results."""
+
+    overall_success: bool
+    global_results: dict[str, Any]
+    global_ablations: AblationResults
+    threshold_failures: list[str]
+    report: dict[str, Any]
+
+
+def _evaluation_state(
+    datasets: Mapping[str, str],
+    datasets_dir: str,
+    failure_limit: int,
+    dependency_versions: Mapping[str, str],
+) -> _EvaluationState:
+    """Return initialized cross-language evaluation state."""
+    return _EvaluationState(
+        overall_success=True,
+        global_results=_new_results(),
+        global_ablations=_new_ablation_results(),
+        threshold_failures=[],
+        report={
+            "report_schema": "assist_canonicalizer_accuracy",
+            "report_schema_version": ACCURACY_REPORT_SCHEMA_VERSION,
+            "authoritative": False,
+            "benchmark_mode": "offline_diagnostic",
+            "languages": {},
+            "datasets_dir": datasets_dir,
+            "total_languages": len(datasets),
+            "failure_limit": failure_limit,
+            "dependency_versions": dependency_versions,
+        },
+    )
+
+
+def _report_threshold_failures(
+    failures: Sequence[str],
+    scope: str | None = None,
+) -> None:
+    """Print threshold failures for an optional language scope."""
+    title = f"\nThreshold failures: {scope}" if scope else "\nThreshold failures:"
+    print(title)
+    for failure in failures:
+        print(f"- {failure}")
+
+
+def _evaluate_all_languages(
+    datasets: Mapping[str, str],
+    failure_limit: int,
+    skip_hassil: bool,
+    skip_ablations: bool,
+    thresholds: _EvaluationThresholds,
+    state: _EvaluationState,
+) -> bool:
+    """Evaluate and record every valid language dataset."""
+    slot_preferences = _load_benchmark_slot_preferences(datasets)
+    for language, path in sorted(datasets.items()):
+        loaded = _load_and_validate_dataset(language, path)
+        if loaded is None:
+            return False
+        test_cases, slots = loaded
+        if not test_cases:
+            continue
+        language_payload, language_stats = _evaluate_dataset_language(
+            language,
+            test_cases,
+            slots,
+            skip_hassil,
+            skip_ablations,
+            slot_preferences,
+            state.global_results,
+            state.global_ablations,
+            failure_limit,
+        )
+        failures = _threshold_failures(
+            language_stats,
+            thresholds.language_intent_slot_accuracy,
+            thresholds.language_fallback_rate,
+            thresholds.language_mismatch_rate,
+            scope=language.upper(),
+        )
+        language_payload["threshold_failures"] = failures
+        state.report["languages"][language] = language_payload
+        if failures:
+            state.overall_success = False
+            state.threshold_failures.extend(failures)
+            _report_threshold_failures(failures, language.upper())
+    return True
+
+
+def _finalize_evaluation_summary(
+    state: _EvaluationState,
+    thresholds: _EvaluationThresholds,
+    skip_ablations: bool,
+) -> None:
+    """Print and record aggregate evaluation results."""
+    _print_summary_table("Summary: ALL LANGUAGES", state.global_results)
+    if not skip_ablations:
+        _print_ablation_table(
+            f"{ABLATION_REPORT_TITLE}: ALL LANGUAGES",
+            state.global_ablations,
+            show_metric_note=True,
+        )
+    if aggregate_failures := _threshold_failures(
+        _aggregate_mode_stats(state.global_results, "lexical"),
+        thresholds.intent_slot_accuracy,
+        thresholds.fallback_rate,
+        thresholds.mismatch_rate,
+        scope="ALL",
+    ):
+        state.overall_success = False
+        state.threshold_failures.extend(aggregate_failures)
+        _report_threshold_failures(aggregate_failures)
+    state.report["overall"] = {
+        "summary": _summary_payload(state.global_results),
+        "threshold_failures": state.threshold_failures,
+    }
+
+
+def _write_evaluation_outputs(
+    report: Mapping[str, Any],
+    output_json: str | None,
+    output_md: str | None,
+    output_txt: str | None,
+) -> None:
+    """Write configured evaluation report formats."""
+    if output_json:
+        _write_json_report(output_json, report)
+    if output_md:
+        _write_markdown_report(output_md, report)
+    if output_txt:
+        _write_text_report(output_txt, report)
+
+
+def _print_evaluation_completion(
+    global_results: dict[str, dict[str, CategoryStats]],
+) -> None:
+    """Print evaluation drift guidance and completion status."""
+    lexical_stats = _aggregate_mode_stats(global_results, "lexical")
+    print(f"\nTotal drift cases: {lexical_stats.drift}")
+    if lexical_stats.drift > 0:
+        print(
+            "Reminder: Please regenerate expectations "
+            "(uv run tools/benchmark_offline.py --regenerate-expectations) "
+            "to update test suite expectations after upgrading home-assistant-intents."
+        )
+    print("\nEvaluation Complete.")
+
+
 async def run_evaluation(
     datasets: dict[str, str],
     failure_limit: int,
@@ -2902,100 +3131,38 @@ async def run_evaluation(
         output_txt,
         dependency_versions,
     )
-
-    overall_success = True
-    global_results = _new_results()
-    global_ablations = _new_ablation_results()
-    threshold_failures: list[str] = []
-    benchmark_slot_prefs = _load_benchmark_slot_preferences(datasets)
-    report: dict[str, Any] = {
-        "report_schema": "assist_canonicalizer_accuracy",
-        "report_schema_version": ACCURACY_REPORT_SCHEMA_VERSION,
-        "authoritative": False,
-        "benchmark_mode": "offline_diagnostic",
-        "languages": {},
-        "datasets_dir": datasets_dir,
-        "total_languages": len(datasets),
-        "failure_limit": failure_limit,
-        "dependency_versions": dependency_versions,
-    }
-
-    for lang, path in sorted(datasets.items()):
-        loaded = _load_and_validate_dataset(lang, path)
-        if loaded is None:
-            return False
-        test_cases, slots = loaded
-        if not test_cases:
-            continue
-
-        language_payload, language_stats = _evaluate_dataset_language(
-            lang,
-            test_cases,
-            slots,
-            skip_hassil,
-            skip_ablations,
-            benchmark_slot_prefs,
-            global_results,
-            global_ablations,
-            failure_limit,
-        )
-        language_threshold_failures = _threshold_failures(
-            language_stats,
-            min_language_intent_slot_accuracy,
-            max_language_fallback_rate,
-            max_language_mismatch_rate,
-            scope=lang.upper(),
-        )
-        language_payload["threshold_failures"] = language_threshold_failures
-        report["languages"][lang] = language_payload
-        if language_threshold_failures:
-            overall_success = False
-            threshold_failures.extend(language_threshold_failures)
-            print(f"\nThreshold failures: {lang.upper()}")
-            for failure in language_threshold_failures:
-                print(f"- {failure}")
-
-    _print_summary_table("Summary: ALL LANGUAGES", global_results)
-    if not skip_ablations:
-        _print_ablation_table(
-            f"{ABLATION_REPORT_TITLE}: ALL LANGUAGES",
-            global_ablations,
-            show_metric_note=True,
-        )
-    lex_stats = _aggregate_mode_stats(global_results, "lexical")
-    if aggregate_threshold_failures := _threshold_failures(
-        lex_stats,
-        min_intent_slot_accuracy,
-        max_fallback_rate,
-        max_mismatch_rate,
-        scope="ALL",
+    thresholds = _EvaluationThresholds(
+        intent_slot_accuracy=min_intent_slot_accuracy,
+        fallback_rate=max_fallback_rate,
+        mismatch_rate=max_mismatch_rate,
+        language_intent_slot_accuracy=min_language_intent_slot_accuracy,
+        language_fallback_rate=max_language_fallback_rate,
+        language_mismatch_rate=max_language_mismatch_rate,
+    )
+    state = _evaluation_state(
+        datasets,
+        datasets_dir,
+        failure_limit,
+        dependency_versions,
+    )
+    if not _evaluate_all_languages(
+        datasets,
+        failure_limit,
+        skip_hassil,
+        skip_ablations,
+        thresholds,
+        state,
     ):
-        overall_success = False
-        threshold_failures.extend(aggregate_threshold_failures)
-        print("\nThreshold failures:")
-        for failure in aggregate_threshold_failures:
-            print(f"- {failure}")
-
-    report["overall"] = {
-        "summary": _summary_payload(global_results),
-        "threshold_failures": threshold_failures,
-    }
-    if output_json:
-        _write_json_report(output_json, report)
-    if output_md:
-        _write_markdown_report(output_md, report)
-    if output_txt:
-        _write_text_report(output_txt, report)
-    lex_total = _aggregate_mode_stats(global_results, "lexical")
-    print(f"\nTotal drift cases: {lex_total.drift}")
-    if lex_total.drift > 0:
-        print(
-            "Reminder: Please regenerate expectations "
-            "(uv run tools/benchmark_offline.py --regenerate-expectations) "
-            "to update test suite expectations after upgrading home-assistant-intents."
-        )
-    print("\nEvaluation Complete.")
-    return overall_success
+        return False
+    _finalize_evaluation_summary(state, thresholds, skip_ablations)
+    _write_evaluation_outputs(
+        state.report,
+        output_json,
+        output_md,
+        output_txt,
+    )
+    _print_evaluation_completion(state.global_results)
+    return state.overall_success
 
 
 @dataclass
@@ -3421,80 +3588,139 @@ def _serialize_profile_report_value(obj: object) -> object:
     return obj
 
 
+def _print_profile_header(report: Mapping[str, Any]) -> None:
+    """Print profile metadata."""
+    print("\n" + "=" * 90)
+    print("ALGORITHMIC PERFORMANCE PROFILING REPORT: NON_AUTHORITATIVE")
+    print("=" * 90)
+    print(f"Report Schema:   v{report.get('report_schema_version', 1)}")
+    print(f"Target:          {report.get('target', 'unknown')}")
+    print(f"Iterations:      {report.get('iterations', 0)}")
+    print(f"Warmup:          {report.get('warmup', 0)}")
+    print(f"Granularity:     {report.get('granularity', 'coarse')}")
+    languages = report.get("languages", [])
+    print(f"Languages:       {', '.join(languages) if languages else 'all'}")
+    print(f"Dependencies:    {_format_dependency_versions(report.get('dependency_versions', {}))}")
+    print("-" * 90)
+
+
+def _print_profile_sections(report: Mapping[str, Any]) -> None:
+    """Print non-empty top-level profile sections."""
+    section_printers: tuple[tuple[str, Any, str], ...] = (
+        ("aggregate", _print_stat_block, "Aggregate Performance"),
+        ("resource", _print_resource_block, "Resource Utilization"),
+        ("phases", _print_phase_table, "Phase Timing Breakdown"),
+        ("components", _print_phase_table, "Component Micro-Profile"),
+        ("coverage", _print_count_table, "Runtime Branch Coverage"),
+        (
+            "category_coverage",
+            _print_count_table,
+            "Runtime Category Coverage",
+        ),
+        ("scenario_stats", _print_phase_table, "Runtime Scenario Timing"),
+        ("slow_queries", _print_slow_queries, "Slowest Runtime Queries"),
+    )
+    for key, printer, title in section_printers:
+        if value := report.get(key):
+            printer(title, value)
+
+
+def _print_language_profile(
+    language: str,
+    data: Mapping[str, Any],
+) -> None:
+    """Print all profile sections for one language."""
+    print(f"\n{'─' * 90}")
+    print(f"Language: {language.upper()}")
+    section_printers: tuple[tuple[str, Any, str], ...] = (
+        ("aggregate", _print_stat_block, "  Aggregate"),
+        ("phases", _print_phase_table, "  Phase Timing"),
+        ("coverage", _print_count_table, "  Runtime Branch Coverage"),
+        (
+            "category_coverage",
+            _print_count_table,
+            "  Runtime Category Coverage",
+        ),
+        ("scenario_stats", _print_phase_table, "  Runtime Scenario Timing"),
+        ("slow_queries", _print_slow_queries, "  Slowest Runtime Queries"),
+    )
+    for key, printer, title in section_printers:
+        if value := data.get(key):
+            printer(title, value)
+
+
+def _print_profile_footer(report: Mapping[str, Any]) -> None:
+    """Print regression, stability, and closing profile output."""
+    if regressions := report.get("regressions", []):
+        print(f"\n{'!' * 90}")
+        print("REGRESSION DETECTIONS:")
+        for regression in regressions:
+            print(f"  {regression}")
+        print(f"{'!' * 90}")
+    if stability := report.get("stability"):
+        print(f"\nStability: {stability}")
+    print("\n" + "=" * 90)
+
+
+def _profile_markdown_lines(report: Mapping[str, Any]) -> list[str]:
+    """Return a Markdown performance profile."""
+    lines = [
+        "# Assist Canonicalizer - Algorithmic Performance Profile",
+        "",
+        "**NON_AUTHORITATIVE:** isolated profiling; not production-path evidence.",
+        "",
+        f"**Report schema:** v{report.get('report_schema_version', 1)}  ",
+        f"**Target:** `{report.get('target', 'unknown')}`  ",
+        f"**Iterations:** {report.get('iterations', 0)} | "
+        f"**Warmup:** {report.get('warmup', 0)} | "
+        f"**Granularity:** {report.get('granularity', 'coarse')}",
+        "**Dependency versions:** "
+        f"{_format_dependency_versions(report.get('dependency_versions', {}))}",
+        "",
+    ]
+    if aggregate := report.get("aggregate"):
+        lines.extend(_md_stat_table("## Aggregate Performance", aggregate))
+    if phases := report.get("phases"):
+        lines.extend(("## Phase Timing", ""))
+        lines.extend(_md_phase_rows(phases))
+    if components := report.get("components"):
+        lines.extend(("## Component Micro-Profile", ""))
+        lines.extend(_md_component_rows(components))
+    if coverage := report.get("coverage"):
+        lines.extend(_md_count_table("## Runtime Branch Coverage", coverage))
+    if category_coverage := report.get("category_coverage"):
+        lines.extend(
+            _md_count_table(
+                "## Runtime Category Coverage",
+                category_coverage,
+            )
+        )
+    if scenario_stats := report.get("scenario_stats"):
+        lines.extend(("## Runtime Scenario Timing", ""))
+        lines.extend(_md_phase_rows(scenario_stats))
+    if slow_queries := report.get("slow_queries"):
+        lines.extend(_md_slow_queries("## Slowest Runtime Queries", slow_queries))
+    if regressions := report.get("regressions"):
+        lines.extend(("## Regression Detections", ""))
+        lines.extend(f"- {regression}" for regression in regressions)
+        lines.append("")
+    while lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
 class ReportGenerator:
     """Generate multi-format profiling reports (terminal, JSON, Markdown, text)."""
 
     @staticmethod
     def terminal(report: dict[str, Any]) -> None:
         """Print the profiling report to the terminal."""
-        print("\n" + "=" * 90)
-        print("ALGORITHMIC PERFORMANCE PROFILING REPORT — NON_AUTHORITATIVE")
-        print("=" * 90)
-        print(f"Report Schema:   v{report.get('report_schema_version', 1)}")
-        print(f"Target:          {report.get('target', 'unknown')}")
-        print(f"Iterations:      {report.get('iterations', 0)}")
-        print(f"Warmup:          {report.get('warmup', 0)}")
-        print(f"Granularity:     {report.get('granularity', 'coarse')}")
-        langs = report.get("languages", [])
-        print(f"Languages:       {', '.join(langs) if langs else 'all'}")
-        print(
-            f"Dependencies:    {_format_dependency_versions(report.get('dependency_versions', {}))}"
-        )
-        print("-" * 90)
-
-        if agg := report.get("aggregate", {}):
-            _print_stat_block("Aggregate Performance", agg)
-
-        if res := report.get("resource", {}):
-            _print_resource_block("Resource Utilization", res)
-
-        if phases := report.get("phases", {}):
-            _print_phase_table("Phase Timing Breakdown", phases)
-
-        if components := report.get("components", {}):
-            _print_phase_table("Component Micro-Profile", components)
-
-        if coverage := report.get("coverage", {}):
-            _print_count_table("Runtime Branch Coverage", coverage)
-
-        if category_coverage := report.get("category_coverage", {}):
-            _print_count_table("Runtime Category Coverage", category_coverage)
-
-        if scenario_stats := report.get("scenario_stats", {}):
-            _print_phase_table("Runtime Scenario Timing", scenario_stats)
-
-        if slow_queries := report.get("slow_queries", []):
-            _print_slow_queries("Slowest Runtime Queries", slow_queries)
-
-        per_lang = report.get("per_language", {})
-        for lang_key in sorted(per_lang):
-            lang_data = per_lang[lang_key]
-            print(f"\n{'─' * 90}")
-            print(f"Language: {lang_key.upper()}")
-            if lang_data.get("aggregate"):
-                _print_stat_block("  Aggregate", lang_data["aggregate"])
-            if lang_data.get("phases"):
-                _print_phase_table("  Phase Timing", lang_data["phases"])
-            if lang_data.get("coverage"):
-                _print_count_table("  Runtime Branch Coverage", lang_data["coverage"])
-            if lang_data.get("category_coverage"):
-                _print_count_table("  Runtime Category Coverage", lang_data["category_coverage"])
-            if lang_data.get("scenario_stats"):
-                _print_phase_table("  Runtime Scenario Timing", lang_data["scenario_stats"])
-            if lang_data.get("slow_queries"):
-                _print_slow_queries("  Slowest Runtime Queries", lang_data["slow_queries"])
-
-        if regressions := report.get("regressions", []):
-            print(f"\n{'!' * 90}")
-            print("REGRESSION DETECTIONS:")
-            for r in regressions:
-                print(f"  {r}")
-            print(f"{'!' * 90}")
-
-        if stability := report.get("stability", {}):
-            print(f"\nStability: {stability}")
-
-        print("\n" + "=" * 90)
+        _print_profile_header(report)
+        _print_profile_sections(report)
+        per_language = report.get("per_language", {})
+        for language in sorted(per_language):
+            _print_language_profile(language, per_language[language])
+        _print_profile_footer(report)
 
     @staticmethod
     def json_report(report: dict[str, Any], path: str) -> None:
@@ -3515,93 +3741,7 @@ class ReportGenerator:
     @staticmethod
     def markdown_report(report: dict[str, Any], path: str) -> None:
         """Save the profiling report to a Markdown file."""
-        lines: list[str] = [
-            "# Assist Canonicalizer - Algorithmic Performance Profile",
-            "",
-            "**NON_AUTHORITATIVE:** isolated profiling; not production-path evidence.",
-            "",
-            f"**Report schema:** v{report.get('report_schema_version', 1)}  ",
-            f"**Target:** `{report.get('target', 'unknown')}`  ",
-            f"**Iterations:** {report.get('iterations', 0)} | "
-            f"**Warmup:** {report.get('warmup', 0)} | "
-            f"**Granularity:** {report.get('granularity', 'coarse')}",
-            f"**Dependency versions:** "
-            f"{_format_dependency_versions(report.get('dependency_versions', {}))}",
-            "",
-        ]
-
-        if agg := report.get("aggregate", {}):
-            lines.extend(_md_stat_table("## Aggregate Performance", agg))
-
-        if phases := report.get("phases", {}):
-            lines.extend(("## Phase Timing", ""))
-            ph_headers = (
-                "Phase",
-                "Mean (ms)",
-                "Median (ms)",
-                "p95 (ms)",
-                "p99 (ms)",
-                "StdDev (ms)",
-                "Memory Δ (MB)",
-            )
-            ph_rows: list[tuple[str, ...]] = []
-            for name, phase_data in phases.items():
-                e = phase_data.get("elapsed", {})
-                m = phase_data.get("memory_delta_mb", {})
-                ph_rows.append(
-                    (
-                        name,
-                        f"{e.get('mean', 0) * 1000:.2f}",
-                        f"{e.get('median', 0) * 1000:.2f}",
-                        f"{e.get('p95', 0) * 1000:.2f}",
-                        f"{e.get('p99', 0) * 1000:.2f}",
-                        f"{e.get('stddev', 0) * 1000:.2f}",
-                        f"{m.get('mean', 0):.2f}",
-                    )
-                )
-            lines.extend(_md_aligned_table(ph_headers, "<>", ph_rows))
-            lines.append("")
-
-        if components := report.get("components", {}):
-            lines.extend(("## Component Micro-Profile", ""))
-            cp_headers = ("Component", "Mean (μs)", "Median (μs)", "p95 (μs)", "p99 (μs)", "CoV%")
-            cp_rows: list[tuple[str, ...]] = []
-            for name, comp_data in components.items():
-                e = comp_data.get("elapsed", {})
-                cp_rows.append(
-                    (
-                        name,
-                        f"{e.get('mean', 0) * 1_000_000:.1f}",
-                        f"{e.get('median', 0) * 1_000_000:.1f}",
-                        f"{e.get('p95', 0) * 1_000_000:.1f}",
-                        f"{e.get('p99', 0) * 1_000_000:.1f}",
-                        f"{e.get('cov_pct', 0):.1f}",
-                    )
-                )
-            lines.extend(_md_aligned_table(cp_headers, "<>", cp_rows))
-            lines.append("")
-
-        if coverage := report.get("coverage", {}):
-            lines.extend(_md_count_table("## Runtime Branch Coverage", coverage))
-
-        if category_coverage := report.get("category_coverage", {}):
-            lines.extend(_md_count_table("## Runtime Category Coverage", category_coverage))
-
-        if scenario_stats := report.get("scenario_stats", {}):
-            lines.extend(("## Runtime Scenario Timing", ""))
-            lines.extend(_md_phase_rows(scenario_stats))
-
-        if slow_queries := report.get("slow_queries", []):
-            lines.extend(_md_slow_queries("## Slowest Runtime Queries", slow_queries))
-
-        if regressions := report.get("regressions", []):
-            lines.extend(("## Regression Detections", ""))
-            lines.extend(f"- {r}" for r in regressions)
-            lines.append("")
-
-        while lines and lines[-1] == "":
-            lines.pop()
-        atomic_write(path, "\n".join(lines) + "\n")
+        atomic_write(path, "\n".join(_profile_markdown_lines(report)) + "\n")
         print(f"Markdown report saved to {Path(path)}")
 
     @staticmethod
@@ -3739,7 +3879,7 @@ class ReportGenerator:
     def text_report(report: dict[str, Any], path: str) -> None:
         """Save the profiling report to a text file."""
         lines: list[str] = [
-            "ALGORITHMIC PERFORMANCE PROFILING REPORT — NON_AUTHORITATIVE",
+            "ALGORITHMIC PERFORMANCE PROFILING REPORT: NON_AUTHORITATIVE",
             "=" * 80,
             f"Report Schema: v{report.get('report_schema_version', 1)}",
             f"Target: {report.get('target', 'unknown')}",
@@ -4023,7 +4163,7 @@ def _text_slow_queries(title: str, rows: Sequence[Mapping[str, Any]]) -> list[st
 def _md_aligned_table(
     headers: tuple[str, ...],
     alignments: str,
-    rows: list[tuple[str, ...]],
+    rows: Sequence[tuple[str, ...]],
 ) -> list[str]:
     """Generate a markdown formatted table with dynamically aligned columns."""
     if not headers:
@@ -4477,16 +4617,12 @@ def _warm_rank_stage_components(contexts: Sequence[RankStageContext]) -> None:
         _ = _accepted_candidate(case.ranked)
 
 
-def _profile_rank_stage_components(
+def _profile_rank_retrieval_stages(
     component_results: dict[str, dict[str, list[float]]],
-    contexts: Sequence[RankStageContext],
+    case_pairs: Sequence[tuple[RankStageContext, RankStageCase]],
 ) -> None:
-    """Profile rank-path orchestration stages that are not simple scoring functions."""
-    case_pairs = _iter_rank_stage_cases(contexts)
+    """Profile full rank, query setup, and retrieval stages."""
     case_count = len(case_pairs)
-    if case_count == 0:
-        return
-
     t0 = time.perf_counter()
     for context, case in case_pairs:
         _ = context.index.rank(case.raw)
@@ -4526,6 +4662,13 @@ def _profile_rank_stage_components(
         _ = context.char_index.score(case.grams)
     _record_component_elapsed(component_results, "rank_char_ngram_score", t0, case_count)
 
+
+def _profile_rank_filter_stages(
+    component_results: dict[str, dict[str, list[float]]],
+    case_pairs: Sequence[tuple[RankStageContext, RankStageCase]],
+) -> None:
+    """Profile rank prefilter, slot, and acceptance stages."""
+    case_count = len(case_pairs)
     t0 = time.perf_counter()
     for _, case in case_pairs:
         _ = _rank_prefilter_keys(case.char_scores, case.bm25_scores)
@@ -4565,6 +4708,18 @@ def _profile_rank_stage_components(
     for _, case in case_pairs:
         _ = _accepted_candidate(case.ranked)
     _record_component_elapsed(component_results, "accepted_candidate", t0, case_count)
+
+
+def _profile_rank_stage_components(
+    component_results: dict[str, dict[str, list[float]]],
+    contexts: Sequence[RankStageContext],
+) -> None:
+    """Profile rank-path orchestration stages."""
+    case_pairs = _iter_rank_stage_cases(contexts)
+    if not case_pairs:
+        return
+    _profile_rank_retrieval_stages(component_results, case_pairs)
+    _profile_rank_filter_stages(component_results, case_pairs)
 
 
 def _profile_evaluate(
@@ -4811,6 +4966,126 @@ def _profile_rank(
     return result
 
 
+@dataclass(slots=True)
+class _RuntimeLanguageMeasurements:
+    """Mutable measurements for one runtime-profile language."""
+
+    elapsed: list[float]
+    per_query_times: list[list[float]]
+    scenario_times: dict[str, list[float]]
+    coverage: dict[str, int]
+    category_coverage: dict[str, int]
+    slow_values: dict[tuple[str, str, str], list[float]]
+    slow_meta: dict[tuple[str, str, str], dict[str, Any]]
+
+
+def _runtime_language_measurements(
+    case_count: int,
+) -> _RuntimeLanguageMeasurements:
+    """Return initialized runtime measurements for a language."""
+    return _RuntimeLanguageMeasurements(
+        elapsed=[],
+        per_query_times=[[] for _ in range(case_count)],
+        scenario_times={},
+        coverage=_new_runtime_coverage_counts(),
+        category_coverage={},
+        slow_values={},
+        slow_meta={},
+    )
+
+
+def _profile_runtime_case(
+    context: RuntimeProfileContext,
+    case: RuntimeQueryCase,
+    granularity: str,
+    timer: PhaseTimer,
+) -> tuple[Sequence[Any], float]:
+    """Rank one runtime case and return its results and elapsed time."""
+    start = time.perf_counter()
+    if granularity == "fine":
+        with timer.phase("runtime_rank_with_dynamic_candidates_inner"):
+            ranked = context.runtime.rank_with_dynamic_candidates(
+                context.language,
+                context.index,
+                case.query,
+                DEFAULT_MAX_CANDIDATES,
+                min_confidence=DEFAULT_MIN_CONFIDENCE,
+            )
+    else:
+        ranked = context.runtime.rank_with_dynamic_candidates(
+            context.language,
+            context.index,
+            case.query,
+            DEFAULT_MAX_CANDIDATES,
+            min_confidence=DEFAULT_MIN_CONFIDENCE,
+        )
+    return ranked, time.perf_counter() - start
+
+
+def _record_runtime_case_measurement(
+    context: RuntimeProfileContext,
+    case: RuntimeQueryCase,
+    query_index: int,
+    ranked: Sequence[Any],
+    elapsed: float,
+    measurements: _RuntimeLanguageMeasurements,
+    *,
+    record_coverage: bool,
+) -> None:
+    """Record one measured runtime query."""
+    measurements.per_query_times[query_index].append(elapsed)
+    observation = _runtime_query_observation(
+        case,
+        ranked,
+        int(context.runtime.diagnostics.dynamic_candidate_count),
+    )
+    for tag in observation["tags"]:
+        measurements.scenario_times.setdefault(tag, []).append(elapsed)
+    slow_key = (context.language, case.category, case.query)
+    measurements.slow_values.setdefault(slow_key, []).append(elapsed)
+    measurements.slow_meta.setdefault(slow_key, observation)
+    if record_coverage:
+        _record_runtime_coverage(measurements.coverage, observation["tags"])
+        measurements.category_coverage[case.category] = (
+            measurements.category_coverage.get(case.category, 0) + 1
+        )
+
+
+def _runtime_language_payload(
+    context: RuntimeProfileContext,
+    measurements: _RuntimeLanguageMeasurements,
+) -> dict[str, Any] | None:
+    """Aggregate runtime measurements for one language."""
+    if not measurements.elapsed:
+        return None
+    average_query_times = [
+        statistics.mean(query_times) for query_times in measurements.per_query_times if query_times
+    ]
+    aggregate: dict[str, Any] = {
+        "runtime_total_wall_time_sec": StatsEngine.as_dict(
+            StatsEngine.compute(measurements.elapsed)
+        ),
+        "query_count": len(context.cases),
+    }
+    if average_query_times:
+        aggregate["runtime_per_query_wall_time_sec"] = StatsEngine.as_dict(
+            StatsEngine.compute(average_query_times)
+        )
+    return {
+        "aggregate": aggregate,
+        "coverage": measurements.coverage,
+        "category_coverage": dict(sorted(measurements.category_coverage.items())),
+        "scenario_stats": _stats_payload(measurements.scenario_times),
+        "slow_queries": _runtime_slow_query_payload(
+            measurements.slow_values,
+            measurements.slow_meta,
+        ),
+        "_scenario_samples": measurements.scenario_times,
+        "_slow_query_values": measurements.slow_values,
+        "_slow_query_meta": measurements.slow_meta,
+    }
+
+
 def _profile_runtime_for_language(
     context: RuntimeProfileContext,
     total_runs: int,
@@ -4821,93 +5096,38 @@ def _profile_runtime_for_language(
     all_elapsed: list[float],
 ) -> dict[str, Any] | None:
     """Run production-path runtime profiling for a single language."""
-    lang_elapsed: list[float] = []
-    per_query_times: list[list[float]] = [[] for _ in context.cases]
-    scenario_times: dict[str, list[float]] = {}
-    coverage = _new_runtime_coverage_counts()
-    category_coverage: dict[str, int] = {}
-    slow_values: dict[tuple[str, str, str], list[float]] = {}
-    slow_meta: dict[tuple[str, str, str], dict[str, Any]] = {}
-
-    for run_idx in range(total_runs):
-        is_warmup = run_idx < warmup
-        is_first_measured_run = run_idx == warmup
+    measurements = _runtime_language_measurements(len(context.cases))
+    for run_index in range(total_runs):
+        is_warmup = run_index < warmup
         label = f"runtime_{context.language}"
         timer.enabled = not is_warmup
-
         gc.collect()
         monitor.snapshot_gc()
-
         timer.start(label)
         for query_index, case in enumerate(context.cases):
-            start = time.perf_counter()
-            if granularity == "fine":
-                with timer.phase("runtime_rank_with_dynamic_candidates_inner"):
-                    ranked = context.runtime.rank_with_dynamic_candidates(
-                        context.language,
-                        context.index,
-                        case.query,
-                        DEFAULT_MAX_CANDIDATES,
-                        min_confidence=DEFAULT_MIN_CONFIDENCE,
-                    )
-            else:
-                ranked = context.runtime.rank_with_dynamic_candidates(
-                    context.language,
-                    context.index,
-                    case.query,
-                    DEFAULT_MAX_CANDIDATES,
-                    min_confidence=DEFAULT_MIN_CONFIDENCE,
-                )
-            elapsed = time.perf_counter() - start
+            ranked, elapsed = _profile_runtime_case(
+                context,
+                case,
+                granularity,
+                timer,
+            )
             if is_warmup:
                 continue
-
-            per_query_times[query_index].append(elapsed)
-            dynamic_count = int(context.runtime.diagnostics.dynamic_candidate_count)
-            observation = _runtime_query_observation(
+            _record_runtime_case_measurement(
+                context,
                 case,
+                query_index,
                 ranked,
-                dynamic_count,
+                elapsed,
+                measurements,
+                record_coverage=run_index == warmup,
             )
-            for tag in observation["tags"]:
-                scenario_times.setdefault(tag, []).append(elapsed)
-            slow_key = (context.language, case.category, case.query)
-            slow_values.setdefault(slow_key, []).append(elapsed)
-            slow_meta.setdefault(slow_key, observation)
-            if is_first_measured_run:
-                _record_runtime_coverage(coverage, observation["tags"])
-                category_coverage[case.category] = category_coverage.get(case.category, 0) + 1
         timer.stop()
-
         if not is_warmup and label in timer.phases:
-            lang_elapsed.append(timer.phases[label][-1])
-            all_elapsed.append(timer.phases[label][-1])
-
-    avg_query_times = [
-        statistics.mean(query_times) for query_times in per_query_times if query_times
-    ]
-    if not lang_elapsed:
-        return None
-
-    runtime_agg: dict[str, Any] = {
-        "runtime_total_wall_time_sec": StatsEngine.as_dict(StatsEngine.compute(lang_elapsed)),
-        "query_count": len(context.cases),
-    }
-    if avg_query_times:
-        runtime_agg["runtime_per_query_wall_time_sec"] = StatsEngine.as_dict(
-            StatsEngine.compute(avg_query_times)
-        )
-
-    return {
-        "aggregate": runtime_agg,
-        "coverage": coverage,
-        "category_coverage": dict(sorted(category_coverage.items())),
-        "scenario_stats": _stats_payload(scenario_times),
-        "slow_queries": _runtime_slow_query_payload(slow_values, slow_meta),
-        "_scenario_samples": scenario_times,
-        "_slow_query_values": slow_values,
-        "_slow_query_meta": slow_meta,
-    }
+            run_elapsed = timer.phases[label][-1]
+            measurements.elapsed.append(run_elapsed)
+            all_elapsed.append(run_elapsed)
+    return _runtime_language_payload(context, measurements)
 
 
 def _profile_runtime(
@@ -4983,251 +5203,440 @@ def _profile_runtime(
     return result
 
 
+@dataclass(frozen=True, slots=True)
+class _ComponentProfileInputs:
+    """Prepared data shared by isolated component benchmark runs."""
+
+    queries: tuple[ComponentQuery, ...]
+    normalized_texts: tuple[str, ...]
+    candidates: tuple[Any, ...]
+    rank_contexts: tuple[RankStageContext, ...]
+    disambiguation_pair: tuple[Any, Any] | None
+    rapidfuzz_queries: tuple[tuple[str, str, int], ...]
+    rapidfuzz_candidate_sorted: str | None
+    rapidfuzz_candidate_tokens: int | None
+
+
+def _component_language_inputs(
+    language: str,
+    data: Mapping[str, Any],
+) -> tuple[tuple[Any, ...], list[ComponentQuery], list[str], Any]:
+    """Build component queries and an index for one language dataset."""
+    slots = _dataset_registry_slots(data, language)
+    sources = load_language_intent_sources(language)
+    index = build_index(
+        language,
+        build_candidates_from_intent_sources(language, sources, slots),
+    )
+    candidates = tuple(index.candidates)
+    raw_queries: list[str] = []
+    queries: list[ComponentQuery] = []
+    raw_cases = data.get("test_cases", [])
+    if isinstance(raw_cases, list):
+        for case in raw_cases:
+            if not isinstance(case, dict) or not isinstance(case.get("query"), str):
+                continue
+            query = case["query"]
+            raw_queries.append(query)
+            queries.append(ComponentQuery(query, normalize_text(query), language, None))
+        for candidate in candidates[:50]:
+            literal_text = candidate.metadata.get("literal_text") if candidate.metadata else None
+            queries.append(
+                ComponentQuery(
+                    candidate.text,
+                    candidate.normalized_text,
+                    language,
+                    literal_text,
+                )
+            )
+    return candidates, queries, raw_queries, index
+
+
+def _component_disambiguation_pair(candidates: Sequence[Any]) -> tuple[Any, Any] | None:
+    """Choose two candidates for intent-disambiguation profiling."""
+    if len(candidates) < 2:
+        return None
+    for index, candidate in enumerate(candidates):
+        for competitor in candidates[index + 1 :]:
+            if candidate.intent_name != competitor.intent_name:
+                return candidate, competitor
+    return candidates[0], candidates[1]
+
+
+def _component_rapidfuzz_inputs(
+    queries: Sequence[ComponentQuery],
+    normalized_texts: Sequence[str],
+) -> tuple[tuple[tuple[str, str, int], ...], str | None, int | None]:
+    """Prepare reusable RapidFuzz query and candidate values."""
+    if not normalized_texts:
+        return (), None, None
+    candidate_normalized = normalized_texts[0]
+    prepared_queries = tuple(
+        (
+            query.normalized,
+            " ".join(sorted(query.normalized.split())),
+            query.normalized.count(" ") + 1,
+        )
+        for query in queries
+    )
+    return (
+        prepared_queries,
+        " ".join(sorted(candidate_normalized.split())),
+        candidate_normalized.count(" ") + 1,
+    )
+
+
+def _load_component_profile_inputs(
+    datasets: Mapping[str, str],
+) -> _ComponentProfileInputs:
+    """Load and prepare all component benchmark inputs."""
+    queries: list[ComponentQuery] = []
+    normalized_texts: list[str] = []
+    candidates: list[Any] = []
+    rank_contexts: list[RankStageContext] = []
+    for language, path in sorted(datasets.items()):
+        try:
+            with open(path, "rb") as file:
+                data = orjson.loads(file.read())
+        except Exception as err:
+            print(
+                f"Warning: skipping component profile dataset {language} at {path}: {err}",
+                file=sys.stderr,
+            )
+            continue
+        if not isinstance(data, dict):
+            print(
+                f"Warning: skipping component profile dataset {language} at {path}: "
+                f"root must be a JSON object, got {type(data).__name__}",
+                file=sys.stderr,
+            )
+            continue
+        language_candidates, language_queries, raw_queries, index = _component_language_inputs(
+            language,
+            data,
+        )
+        candidates.extend(language_candidates)
+        normalized_texts.extend(candidate.normalized_text for candidate in language_candidates)
+        queries.extend(language_queries)
+        if context := _build_rank_stage_context(language, index, raw_queries):
+            rank_contexts.append(context)
+    rapidfuzz_queries, candidate_sorted, candidate_tokens = _component_rapidfuzz_inputs(
+        queries,
+        normalized_texts,
+    )
+    return _ComponentProfileInputs(
+        queries=tuple(queries),
+        normalized_texts=tuple(normalized_texts),
+        candidates=tuple(candidates),
+        rank_contexts=tuple(rank_contexts),
+        disambiguation_pair=_component_disambiguation_pair(candidates),
+        rapidfuzz_queries=rapidfuzz_queries,
+        rapidfuzz_candidate_sorted=candidate_sorted,
+        rapidfuzz_candidate_tokens=candidate_tokens,
+    )
+
+
+def _disambiguation_candidates(pair: tuple[Any, Any]) -> list[Any]:
+    """Return a synthetic ranked pair for disambiguation profiling."""
+    return [
+        _RankedCandidate(
+            candidate=pair[0],
+            scores=_ScoreBreakdown(0.8, 0.8, 0.8, 0.9, 0.85),
+        ),
+        _RankedCandidate(
+            candidate=pair[1],
+            scores=_ScoreBreakdown(0.8, 0.8, 0.8, 0.95, 0.84),
+        ),
+    ]
+
+
+def _warm_component_profile(
+    inputs: _ComponentProfileInputs,
+    bm25_index: Any,
+    char_index: Any,
+) -> None:
+    """Warm caches used by isolated component measurements."""
+    candidate_text = inputs.normalized_texts[0] if inputs.normalized_texts else None
+    for query in inputs.queries:
+        _ = normalize_text(query.raw)
+        _ = normalize_text_no_diacritics(query.raw, query.language)
+        query_grams = char_ngrams_normalized(query.normalized)
+        if bm25_index is not None:
+            _ = bm25_index.score(query.normalized)
+        if char_index is not None:
+            _ = char_index.score(query_grams)
+        if candidate_text is not None:
+            _ = rapidfuzz_similarity_normalized(query.normalized, candidate_text)
+        query_tokens = frozenset(query.normalized.split())
+        if query.literal_text:
+            _ = _exact_intent_score(query.literal_text, query_tokens)
+        _ = lexical_score(0.5, 0.5, 0.5, 0.5)
+    if inputs.disambiguation_pair is not None:
+        apply_intent_disambiguation(_disambiguation_candidates(inputs.disambiguation_pair))
+    _warm_rank_stage_components(inputs.rank_contexts)
+
+
+def _profile_text_components(
+    results: dict[str, dict[str, list[float]]],
+    queries: Sequence[ComponentQuery],
+) -> None:
+    """Measure normalization and character n-gram construction."""
+    query_count = len(queries)
+    start = time.perf_counter()
+    for query in queries:
+        _ = normalize_text(query.raw)
+    _record_component_elapsed(results, "normalize_text", start, query_count)
+    start = time.perf_counter()
+    for query in queries:
+        _ = normalize_text_no_diacritics(query.raw, query.language)
+    _record_component_elapsed(results, "normalize_text_no_diacritics", start, query_count)
+    start = time.perf_counter()
+    for query in queries:
+        _ = char_ngrams_normalized(query.normalized)
+    _record_component_elapsed(results, "char_ngrams_normalized", start, query_count)
+
+
+def _profile_index_components(
+    results: dict[str, dict[str, list[float]]],
+    queries: Sequence[ComponentQuery],
+    bm25_index: Any,
+    char_index: Any,
+) -> None:
+    """Measure BM25 and character n-gram index scoring."""
+    query_count = len(queries)
+    if bm25_index is not None:
+        start = time.perf_counter()
+        for query in queries:
+            _ = bm25_index.score(query.normalized)
+        _record_component_elapsed(results, "bm25_score", start, query_count)
+    if char_index is not None:
+        query_grams = [char_ngrams_normalized(query.normalized) for query in queries]
+        start = time.perf_counter()
+        for grams in query_grams:
+            _ = char_index.score(grams)
+        _record_component_elapsed(results, "char_ngram_score", start, query_count)
+
+
+def _profile_rapidfuzz_component(
+    results: dict[str, dict[str, list[float]]],
+    inputs: _ComponentProfileInputs,
+) -> None:
+    """Measure normalized RapidFuzz similarity."""
+    if not inputs.normalized_texts:
+        return
+    candidate_normalized = inputs.normalized_texts[0]
+    start = time.perf_counter()
+    for normalized, sorted_tokens, token_count in inputs.rapidfuzz_queries:
+        _ = rapidfuzz_similarity_normalized(
+            normalized,
+            candidate_normalized,
+            query_token_count=token_count,
+            query_sorted=sorted_tokens,
+            candidate_sorted=inputs.rapidfuzz_candidate_sorted,
+            candidate_token_count=inputs.rapidfuzz_candidate_tokens,
+        )
+    _record_component_elapsed(
+        results,
+        "rapidfuzz_similarity",
+        start,
+        len(inputs.queries),
+    )
+
+
+def _literal_component_queries(
+    queries: Sequence[ComponentQuery],
+) -> list[tuple[str, str]]:
+    """Return normalized queries paired with non-empty literal text."""
+    return [(query.normalized, query.literal_text) for query in queries if query.literal_text]
+
+
+def _profile_intent_score_components(
+    results: dict[str, dict[str, list[float]]],
+    queries: Sequence[ComponentQuery],
+) -> None:
+    """Measure exact and positional intent scoring."""
+    literal_queries = _literal_component_queries(queries)
+    if not literal_queries:
+        return
+    variant_queries = [
+        (literal_token_variants(literal), frozenset(normalized.split()))
+        for normalized, literal in literal_queries
+    ]
+    start = time.perf_counter()
+    for variants, query_tokens in variant_queries:
+        _ = _exact_intent_score(variants, query_tokens)
+    _record_component_elapsed(
+        results,
+        "exact_intent_score",
+        start,
+        len(variant_queries),
+    )
+    positional_queries = []
+    for normalized, literal in literal_queries:
+        query_tokens = frozenset(normalized.split())
+        variants = literal_token_variants(literal)
+        literal_tokens = frozenset().union(*variants) if variants else frozenset()
+        positional_queries.append(
+            (
+                literal,
+                query_tokens,
+                _build_positional_lookup(literal_tokens, query_tokens),
+            )
+        )
+    start = time.perf_counter()
+    for literal, query_tokens, lookup in positional_queries:
+        _ = _positional_intent_score_from_lookup(literal, query_tokens, lookup, None)
+    _record_component_elapsed(
+        results,
+        "positional_intent_score",
+        start,
+        len(literal_queries),
+    )
+
+
+def _profile_lexical_component(
+    results: dict[str, dict[str, list[float]]],
+    query_count: int,
+) -> None:
+    """Measure combined lexical scoring."""
+    start = time.perf_counter()
+    for _ in range(query_count):
+        _ = lexical_score(0.5, 0.5, 0.5, 0.5)
+    _record_component_elapsed(results, "lexical_score", start, query_count)
+
+
+def _profile_disambiguation_component(
+    results: dict[str, dict[str, list[float]]],
+    pair: tuple[Any, Any] | None,
+    query_count: int,
+) -> None:
+    """Measure intent disambiguation across synthetic ranked pairs."""
+    if pair is None:
+        return
+    ranked_runs = [_disambiguation_candidates(pair) for _ in range(query_count)]
+    start = time.perf_counter()
+    for ranked in ranked_runs:
+        apply_intent_disambiguation(ranked)
+    _record_component_elapsed(results, "intent_disambiguation", start, query_count)
+
+
+def _profile_component_run(
+    results: dict[str, dict[str, list[float]]],
+    inputs: _ComponentProfileInputs,
+    bm25_index: Any,
+    char_index: Any,
+) -> None:
+    """Measure every isolated scoring component once."""
+    _profile_text_components(results, inputs.queries)
+    _profile_index_components(results, inputs.queries, bm25_index, char_index)
+    _profile_rapidfuzz_component(results, inputs)
+    _profile_intent_score_components(results, inputs.queries)
+    _profile_lexical_component(results, len(inputs.queries))
+    _profile_disambiguation_component(
+        results,
+        inputs.disambiguation_pair,
+        len(inputs.queries),
+    )
+    _profile_rank_stage_components(results, inputs.rank_contexts)
+
+
+def _component_profile_result(
+    results: Mapping[str, Mapping[str, list[float]]],
+) -> dict[str, Any]:
+    """Aggregate component measurement samples."""
+    return {
+        name: {"elapsed": StatsEngine.as_dict(StatsEngine.compute(values))}
+        for name in SCORING_COMPONENT_NAMES
+        if (values := results[name]["elapsed"])
+    }
+
+
 def _profile_components(
     datasets: dict[str, str],
     iterations: int,
     warmup: int,
     timer: PhaseTimer,
-    monitor: ResourceMonitor,
 ) -> dict[str, Any]:
     """Micro-benchmark isolated scoring components."""
     _bootstrap_project_imports()
-
-    all_queries: list[ComponentQuery] = []
-    all_norm_texts: list[str] = []
-    all_candidates: list[Any] = []
-    rank_contexts: list[RankStageContext] = []
-
-    for lang, path in sorted(datasets.items()):
-        try:
-            with open(path, "rb") as f:
-                data = orjson.loads(f.read())
-        except Exception:
-            continue
-        if not isinstance(data, dict):
-            continue
-
-        slots = _dataset_registry_slots(data, lang)
-        sources = load_language_intent_sources(lang)
-        candidates = build_candidates_from_intent_sources(lang, sources, slots)
-        index = build_index(lang, candidates)
-        indexed_candidates = tuple(index.candidates)
-        all_candidates.extend(indexed_candidates)
-        all_norm_texts.extend(candidate.normalized_text for candidate in indexed_candidates)
-        raw_cases = data.get("test_cases", [])
-        if not isinstance(raw_cases, list):
-            continue
-
-        raw_case_queries: list[str] = []
-        lang_entries: list[ComponentQuery] = []
-        for case in raw_cases:
-            if not isinstance(case, dict):
-                continue
-            query = case.get("query")
-            if not isinstance(query, str):
-                continue
-            norm = normalize_text(query)
-            raw_case_queries.append(query)
-            lang_entries.append(ComponentQuery(query, norm, lang, None))
-
-        for candidate in indexed_candidates[:50]:
-            raw_text = candidate.text
-            norm_text = candidate.normalized_text
-            lit_text = candidate.metadata.get("literal_text") if candidate.metadata else None
-            lang_entries.append(ComponentQuery(raw_text, norm_text, lang, lit_text))
-
-        all_queries.extend(lang_entries)
-        if rank_context := _build_rank_stage_context(lang, index, raw_case_queries):
-            rank_contexts.append(rank_context)
-
-    total_runs = warmup + iterations
-    component_results: dict[str, dict[str, list[float]]] = {
-        comp: {"elapsed": []} for comp in SCORING_COMPONENT_NAMES
-    }
-
-    _disambig_pair: tuple[Any, Any] | None = None
-    if len(all_candidates) >= 2:
-        for _i in range(len(all_candidates)):
-            for _j in range(_i + 1, len(all_candidates)):
-                if all_candidates[_i].intent_name != all_candidates[_j].intent_name:
-                    _disambig_pair = (all_candidates[_i], all_candidates[_j])
-                    break
-            if _disambig_pair is not None:
-                break
-        if _disambig_pair is None:
-            _disambig_pair = (all_candidates[0], all_candidates[1])
-
-    _rapidfuzz_queries: list[tuple[str, str, int]] | None = None
-    _rapidfuzz_cand_sorted: str | None = None
-    _rapidfuzz_cand_tokens: int | None = None
-    if all_norm_texts:
-        _cand_norm = all_norm_texts[0]
-        _rapidfuzz_cand_sorted = " ".join(sorted(_cand_norm.split()))
-        _rapidfuzz_cand_tokens = _cand_norm.count(" ") + 1
-        _rapidfuzz_queries = [
-            (
-                query.normalized,
-                " ".join(sorted(query.normalized.split())),
-                query.normalized.count(" ") + 1,
-            )
-            for query in all_queries
-        ]
-
-    if not all_queries:
+    inputs = _load_component_profile_inputs(datasets)
+    if not inputs.queries:
         return {}
-
-    bm25_idx = BM25Index.from_normalized_texts(all_norm_texts) if all_norm_texts else None
-    char_grams = [char_ngrams_normalized(t) for t in all_norm_texts]
-    char_idx = CharNGramIndex.from_grams(char_grams) if char_grams else None
-
-    for run_idx in range(total_runs):
-        is_warmup = run_idx < warmup
+    bm25_index = (
+        BM25Index.from_normalized_texts(inputs.normalized_texts)
+        if inputs.normalized_texts
+        else None
+    )
+    char_grams = [char_ngrams_normalized(normalized) for normalized in inputs.normalized_texts]
+    char_index = CharNGramIndex.from_grams(char_grams) if char_grams else None
+    results: dict[str, dict[str, list[float]]] = {
+        component: {"elapsed": []} for component in SCORING_COMPONENT_NAMES
+    }
+    for run_index in range(warmup + iterations):
+        is_warmup = run_index < warmup
         timer.enabled = not is_warmup
         if is_warmup:
-            for query in all_queries:
-                _ = normalize_text(query.raw)
-                _ = normalize_text_no_diacritics(query.raw, query.language)
-                _ = char_ngrams_normalized(query.normalized)
-                if bm25_idx is not None:
-                    _ = bm25_idx.score(query.normalized)
-                q_grams = char_ngrams_normalized(query.normalized)
-                if char_idx is not None:
-                    _ = char_idx.score(q_grams)
-                if all_norm_texts:
-                    _ = rapidfuzz_similarity_normalized(query.normalized, all_norm_texts[0])
-                q_tokens = frozenset(query.normalized.split())
-                if query.literal_text:
-                    _ = _exact_intent_score(query.literal_text, q_tokens)
-                _ = lexical_score(0.5, 0.5, 0.5, 0.5)
-            if all_candidates and len(all_candidates) >= 2:
-                assert _disambig_pair is not None
-                fake_scores_a = _ScoreBreakdown(0.8, 0.8, 0.8, 0.9, 0.85)
-                fake_scores_b = _ScoreBreakdown(0.8, 0.8, 0.8, 0.95, 0.84)
-                fake_ranked = [
-                    _RankedCandidate(candidate=_disambig_pair[0], scores=fake_scores_a),
-                    _RankedCandidate(candidate=_disambig_pair[1], scores=fake_scores_b),
-                ]
-                _apply_intent_disambiguation(fake_ranked)
-            _warm_rank_stage_components(rank_contexts)
-            continue
+            _warm_component_profile(inputs, bm25_index, char_index)
+        else:
+            _profile_component_run(results, inputs, bm25_index, char_index)
+    return _component_profile_result(results)
 
-        # 1. normalize_text
-        t0 = time.perf_counter()
-        for query in all_queries:
-            _ = normalize_text(query.raw)
-        _record_component_elapsed(component_results, "normalize_text", t0, len(all_queries))
 
-        # 2. normalize_text_no_diacritics
-        t0 = time.perf_counter()
-        for query in all_queries:
-            _ = normalize_text_no_diacritics(query.raw, query.language)
-        _record_component_elapsed(
-            component_results, "normalize_text_no_diacritics", t0, len(all_queries)
-        )
+def _serialized_phase_stats(
+    timer: PhaseTimer,
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """Return JSON-serializable phase statistics."""
+    return {
+        phase_name: {
+            metric_name: (StatsEngine.as_dict(stat) if isinstance(stat, StatsResult) else stat)
+            for metric_name, stat in metrics.items()
+        }
+        for phase_name, metrics in timer.stats().items()
+    }
 
-        # 3. char_ngrams_normalized
-        t0 = time.perf_counter()
-        for query in all_queries:
-            _ = char_ngrams_normalized(query.normalized)
-        _record_component_elapsed(component_results, "char_ngrams_normalized", t0, len(all_queries))
 
-        # 4. bm25_score
-        if bm25_idx is not None:
-            t0 = time.perf_counter()
-            for query in all_queries:
-                _ = bm25_idx.score(query.normalized)
-            _record_component_elapsed(component_results, "bm25_score", t0, len(all_queries))
+def _add_target_report_sections(
+    report: dict[str, Any],
+    target_result: Mapping[str, Any],
+) -> None:
+    """Add non-empty target-specific sections to a report."""
+    for key in (
+        "aggregate",
+        "components",
+        "per_language",
+        "coverage",
+        "category_coverage",
+        "scenario_stats",
+        "slow_queries",
+    ):
+        if value := target_result.get(key):
+            report[key] = value
 
-        # 5. char_ngram_score
-        if char_idx is not None:
-            q_grams_list = [char_ngrams_normalized(query.normalized) for query in all_queries]
-            t0 = time.perf_counter()
-            for qg in q_grams_list:
-                _ = char_idx.score(qg)
-            _record_component_elapsed(component_results, "char_ngram_score", t0, len(all_queries))
 
-        # 6. rapidfuzz_similarity
-        if all_norm_texts:
-            assert _rapidfuzz_queries is not None
-            t0 = time.perf_counter()
-            for qn, qs, qt_cnt in _rapidfuzz_queries:
-                _ = rapidfuzz_similarity_normalized(
-                    qn,
-                    all_norm_texts[0],
-                    query_token_count=qt_cnt,
-                    query_sorted=qs,
-                    candidate_sorted=_rapidfuzz_cand_sorted,
-                    candidate_token_count=_rapidfuzz_cand_tokens,
-                )
-            component_results["rapidfuzz_similarity"]["elapsed"].append(
-                (time.perf_counter() - t0) / len(all_queries)
-            )
-
-        # 7. exact_intent_score
-        lit_queries = [
-            (query.normalized, query.literal_text) for query in all_queries if query.literal_text
-        ]
-        if lit_queries:
-            lit_queries_variants = [
-                (literal_token_variants(lt), frozenset(qn.split())) for qn, lt in lit_queries
-            ]
-            t0 = time.perf_counter()
-            for variants, qt in lit_queries_variants:
-                _ = _exact_intent_score(variants, qt)
-            component_results["exact_intent_score"]["elapsed"].append(
-                (time.perf_counter() - t0) / len(lit_queries_variants)
-            )
-
-        # 8. positional_intent_score
-        if lit_queries:
-            pos_lookups = []
-            for qn, lt in lit_queries:
-                qt = frozenset(qn.split())
-                variants = literal_token_variants(lt)
-                all_lit = frozenset().union(*variants) if variants else frozenset()
-                lookup = _build_positional_lookup(all_lit, qt)
-                pos_lookups.append((lt, qt, lookup))
-            t0 = time.perf_counter()
-            for lt, qt, lookup in pos_lookups:
-                _ = _positional_intent_score_from_lookup(lt, qt, lookup, None)
-            component_results["positional_intent_score"]["elapsed"].append(
-                (time.perf_counter() - t0) / len(lit_queries)
-            )
-
-        # 9. lexical_score
-        t0 = time.perf_counter()
-        for _ in range(len(all_queries)):
-            _ = lexical_score(0.5, 0.5, 0.5, 0.5)
-        component_results["lexical_score"]["elapsed"].append(
-            (time.perf_counter() - t0) / len(all_queries)
-        )
-
-        # 10. intent_disambiguation
-        if all_candidates and len(all_candidates) >= 2:
-            assert _disambig_pair is not None
-            fake_scores_a = _ScoreBreakdown(0.8, 0.8, 0.8, 0.9, 0.85)
-            fake_scores_b = _ScoreBreakdown(0.8, 0.8, 0.8, 0.95, 0.84)
-            fake_ranked_runs = [
-                [
-                    _RankedCandidate(candidate=_disambig_pair[0], scores=fake_scores_a),
-                    _RankedCandidate(candidate=_disambig_pair[1], scores=fake_scores_b),
-                ]
-                for _ in range(len(all_queries))
-            ]
-            t0 = time.perf_counter()
-            for run_list in fake_ranked_runs:
-                _apply_intent_disambiguation(run_list)
-            component_results["intent_disambiguation"]["elapsed"].append(
-                (time.perf_counter() - t0) / len(all_queries)
-            )
-
-        _profile_rank_stage_components(component_results, rank_contexts)
-
-    result: dict[str, Any] = {}
-    for comp_name in SCORING_COMPONENT_NAMES:
-        if vals := component_results[comp_name]["elapsed"]:
-            result[comp_name] = {"elapsed": StatsEngine.as_dict(StatsEngine.compute(vals))}
-    return result
+def _report_stability(
+    phase_stats: Mapping[str, Mapping[str, Any]],
+) -> str | None:
+    """Return a stability assessment for sufficiently long phases."""
+    covariance_values = []
+    for phase_data in phase_stats.values():
+        elapsed = phase_data.get("elapsed")
+        if (
+            isinstance(elapsed, dict)
+            and elapsed.get("cov_pct", 0) > 0
+            and float(elapsed.get("mean", 0.0)) >= 0.010
+        ):
+            covariance_values.append(float(elapsed["cov_pct"]))
+    if not covariance_values:
+        return None
+    average = statistics.mean(covariance_values)
+    if average < 5.0:
+        return f"High stability - average CoV {average:.1f}% across phases"
+    if average < 15.0:
+        return f"Moderate stability - average CoV {average:.1f}% across phases"
+    return (
+        f"Low stability - average CoV {average:.1f}% across phases. "
+        "Consider increasing iterations or closing background processes."
+    )
 
 
 def _build_report(
@@ -5258,70 +5667,96 @@ def _build_report(
         "dependency_versions": _benchmark_dependency_versions(),
     }
 
-    raw_phase_stats = timer.stats()
-    phase_stats: dict[str, dict[str, dict[str, Any]]] = {
-        phase_name: {
-            metric_name: (StatsEngine.as_dict(sr) if isinstance(sr, StatsResult) else sr)
-            for metric_name, sr in metrics.items()
-        }
-        for phase_name, metrics in raw_phase_stats.items()
-    }
+    phase_stats = _serialized_phase_stats(timer)
     if phase_stats:
         report["phases"] = phase_stats
-
-    if agg := target_result.get("aggregate", {}):
-        report["aggregate"] = agg
-
-    if comps := target_result.get("components", {}):
-        report["components"] = comps
-
-    if per_lang := target_result.get("per_language", {}):
-        report["per_language"] = per_lang
-
-    if coverage := target_result.get("coverage", {}):
-        report["coverage"] = coverage
-
-    if category_coverage := target_result.get("category_coverage", {}):
-        report["category_coverage"] = category_coverage
-
-    if scenario_stats := target_result.get("scenario_stats", {}):
-        report["scenario_stats"] = scenario_stats
-
-    if slow_queries := target_result.get("slow_queries", []):
-        report["slow_queries"] = slow_queries
-
+    _add_target_report_sections(report, target_result)
     if monitor.cpu_samples and monitor.rss_samples:
-        cpu_metrics = monitor.get_cpu_metrics()
-        mem_metrics = monitor.get_memory_metrics()
-        report["resource"] = {**cpu_metrics, **mem_metrics}
-
-    regressions = baseline.compare(
+        report["resource"] = {
+            **monitor.get_cpu_metrics(),
+            **monitor.get_memory_metrics(),
+        }
+    report["regressions"] = baseline.compare(
         target, report, max_regression_pct, warn_on_missing=warn_on_missing
     )
-    report["regressions"] = regressions
-
-    stability_min_duration_sec = 0.010
-    cov_values: list[float] = []
-    for phase_data in phase_stats.values():
-        e = phase_data.get("elapsed")
-        if (
-            isinstance(e, dict)
-            and e.get("cov_pct", 0) > 0
-            and float(e.get("mean", 0.0)) >= stability_min_duration_sec
-        ):
-            cov_values.append(float(e["cov_pct"]))
-    if cov_values:
-        avg_cov = statistics.mean(cov_values)
-        if avg_cov < 5.0:
-            report["stability"] = f"High stability - average CoV {avg_cov:.1f}% across phases"
-        elif avg_cov < 15.0:
-            report["stability"] = f"Moderate stability - average CoV {avg_cov:.1f}% across phases"
-        else:
-            report["stability"] = (
-                f"Low stability - average CoV {avg_cov:.1f}% across phases. "
-                "Consider increasing iterations or closing background processes."
-            )
+    if stability := _report_stability(phase_stats):
+        report["stability"] = stability
     return report
+
+
+def _profile_target_result(
+    target: str,
+    datasets: dict[str, str],
+    iterations: int,
+    warmup: int,
+    granularity: str,
+    timer: PhaseTimer,
+    monitor: ResourceMonitor,
+) -> dict[str, Any] | None:
+    """Dispatch one supported profiling target."""
+    if target == "evaluate":
+        return _profile_evaluate(
+            datasets,
+            iterations,
+            warmup,
+            granularity,
+            timer,
+            monitor,
+        )
+    if target == "build_index":
+        return _profile_build_index(
+            datasets,
+            iterations,
+            warmup,
+            granularity,
+            timer,
+            monitor,
+        )
+    if target == "rank":
+        return _profile_rank(
+            datasets,
+            iterations,
+            warmup,
+            granularity,
+            timer,
+            monitor,
+        )
+    if target == "runtime":
+        return _profile_runtime(
+            datasets,
+            iterations,
+            warmup,
+            granularity,
+            timer,
+            monitor,
+        )
+    if target == "components":
+        return {
+            "components": _profile_components(
+                datasets,
+                iterations,
+                warmup,
+                timer,
+            )
+        }
+    print(f"Unknown target: {target}", file=sys.stderr)
+    return None
+
+
+def _write_profile_outputs(
+    report: dict[str, Any],
+    output_json: str | None,
+    output_md: str | None,
+    output_txt: str | None,
+) -> None:
+    """Print and write configured profile report formats."""
+    ReportGenerator.terminal(report)
+    if output_json:
+        ReportGenerator.json_report(report, output_json)
+    if output_md:
+        ReportGenerator.markdown_report(report, output_md)
+    if output_txt:
+        ReportGenerator.text_report(report, output_txt)
 
 
 def _run_profiling(
@@ -5358,25 +5793,16 @@ def _run_profiling(
     gc.disable()
 
     try:
-        if target == "evaluate":
-            target_result = _profile_evaluate(
-                datasets, iterations, warmup, granularity, timer, monitor
-            )
-        elif target == "build_index":
-            target_result = _profile_build_index(
-                datasets, iterations, warmup, granularity, timer, monitor
-            )
-        elif target == "rank":
-            target_result = _profile_rank(datasets, iterations, warmup, granularity, timer, monitor)
-        elif target == "runtime":
-            target_result = _profile_runtime(
-                datasets, iterations, warmup, granularity, timer, monitor
-            )
-        elif target == "components":
-            target_result = _profile_components(datasets, iterations, warmup, timer, monitor)
-            target_result = {"components": target_result}
-        else:
-            print(f"Unknown target: {target}", file=sys.stderr)
+        target_result = _profile_target_result(
+            target,
+            datasets,
+            iterations,
+            warmup,
+            granularity,
+            timer,
+            monitor,
+        )
+        if target_result is None:
             return {}
     finally:
         gc.enable()
@@ -5398,18 +5824,77 @@ def _run_profiling(
         max_regression_pct,
         warn_on_missing=warn_on_missing,
     )
-
-    ReportGenerator.terminal(report)
-    if output_json:
-        ReportGenerator.json_report(report, output_json)
-    if output_md:
-        ReportGenerator.markdown_report(report, output_md)
-    if output_txt:
-        ReportGenerator.text_report(report, output_txt)
-
+    _write_profile_outputs(report, output_json, output_md, output_txt)
     if save_baseline:
         baseline.save(target, report)
     return report
+
+
+def _md_component_rows(components: Mapping[str, Any]) -> list[str]:
+    """Return a Markdown component timing table."""
+    headers = (
+        "Component",
+        "Mean (μs)",
+        "Median (μs)",
+        "p95 (μs)",
+        "p99 (μs)",
+        "CoV%",
+    )
+    rows = [
+        (
+            name,
+            f"{data.get('elapsed', {}).get('mean', 0) * 1_000_000:.1f}",
+            f"{data.get('elapsed', {}).get('median', 0) * 1_000_000:.1f}",
+            f"{data.get('elapsed', {}).get('p95', 0) * 1_000_000:.1f}",
+            f"{data.get('elapsed', {}).get('p99', 0) * 1_000_000:.1f}",
+            f"{data.get('elapsed', {}).get('cov_pct', 0):.1f}",
+        )
+        for name, data in components.items()
+    ]
+    return [*_md_aligned_table(headers, "<>", rows), ""] if rows else []
+
+
+def _profile_target_markdown(
+    target: str,
+    report: Mapping[str, Any],
+) -> list[str]:
+    """Return one target section for the consolidated Markdown report."""
+    lines = [f"## Target: `{target}`", ""]
+    if aggregate := report.get("aggregate"):
+        lines.extend(_md_stat_table(f"### Aggregate Performance ({target})", aggregate))
+    if resource := report.get("resource"):
+        _resource_utilization_markdown(lines, target, resource)
+    if phases := report.get("phases"):
+        lines.extend((f"### Phase Timing ({target})", ""))
+        lines.extend(_md_phase_rows(phases))
+    if components := report.get("components"):
+        lines.extend((f"### Component Micro-Profile ({target})", ""))
+        lines.extend(_md_component_rows(components))
+    if coverage := report.get("coverage"):
+        lines.extend(_md_count_table(f"### Runtime Branch Coverage ({target})", coverage))
+    if category_coverage := report.get("category_coverage"):
+        lines.extend(
+            _md_count_table(
+                f"### Runtime Category Coverage ({target})",
+                category_coverage,
+            )
+        )
+    if scenario_stats := report.get("scenario_stats"):
+        lines.extend((f"### Runtime Scenario Timing ({target})", ""))
+        lines.extend(_md_phase_rows(scenario_stats))
+    if slow_queries := report.get("slow_queries"):
+        lines.extend(
+            _md_slow_queries(
+                f"### Slowest Runtime Queries ({target})",
+                slow_queries,
+            )
+        )
+    if regressions := report.get("regressions"):
+        lines.extend((f"### Regression Detections ({target})", ""))
+        lines.extend(f"- {regression}" for regression in regressions)
+        lines.append("")
+    lines.extend(("---", ""))
+    return lines
 
 
 def _write_profile_all_markdown(all_reports: dict[str, Any], path: str) -> None:
@@ -5420,102 +5905,173 @@ def _write_profile_all_markdown(all_reports: dict[str, Any], path: str) -> None:
         "",
         "This report aggregates performance statistics across all measured profiling targets.",
         "",
-        *(
-            f"**Report schema:** v{PERFORMANCE_REPORT_SCHEMA_VERSION}",
-            "",
-            f"**Dependency versions:** {_format_dependency_versions(dependency_versions)}",
-            "",
-        ),
+        f"**Report schema:** v{PERFORMANCE_REPORT_SCHEMA_VERSION}",
+        "",
+        f"**Dependency versions:** {_format_dependency_versions(dependency_versions)}",
+        "",
     ]
     for target, report in all_reports.items():
-        lines.extend((f"## Target: `{target}`", ""))
-        if agg := report.get("aggregate", {}):
-            lines.extend(_md_stat_table(f"### Aggregate Performance ({target})", agg))
-
-        if res := report.get("resource", {}):
-            _resource_utilization_markdown(lines, target, res)
-        if phases := report.get("phases", {}):
-            lines.extend((f"### Phase Timing ({target})", ""))
-            ph_headers = (
-                "Phase",
-                "Mean (ms)",
-                "Median (ms)",
-                "p95 (ms)",
-                "p99 (ms)",
-                "StdDev (ms)",
-                "Memory Δ (MB)",
-            )
-            ph_rows: list[tuple[str, ...]] = []
-            for name, phase_data in phases.items():
-                e = phase_data.get("elapsed", {})
-                m = phase_data.get("memory_delta_mb", {})
-                ph_rows.append(
-                    (
-                        name,
-                        f"{e.get('mean', 0) * 1000:.2f}",
-                        f"{e.get('median', 0) * 1000:.2f}",
-                        f"{e.get('p95', 0) * 1000:.2f}",
-                        f"{e.get('p99', 0) * 1000:.2f}",
-                        f"{e.get('stddev', 0) * 1000:.2f}",
-                        f"{m.get('mean', 0):.2f}",
-                    )
-                )
-            lines.extend(_md_aligned_table(ph_headers, "<>", ph_rows))
-            lines.append("")
-
-        if components := report.get("components", {}):
-            lines.extend((f"### Component Micro-Profile ({target})", ""))
-            cp_headers = ("Component", "Mean (μs)", "Median (μs)", "p95 (μs)", "p99 (μs)", "CoV%")
-            cp_rows: list[tuple[str, ...]] = []
-            for name, comp_data in components.items():
-                e = comp_data.get("elapsed", {})
-                cp_rows.append(
-                    (
-                        name,
-                        f"{e.get('mean', 0) * 1_000_000:.1f}",
-                        f"{e.get('median', 0) * 1_000_000:.1f}",
-                        f"{e.get('p95', 0) * 1_000_000:.1f}",
-                        f"{e.get('p99', 0) * 1_000_000:.1f}",
-                        f"{e.get('cov_pct', 0):.1f}",
-                    )
-                )
-            lines.extend(_md_aligned_table(cp_headers, "<>", cp_rows))
-            lines.append("")
-
-        if coverage := report.get("coverage", {}):
-            lines.extend(_md_count_table(f"### Runtime Branch Coverage ({target})", coverage))
-
-        if category_coverage := report.get("category_coverage", {}):
-            lines.extend(
-                _md_count_table(f"### Runtime Category Coverage ({target})", category_coverage)
-            )
-
-        if scenario_stats := report.get("scenario_stats", {}):
-            lines.extend((f"### Runtime Scenario Timing ({target})", ""))
-            lines.extend(_md_phase_rows(scenario_stats))
-
-        if slow_queries := report.get("slow_queries", []):
-            lines.extend(_md_slow_queries(f"### Slowest Runtime Queries ({target})", slow_queries))
-
-        if regressions := report.get("regressions", []):
-            lines.extend((f"### Regression Detections ({target})", ""))
-            lines.extend(f"- {r}" for r in regressions)
-            lines.append("")
-
-        lines.extend(("---", ""))
+        lines.extend(_profile_target_markdown(target, report))
     while lines and lines[-1] == "":
         lines.pop()
     atomic_write(path, "\n".join(lines) + "\n")
 
 
-def _resource_utilization_markdown(lines, target, res):
-    """Print resource utilization metrics for the target system."""
-    lines.append(f"### Resource Utilization ({target})")
+def _resource_utilization_markdown(
+    lines: list[str],
+    target: str,
+    resource: Mapping[str, Any],
+) -> None:
+    """Append resource utilization metrics for one target."""
+    lines.extend(
+        (
+            f"### Resource Utilization ({target})",
+            "",
+            "| Metric | Value |",
+            "| :--- | :--- |",
+        )
+    )
+    lines.extend(f"| {key} | {value:.2f} |" for key, value in sorted(resource.items()))
     lines.append("")
-    lines.append("| Metric | Value |")
-    lines.append("| :--- | :--- |")
-    lines.extend(f"| {k} | {v:.2f} |" for k, v in sorted(res.items()))
-    lines.append("")
+
+
+def _text_table(
+    title: str,
+    headers: tuple[str, ...],
+    rows: Sequence[tuple[str, ...]],
+) -> list[str]:
+    """Return a titled plain-text table."""
+    header, separator, data = align_table(headers, rows, alignments="<>")
+    return [f"{title}:", header, separator, *data, ""]
+
+
+def _text_stat_rows(stats: Mapping[str, Any]) -> list[tuple[str, ...]]:
+    """Return plain-text aggregate statistic rows."""
+    return [
+        (
+            name,
+            f"{values.get('mean', 0):.4f}",
+            f"{values.get('median', 0):.4f}",
+            f"{values.get('p95', 0):.4f}",
+            f"{values.get('p99', 0):.4f}",
+            f"{values.get('stddev', 0):.4f}",
+            f"{values.get('min', 0):.4f}",
+            f"{values.get('max', 0):.4f}",
+            f"{values.get('cov_pct', 0):.1f}%",
+        )
+        for name, values in stats.items()
+        if isinstance(values, dict)
+    ]
+
+
+def _text_phase_table(title: str, phases: Mapping[str, Any]) -> list[str]:
+    """Return a plain-text phase timing table."""
+    headers = (
+        "Phase",
+        "Mean(ms)",
+        "Median(ms)",
+        "p95(ms)",
+        "p99(ms)",
+        "Std(ms)",
+        "MemΔ(MB)",
+    )
+    rows = [
+        (
+            name,
+            f"{data.get('elapsed', {}).get('mean', 0) * 1000:.3f}",
+            f"{data.get('elapsed', {}).get('median', 0) * 1000:.3f}",
+            f"{data.get('elapsed', {}).get('p95', 0) * 1000:.3f}",
+            f"{data.get('elapsed', {}).get('p99', 0) * 1000:.3f}",
+            f"{data.get('elapsed', {}).get('stddev', 0) * 1000:.3f}",
+            f"{data.get('memory_delta_mb', {}).get('mean', 0):.3f}",
+        )
+        for name, data in phases.items()
+    ]
+    return _text_table(title, headers, rows)
+
+
+def _text_component_table(components: Mapping[str, Any]) -> list[str]:
+    """Return a plain-text component timing table."""
+    headers = (
+        "Component",
+        "Mean(μs)",
+        "Median(μs)",
+        "p95(μs)",
+        "p99(μs)",
+        "CoV%",
+    )
+    rows = [
+        (
+            name,
+            f"{data.get('elapsed', {}).get('mean', 0) * 1_000_000:.1f}",
+            f"{data.get('elapsed', {}).get('median', 0) * 1_000_000:.1f}",
+            f"{data.get('elapsed', {}).get('p95', 0) * 1_000_000:.1f}",
+            f"{data.get('elapsed', {}).get('p99', 0) * 1_000_000:.1f}",
+            f"{data.get('elapsed', {}).get('cov_pct', 0):.1f}",
+        )
+        for name, data in components.items()
+    ]
+    return _text_table("Component Micro-Profile", headers, rows)
+
+
+def _profile_target_text(
+    target: str,
+    report: Mapping[str, Any],
+) -> list[str]:
+    """Return one target section for the consolidated text report."""
+    lines = [f"Target: {target}", "-" * 90]
+    if aggregate := report.get("aggregate"):
+        lines.extend(
+            _text_table(
+                "Aggregate Performance",
+                (
+                    "Metric",
+                    "Mean",
+                    "Median",
+                    "p95",
+                    "p99",
+                    "StdDev",
+                    "Min",
+                    "Max",
+                    "CoV%",
+                ),
+                _text_stat_rows(aggregate),
+            )
+        )
+    if resource := report.get("resource"):
+        lines.append("Resource Utilization:")
+        lines.extend(f"  {key}: {value:.2f}" for key, value in sorted(resource.items()))
+        lines.append("")
+    if phases := report.get("phases"):
+        lines.extend(_text_phase_table("Phase Timing", phases))
+    if components := report.get("components"):
+        lines.extend(_text_component_table(components))
+    lines.extend(
+        _text_count_table(
+            "Runtime Branch Coverage",
+            report.get("coverage", {}),
+        )
+    )
+    lines.extend(
+        _text_count_table(
+            "Runtime Category Coverage",
+            report.get("category_coverage", {}),
+        )
+    )
+    if scenario_stats := report.get("scenario_stats"):
+        lines.extend(_text_phase_table("Runtime Scenario Timing", scenario_stats))
+    lines.extend(
+        _text_slow_queries(
+            "Slowest Runtime Queries",
+            report.get("slow_queries", []),
+        )
+    )
+    if regressions := report.get("regressions"):
+        lines.append("Regression Detections:")
+        lines.extend(f"  {regression}" for regression in regressions)
+        lines.append("")
+    lines.extend(("=" * 90, ""))
+    return lines
 
 
 def _write_profile_all_text(all_reports: dict[str, Any], path: str) -> None:
@@ -5531,130 +6087,7 @@ def _write_profile_all_text(all_reports: dict[str, Any], path: str) -> None:
         "",
     ]
     for target, report in all_reports.items():
-        lines.extend((f"Target: {target}", "-" * 90))
-        if agg := report.get("aggregate", {}):
-            lines.append("Aggregate Performance:")
-            _headers = ("Metric", "Mean", "Median", "p95", "p99", "StdDev", "Min", "Max", "CoV%")
-            _rows: list[tuple[str, ...]] = []
-            _rows.extend(
-                (
-                    name,
-                    f"{s.get('mean', 0):.4f}",
-                    f"{s.get('median', 0):.4f}",
-                    f"{s.get('p95', 0):.4f}",
-                    f"{s.get('p99', 0):.4f}",
-                    f"{s.get('stddev', 0):.4f}",
-                    f"{s.get('min', 0):.4f}",
-                    f"{s.get('max', 0):.4f}",
-                    f"{s.get('cov_pct', 0):.1f}%",
-                )
-                for name, s in agg.items()
-                if isinstance(s, dict)
-            )
-            hdr, sep, data = align_table(_headers, _rows, alignments="<>")
-            lines.extend((hdr, sep))
-            lines.extend(data)
-            lines.append("")
-
-        if res := report.get("resource", {}):
-            lines.append("Resource Utilization:")
-            lines.extend(f"  {k}: {v:.2f}" for k, v in sorted(res.items()))
-            lines.append("")
-
-        if phases := report.get("phases", {}):
-            lines.append("Phase Timing:")
-            _headers_ph = (
-                "Phase",
-                "Mean(ms)",
-                "Median(ms)",
-                "p95(ms)",
-                "p99(ms)",
-                "Std(ms)",
-                "MemΔ(MB)",
-            )
-            _rows_ph: list[tuple[str, ...]] = []
-            for name, phase_data in phases.items():
-                e = phase_data.get("elapsed", {})
-                m = phase_data.get("memory_delta_mb", {})
-                _rows_ph.append(
-                    (
-                        name,
-                        f"{e.get('mean', 0) * 1000:.3f}",
-                        f"{e.get('median', 0) * 1000:.3f}",
-                        f"{e.get('p95', 0) * 1000:.3f}",
-                        f"{e.get('p99', 0) * 1000:.3f}",
-                        f"{e.get('stddev', 0) * 1000:.3f}",
-                        f"{m.get('mean', 0):.3f}",
-                    )
-                )
-            hdr, sep, data = align_table(_headers_ph, _rows_ph, alignments="<>")
-            lines.extend((hdr, sep))
-            lines.extend(data)
-            lines.append("")
-
-        if components := report.get("components", {}):
-            lines.append("Component Micro-Profile:")
-            _headers_cp = ("Component", "Mean(μs)", "Median(μs)", "p95(μs)", "p99(μs)", "CoV%")
-            _rows_cp: list[tuple[str, ...]] = []
-            for name, comp_data in components.items():
-                e = comp_data.get("elapsed", {})
-                _rows_cp.append(
-                    (
-                        name,
-                        f"{e.get('mean', 0) * 1_000_000:.1f}",
-                        f"{e.get('median', 0) * 1_000_000:.1f}",
-                        f"{e.get('p95', 0) * 1_000_000:.1f}",
-                        f"{e.get('p99', 0) * 1_000_000:.1f}",
-                        f"{e.get('cov_pct', 0):.1f}",
-                    )
-                )
-            hdr, sep, data = align_table(_headers_cp, _rows_cp, alignments="<>")
-            lines.extend((hdr, sep))
-            lines.extend(data)
-            lines.append("")
-
-        lines.extend(_text_count_table("Runtime Branch Coverage", report.get("coverage", {})))
-        lines.extend(
-            _text_count_table("Runtime Category Coverage", report.get("category_coverage", {}))
-        )
-        if scenario_stats := report.get("scenario_stats", {}):
-            lines.append("Runtime Scenario Timing:")
-            _headers_ph = (
-                "Phase",
-                "Mean(ms)",
-                "Median(ms)",
-                "p95(ms)",
-                "p99(ms)",
-                "Std(ms)",
-                "MemΔ(MB)",
-            )
-            _rows_ph = []
-            for name, phase_data in scenario_stats.items():
-                e = phase_data.get("elapsed", {})
-                m = phase_data.get("memory_delta_mb", {})
-                _rows_ph.append(
-                    (
-                        name,
-                        f"{e.get('mean', 0) * 1000:.3f}",
-                        f"{e.get('median', 0) * 1000:.3f}",
-                        f"{e.get('p95', 0) * 1000:.3f}",
-                        f"{e.get('p99', 0) * 1000:.3f}",
-                        f"{e.get('stddev', 0) * 1000:.3f}",
-                        f"{m.get('mean', 0):.3f}",
-                    )
-                )
-            hdr, sep, data = align_table(_headers_ph, _rows_ph, alignments="<>")
-            lines.extend((hdr, sep))
-            lines.extend(data)
-            lines.append("")
-        lines.extend(_text_slow_queries("Slowest Runtime Queries", report.get("slow_queries", [])))
-
-        if regressions := report.get("regressions", []):
-            lines.append("Regression Detections:")
-            lines.extend(f"  {r}" for r in regressions)
-            lines.append("")
-
-        lines.extend(("=" * 90, ""))
+        lines.extend(_profile_target_text(target, report))
     while lines and lines[-1] == "":
         lines.pop()
     atomic_write(path, "\n".join(lines) + "\n")
@@ -5683,15 +6116,8 @@ def _save_cprofile_metric(
     return s
 
 
-def main() -> None:
-    """Main entry point for offline performance profiling benchmark."""
-    parser = argparse.ArgumentParser(
-        description=(
-            "Offline Performance Profiler for Assist Canonicalizer.\n\n"
-            "For authoritative accuracy results use: uv run tools/benchmark.py"
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
+def _add_common_benchmark_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add arguments shared by accuracy and performance modes."""
     parser.add_argument(
         "--mode",
         type=str,
@@ -5763,7 +6189,9 @@ def main() -> None:
         help="Regenerate expected_slots in the JSON datasets from the current grammar",
     )
 
-    # Accuracy mode thresholds
+
+def _add_accuracy_benchmark_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add accuracy-mode threshold arguments."""
     parser.add_argument(
         "--min-intent-slot-accuracy",
         type=float,
@@ -5800,7 +6228,10 @@ def main() -> None:
         default=None,
         help="Fail when any language's mismatch rate exceeds this percentage",
     )
-    # Performance mode stats
+
+
+def _add_performance_benchmark_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add performance-mode arguments."""
     parser.add_argument(
         "--iterations",
         type=int,
@@ -5854,367 +6285,422 @@ def main() -> None:
         help="Trigger standard cProfile dump during rankings profiling",
     )
 
-    args = parser.parse_args()
-    _bootstrap_project_imports()
 
-    # Validate mode
-    if args.mode not in BENCHMARK_MODES:
-        print(
-            f"Error: Invalid mode {args.mode!r}. Must be one of {BENCHMARK_MODES}.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+def _benchmark_argument_parser() -> argparse.ArgumentParser:
+    """Build the offline benchmark argument parser."""
+    parser = argparse.ArgumentParser(
+        description=(
+            "Offline Performance Profiler for Assist Canonicalizer.\n\n"
+            "For authoritative accuracy results use: uv run tools/benchmark.py"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    _add_common_benchmark_arguments(parser)
+    _add_accuracy_benchmark_arguments(parser)
+    _add_performance_benchmark_arguments(parser)
+    return parser
 
-    # Parse and validate target
+
+def _exit_with_error(message: str) -> NoReturn:
+    """Print a command-line error and exit."""
+    print(f"Error: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def _validated_target(args: argparse.Namespace) -> str:
+    """Return the validated and sanitized profiling target."""
     target = args.target
     if target is None:
         target = "evaluate" if args.mode == MODE_ACCURACY else "rank"
-
-    # Validate target explicitly against the allow list
     if target not in PROFILING_TARGETS:
-        print(f"Error: Target {target!r} is not a valid benchmark target.", file=sys.stderr)
         print(f"Allowed targets: {', '.join(sorted(PROFILING_TARGETS))}", file=sys.stderr)
-        sys.exit(1)
-
+        _exit_with_error(f"Target {target!r} is not a valid benchmark target.")
     if args.mode == MODE_ACCURACY and target != "evaluate":
-        print(
-            f"Error: Target {target!r} is not supported for accuracy mode. "
-            "Only 'evaluate' is supported.",
-            file=sys.stderr,
+        _exit_with_error(
+            f"Target {target!r} is not supported for accuracy mode. Only 'evaluate' is supported."
         )
-        sys.exit(1)
-
     try:
-        safe_target = sanitize_chars(target, _TARGET_ALLOWED_CHARS)
+        return sanitize_chars(target, _TARGET_ALLOWED_CHARS)
     except ValueError as err:
-        print(f"Error: Target contains invalid characters: {err}", file=sys.stderr)
-        sys.exit(1)
+        _exit_with_error(f"Target contains invalid characters: {err}")
 
-    # Validate numeric/threshold inputs
+
+def _validate_percentage_threshold(name: str, value: float | None) -> None:
+    """Validate an optional percentage threshold."""
+    if value is not None and not (0.0 <= value <= 100.0):
+        _exit_with_error(f"{name} must be between 0.0 and 100.0")
+
+
+def _validate_benchmark_arguments(args: argparse.Namespace) -> None:
+    """Validate numeric benchmark arguments."""
     if args.failure_limit < 0:
-        print("Error: --failure-limit must be zero or positive", file=sys.stderr)
-        sys.exit(1)
-    if args.min_intent_slot_accuracy is not None and not (
-        0.0 <= args.min_intent_slot_accuracy <= 100.0
-    ):
-        print(
-            "Error: --min-intent-slot-accuracy must be between 0.0 and 100.0",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    if args.max_fallback_rate is not None and not (0.0 <= args.max_fallback_rate <= 100.0):
-        print(
-            "Error: --max-fallback-rate must be between 0.0 and 100.0",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        _exit_with_error("--failure-limit must be zero or positive")
     percentage_thresholds = (
+        ("--min-intent-slot-accuracy", args.min_intent_slot_accuracy),
+        ("--max-fallback-rate", args.max_fallback_rate),
         ("--max-mismatch-rate", args.max_mismatch_rate),
         ("--min-language-intent-slot-accuracy", args.min_language_intent_slot_accuracy),
         ("--max-language-fallback-rate", args.max_language_fallback_rate),
         ("--max-language-mismatch-rate", args.max_language_mismatch_rate),
     )
     for option_name, option_value in percentage_thresholds:
-        if option_value is not None and not (0.0 <= option_value <= 100.0):
-            print(
-                f"Error: {option_name} must be between 0.0 and 100.0",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+        _validate_percentage_threshold(option_name, option_value)
     if args.iterations < 1:
-        print("Error: --iterations must be positive", file=sys.stderr)
-        sys.exit(1)
+        _exit_with_error("--iterations must be positive")
     if args.warmup < 0:
-        print("Error: --warmup must be non-negative", file=sys.stderr)
-        sys.exit(1)
+        _exit_with_error("--warmup must be non-negative")
     if args.max_regression_pct < 0.0:
-        print("Error: --max-regression-pct must be non-negative", file=sys.stderr)
-        sys.exit(1)
-    if args.granularity not in GRANULARITY_LEVELS:
-        print(f"Error: Invalid granularity {args.granularity!r}", file=sys.stderr)
-        sys.exit(1)
+        _exit_with_error("--max-regression-pct must be non-negative")
 
-    # Sanitize datasets directory
-    safe_datasets_dir = sanitize_path_required(_REPO_ROOT, "datasets_dir", args.datasets_dir)
 
-    # Sanitize outputs
-    safe_output_json = (
+@dataclass(frozen=True, slots=True)
+class _BenchmarkPaths:
+    """Sanitized paths supplied to the benchmark."""
+
+    datasets_dir: str
+    output_json: str | None
+    output_md: str | None
+    output_txt: str | None
+
+
+def _sanitized_benchmark_paths(args: argparse.Namespace) -> _BenchmarkPaths:
+    """Return repository-confined input and output paths."""
+    output_json = (
         sanitize_path_required(_REPO_ROOT, "output_json", args.output_json)
         if args.output_json
         else None
     )
-    safe_output_md = (
+    output_md = (
         sanitize_path_required(_REPO_ROOT, "output_md", args.output_md) if args.output_md else None
     )
-    safe_output_txt = (
+    output_txt = (
         sanitize_path_required(_REPO_ROOT, "output_txt", args.output_txt)
         if args.output_txt
         else None
     )
+    return _BenchmarkPaths(
+        datasets_dir=sanitize_path_required(
+            _REPO_ROOT,
+            "datasets_dir",
+            args.datasets_dir,
+        ),
+        output_json=output_json,
+        output_md=output_md,
+        output_txt=output_txt,
+    )
 
-    # Handle language filters (support both comma-separated and space-separated list configurations)
-    language_filter: list[str] | None = None
-    if args.languages:
-        # Split by comma first, then handle spaces
-        langs_split = []
-        for term in args.languages.split(","):
-            langs_split.extend(term.split())
-        language_filter = [lang.strip().lower() for lang in langs_split if lang.strip()]
-        for lang in language_filter:
-            if not all(c.isalnum() or c in "_-" for c in lang):
-                print(f"Error: Invalid language code {lang!r}", file=sys.stderr)
-                sys.exit(1)
 
-    # Discover datasets
-    datasets = discover_datasets(safe_datasets_dir, language_filter)
+def _language_filter(raw_languages: str | None) -> list[str] | None:
+    """Parse and validate comma- or whitespace-separated language codes."""
+    if not raw_languages:
+        return None
+    languages = [
+        language.lower()
+        for comma_group in raw_languages.split(",")
+        for language in comma_group.split()
+    ]
+    for language in languages:
+        if not all(char.isalnum() or char in "_-" for char in language):
+            _exit_with_error(f"Invalid language code {language!r}")
+    return languages
+
+
+def _run_accuracy_benchmark(
+    args: argparse.Namespace,
+    datasets: dict[str, str],
+    paths: _BenchmarkPaths,
+) -> NoReturn:
+    """Run the diagnostic offline accuracy benchmark."""
+    print(
+        "NOTE: Offline accuracy results are NON-AUTHORITATIVE.\n"
+        "For production accuracy measurement use: uv run tools/benchmark.py\n",
+        file=sys.stderr,
+    )
+    success = asyncio.run(
+        run_evaluation(
+            datasets=datasets,
+            failure_limit=args.failure_limit,
+            output_json=paths.output_json,
+            output_md=paths.output_md,
+            output_txt=paths.output_txt,
+            min_intent_slot_accuracy=args.min_intent_slot_accuracy,
+            max_fallback_rate=args.max_fallback_rate,
+            max_mismatch_rate=args.max_mismatch_rate,
+            min_language_intent_slot_accuracy=args.min_language_intent_slot_accuracy,
+            max_language_fallback_rate=args.max_language_fallback_rate,
+            max_language_mismatch_rate=args.max_language_mismatch_rate,
+            datasets_dir=str(Path(paths.datasets_dir).relative_to(_REPO_ROOT)),
+            skip_hassil=args.skip_hassil,
+            skip_ablations=args.skip_ablations,
+        )
+    )
+    raise SystemExit(0 if success else 1)
+
+
+def _baseline_manager(baseline: str | None) -> BaselineManager:
+    """Return a baseline manager configured from an optional path."""
+    manager = BaselineManager(_REPO_ROOT)
+    if baseline:
+        baseline_path = Path(sanitize_path_required(_REPO_ROOT, "baseline", baseline))
+        manager.baseline_dir = (
+            baseline_path.parent if baseline_path.suffix == ".json" else baseline_path
+        )
+    return manager
+
+
+def _default_profile_output(target: str, suffix: str, explicit_path: str | None) -> str:
+    """Return an explicit output path or the default target-specific path."""
+    if explicit_path is not None:
+        path = Path(explicit_path)
+        return str(path.with_stem(f"{path.stem}_{target}"))
+    return os.path.join(_REPO_ROOT, BENCHMARK_DIR, f"profile_{target}.{suffix}")
+
+
+def _profile_target(
+    target: str,
+    args: argparse.Namespace,
+    datasets: dict[str, str],
+    baseline_manager: BaselineManager,
+    paths: _BenchmarkPaths,
+    language_filter: list[str] | None,
+) -> dict[str, Any]:
+    """Run one performance profiling target."""
+    return _run_profiling(
+        target,
+        datasets,
+        args.iterations,
+        args.warmup,
+        args.granularity,
+        baseline_manager,
+        args.max_regression_pct,
+        paths.output_json,
+        paths.output_md,
+        paths.output_txt,
+        False,
+        language_filter,
+        warn_on_missing=bool(args.baseline),
+    )
+
+
+def _write_all_profile_reports(
+    reports: dict[str, dict[str, Any]],
+    paths: _BenchmarkPaths,
+) -> None:
+    """Write aggregate reports for an all-target profiling run."""
+    output_dir = Path(_REPO_ROOT) / BENCHMARK_DIR
+    output_dir.mkdir(parents=True, exist_ok=True)
+    json_path = Path(paths.output_json) if paths.output_json else output_dir / "profile_all.json"
+    atomic_write(
+        str(json_path),
+        orjson.dumps(
+            {"target": "all", "targets": reports},
+            option=orjson.OPT_INDENT_2 | orjson.OPT_APPEND_NEWLINE,
+            default=str,
+        ).decode("utf-8"),
+    )
+    print(f"\nAggregate all-targets JSON report saved to {json_path}")
+    markdown_path = Path(paths.output_md) if paths.output_md else output_dir / "profile_all.md"
+    _write_profile_all_markdown(reports, str(markdown_path))
+    print(f"Aggregate all-targets Markdown report saved to {markdown_path}")
+    text_path = Path(paths.output_txt) if paths.output_txt else output_dir / "profile_all.txt"
+    _write_profile_all_text(reports, str(text_path))
+    print(f"Aggregate all-targets Text report saved to {text_path}")
+
+
+def _profile_all_targets(
+    args: argparse.Namespace,
+    datasets: dict[str, str],
+    baseline_manager: BaselineManager,
+    paths: _BenchmarkPaths,
+    language_filter: list[str] | None,
+) -> dict[str, dict[str, Any]]:
+    """Profile every supported concrete target."""
+    reports: dict[str, dict[str, Any]] = {}
+    for target in ("build_index", "rank", "runtime", "components", "evaluate"):
+        target_paths = _BenchmarkPaths(
+            datasets_dir=paths.datasets_dir,
+            output_json=_default_profile_output(target, "json", paths.output_json),
+            output_md=_default_profile_output(target, "md", paths.output_md),
+            output_txt=_default_profile_output(target, "txt", paths.output_txt),
+        )
+        reports[target] = _profile_target(
+            target,
+            args,
+            datasets,
+            baseline_manager,
+            target_paths,
+            language_filter,
+        )
+    _write_all_profile_reports(reports, paths)
+    return reports
+
+
+def _rank_all_profile_queries(datasets: dict[str, str]) -> None:
+    """Build each dataset index and rank all valid query cases."""
+    _bootstrap_project_imports()
+    for language, path in sorted(datasets.items()):
+        with open(path, "rb") as file:
+            data = orjson.loads(file.read())
+        slots = _dataset_registry_slots(data, language)
+        sources = load_language_intent_sources(language)
+        candidates = build_candidates_from_intent_sources(language, sources, slots)
+        index = build_index(language, candidates)
+        raw_cases = data.get("test_cases", [])
+        if not isinstance(raw_cases, list):
+            continue
+        for case in raw_cases:
+            if isinstance(case, dict) and isinstance(case.get("query"), str):
+                index.rank(case["query"])
+
+
+def _write_cprofile_metrics(profile: cProfile.Profile) -> None:
+    """Write cProfile data and human-readable metric summaries."""
+    profile_dir = Path(_REPO_ROOT) / BENCHMARK_DIR
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    profile_dump = profile_dir / "profile_metrics.prof"
+    profile.dump_stats(str(profile_dump))
+    print(f"cProfile dump saved to {profile_dump}")
+    cumulative = _save_cprofile_metric(
+        profile,
+        profile_dir,
+        "cumulative",
+        "profile_metrics_cumulative.txt",
+        "print_stats",
+        "cumulative",
+    )
+    for sort_key, filename, action, label in (
+        ("tottime", "profile_metrics_tottime.txt", "print_stats", "internal-time"),
+        ("ncalls", "profile_metrics_ncalls.txt", "print_stats", "call-count"),
+        ("tottime", "profile_metrics_callers.txt", "print_callers", "callers"),
+        ("tottime", "profile_metrics_callees.txt", "print_callees", "callees"),
+    ):
+        _save_cprofile_metric(
+            profile,
+            profile_dir,
+            sort_key,
+            filename,
+            action,
+            label,
+        )
+    print("\nTOP 50 FUNCTIONS BY CUMULATIVE TIME:")
+    print("-" * 80)
+    print(cumulative.getvalue())
+
+
+def _run_cprofile_snapshot(datasets: dict[str, str]) -> None:
+    """Profile ranking across all dataset queries."""
+    print("\nRunning cProfile snapshot ...", flush=True)
+    profile = cProfile.Profile()
+    profile.enable()
+    _rank_all_profile_queries(datasets)
+    profile.disable()
+    _write_cprofile_metrics(profile)
+
+
+def _collect_performance_profiles(
+    target: str,
+    args: argparse.Namespace,
+    datasets: dict[str, str],
+    baseline_manager: BaselineManager,
+    paths: _BenchmarkPaths,
+    language_filter: list[str] | None,
+) -> dict[str, dict[str, Any]]:
+    """Run the requested performance profiles."""
+    if target == "all":
+        return _profile_all_targets(
+            args,
+            datasets,
+            baseline_manager,
+            paths,
+            language_filter,
+        )
+    return {
+        target: _profile_target(
+            target,
+            args,
+            datasets,
+            baseline_manager,
+            paths,
+            language_filter,
+        )
+    }
+
+
+def _finish_performance_benchmark(
+    args: argparse.Namespace,
+    reports: dict[str, dict[str, Any]],
+    baseline_manager: BaselineManager,
+) -> NoReturn:
+    """Apply regression policy, save baselines, and exit."""
+    regressions = _profile_regressions(reports)
+    if args.fail_on_regression and regressions:
+        print("\nPROFILE_FAILED: performance regressions detected", flush=True)
+        for regression in regressions:
+            print(f"- {regression}", flush=True)
+        raise SystemExit(1)
+    if args.save_baseline:
+        for target, report in reports.items():
+            baseline_manager.save(target, dict(report))
+    print("PROFILE_OK", flush=True)
+    raise SystemExit(0)
+
+
+def _run_performance_benchmark(
+    args: argparse.Namespace,
+    target: str,
+    datasets: dict[str, str],
+    paths: _BenchmarkPaths,
+    language_filter: list[str] | None,
+) -> NoReturn:
+    """Run performance profiling and process its results."""
+    baseline_manager = _baseline_manager(args.baseline)
+    print("PROFILE_START", flush=True)
+    try:
+        reports = _collect_performance_profiles(
+            target,
+            args,
+            datasets,
+            baseline_manager,
+            paths,
+            language_filter,
+        )
+        if args.cprofile:
+            _run_cprofile_snapshot(datasets)
+    except KeyboardInterrupt:
+        print("\nPROFILE_INTERRUPTED", flush=True)
+        raise SystemExit(1) from None
+    except Exception as exc:
+        print(f"\nPROFILE_FAILED: {exc}", flush=True)
+        raise
+    _finish_performance_benchmark(args, reports, baseline_manager)
+
+
+def main() -> None:
+    """Run the requested offline benchmark."""
+    args = _benchmark_argument_parser().parse_args()
+    _bootstrap_project_imports()
+    target = _validated_target(args)
+    _validate_benchmark_arguments(args)
+    paths = _sanitized_benchmark_paths(args)
+    language_filter = _language_filter(args.languages)
+    datasets = discover_datasets(paths.datasets_dir, language_filter)
     if not datasets:
-        print(f"Error: No datasets found in {safe_datasets_dir}", file=sys.stderr)
-        sys.exit(1)
-
+        _exit_with_error(f"No datasets found in {paths.datasets_dir}")
     if args.regenerate_expectations:
         success = regenerate_all_expectations(
-            datasets, str(Path(safe_datasets_dir).relative_to(_REPO_ROOT))
+            datasets,
+            str(Path(paths.datasets_dir).relative_to(_REPO_ROOT)),
         )
-        sys.exit(0 if success else 1)
-
+        raise SystemExit(0 if success else 1)
     if args.mode == MODE_ACCURACY:
-        print(
-            "NOTE: Offline accuracy results are NON-AUTHORITATIVE.\n"
-            "For production accuracy measurement use: uv run tools/benchmark.py\n",
-            file=sys.stderr,
-        )
-        success = asyncio.run(
-            run_evaluation(
-                datasets=datasets,
-                failure_limit=args.failure_limit,
-                output_json=safe_output_json,
-                output_md=safe_output_md,
-                output_txt=safe_output_txt,
-                min_intent_slot_accuracy=args.min_intent_slot_accuracy,
-                max_fallback_rate=args.max_fallback_rate,
-                max_mismatch_rate=args.max_mismatch_rate,
-                min_language_intent_slot_accuracy=args.min_language_intent_slot_accuracy,
-                max_language_fallback_rate=args.max_language_fallback_rate,
-                max_language_mismatch_rate=args.max_language_mismatch_rate,
-                datasets_dir=str(Path(safe_datasets_dir).relative_to(_REPO_ROOT)),
-                skip_hassil=args.skip_hassil,
-                skip_ablations=args.skip_ablations,
-            )
-        )
-        sys.exit(0 if success else 1)
-
-    else:
-        # Performance Mode
-        if args.iterations < 1:
-            print("Error: --iterations must be positive", file=sys.stderr)
-            sys.exit(1)
-        if args.warmup < 0:
-            print("Error: --warmup must be non-negative", file=sys.stderr)
-            sys.exit(1)
-
-        baseline_mgr = BaselineManager(_REPO_ROOT)
-        _explicit_baseline = bool(args.baseline)
-        if args.baseline:
-            safe_baseline = sanitize_path_required(_REPO_ROOT, "baseline", args.baseline)
-            baseline_path = Path(safe_baseline)
-            baseline_mgr.baseline_dir = (
-                baseline_path.parent if baseline_path.suffix == ".json" else baseline_path
-            )
-
-        print("PROFILE_START", flush=True)
-        profile_reports: dict[str, dict[str, Any]] = {}
-        try:
-            if safe_target == "all":
-                all_reports = {}
-                for tgt in ("build_index", "rank", "runtime", "components", "evaluate"):
-                    out_json = (
-                        os.path.join(_REPO_ROOT, BENCHMARK_DIR, f"profile_{tgt}.json")
-                        if safe_output_json is None
-                        else safe_output_json
-                    )
-                    out_md = (
-                        os.path.join(_REPO_ROOT, BENCHMARK_DIR, f"profile_{tgt}.md")
-                        if safe_output_md is None
-                        else safe_output_md
-                    )
-                    out_txt = (
-                        os.path.join(_REPO_ROOT, BENCHMARK_DIR, f"profile_{tgt}.txt")
-                        if safe_output_txt is None
-                        else safe_output_txt
-                    )
-
-                    report = _run_profiling(
-                        tgt,
-                        datasets,
-                        args.iterations,
-                        args.warmup,
-                        args.granularity,
-                        baseline_mgr,
-                        args.max_regression_pct,
-                        out_json,
-                        out_md,
-                        out_txt,
-                        False,
-                        language_filter,
-                        warn_on_missing=_explicit_baseline,
-                    )
-                    all_reports[tgt] = report
-                profile_reports = all_reports
-
-                output_dir = Path(_REPO_ROOT) / BENCHMARK_DIR
-                output_dir.mkdir(parents=True, exist_ok=True)
-
-                # Save JSON
-                agg_path = (
-                    Path(safe_output_json)
-                    if safe_output_json is not None
-                    else output_dir / "profile_all.json"
-                )
-                agg_json = {"target": "all", "targets": all_reports}
-                atomic_write(
-                    str(agg_path),
-                    orjson.dumps(
-                        agg_json,
-                        option=orjson.OPT_INDENT_2 | orjson.OPT_APPEND_NEWLINE,
-                        default=str,
-                    ).decode("utf-8"),
-                )
-                print(f"\nAggregate all-targets JSON report saved to {agg_path}")
-
-                # Save MD
-                agg_md_path = (
-                    Path(safe_output_md)
-                    if safe_output_md is not None
-                    else output_dir / "profile_all.md"
-                )
-                _write_profile_all_markdown(all_reports, str(agg_md_path))
-                print(f"Aggregate all-targets Markdown report saved to {agg_md_path}")
-
-                # Save TXT
-                agg_txt_path = (
-                    Path(safe_output_txt)
-                    if safe_output_txt is not None
-                    else output_dir / "profile_all.txt"
-                )
-                _write_profile_all_text(all_reports, str(agg_txt_path))
-                print(f"Aggregate all-targets Text report saved to {agg_txt_path}")
-            else:
-                report = _run_profiling(
-                    safe_target,
-                    datasets,
-                    args.iterations,
-                    args.warmup,
-                    args.granularity,
-                    baseline_mgr,
-                    args.max_regression_pct,
-                    safe_output_json,
-                    safe_output_md,
-                    safe_output_txt,
-                    False,
-                    language_filter,
-                    warn_on_missing=_explicit_baseline,
-                )
-                profile_reports[safe_target] = report
-
-            # Optional cProfile dump during rankings profiling
-            if args.cprofile:
-                print("\nRunning cProfile snapshot ...", flush=True)
-                pr = cProfile.Profile()
-                pr.enable()
-
-                _bootstrap_project_imports()
-                for lang, path in sorted(datasets.items()):
-                    with open(path, "rb") as f:
-                        data = orjson.loads(f.read())
-                    slots = _dataset_registry_slots(data, lang)
-                    sources = load_language_intent_sources(lang)
-                    candidates = build_candidates_from_intent_sources(lang, sources, slots)
-                    index = build_index(lang, candidates)
-                    raw_cases = data.get("test_cases", [])
-                    if isinstance(raw_cases, list):
-                        for case in raw_cases:
-                            if isinstance(case, dict) and isinstance(case.get("query"), str):
-                                index.rank(case["query"])
-
-                pr.disable()
-                profile_dir = Path(_REPO_ROOT) / BENCHMARK_DIR
-                profile_dir.mkdir(parents=True, exist_ok=True)
-                prof_dump = profile_dir / "profile_metrics.prof"
-                pr.dump_stats(str(prof_dump))
-                print(f"cProfile dump saved to {prof_dump}")
-
-                # 1. Cumulative time stats (overall bottlenecks)
-                s_cum = _save_cprofile_metric(
-                    pr,
-                    profile_dir,
-                    "cumulative",
-                    "profile_metrics_cumulative.txt",
-                    "print_stats",
-                    "cumulative",
-                )
-
-                # 2. Internal time stats (tottime) - crucial for micro-optimizations
-                _ = _save_cprofile_metric(
-                    pr,
-                    profile_dir,
-                    "tottime",
-                    "profile_metrics_tottime.txt",
-                    "print_stats",
-                    "internal-time",
-                )
-
-                # 3. Call count stats (ncalls) - find functions called too frequently
-                _ = _save_cprofile_metric(
-                    pr,
-                    profile_dir,
-                    "ncalls",
-                    "profile_metrics_ncalls.txt",
-                    "print_stats",
-                    "call-count",
-                )
-
-                # 4. Callers relationship stats - showing function callers
-                _ = _save_cprofile_metric(
-                    pr,
-                    profile_dir,
-                    "tottime",
-                    "profile_metrics_callers.txt",
-                    "print_callers",
-                    "callers",
-                )
-
-                # 5. Callees relationship stats - showing function callees
-                _ = _save_cprofile_metric(
-                    pr,
-                    profile_dir,
-                    "tottime",
-                    "profile_metrics_callees.txt",
-                    "print_callees",
-                    "callees",
-                )
-
-                print("\nTOP 50 FUNCTIONS BY CUMULATIVE TIME:")
-                print("-" * 80)
-                print(s_cum.getvalue())
-
-        except KeyboardInterrupt:
-            print("\nPROFILE_INTERRUPTED", flush=True)
-            sys.exit(1)
-        except Exception as exc:
-            print(f"\nPROFILE_FAILED: {exc}", flush=True)
-            raise
-
-        regressions = _profile_regressions(profile_reports)
-        if args.fail_on_regression and regressions:
-            print("\nPROFILE_FAILED: performance regressions detected", flush=True)
-            for regression in regressions:
-                print(f"- {regression}", flush=True)
-            sys.exit(1)
-        if args.save_baseline:
-            for profile_target, report in profile_reports.items():
-                baseline_mgr.save(profile_target, dict(report))
-        print("PROFILE_OK", flush=True)
-        sys.exit(0)
+        _run_accuracy_benchmark(args, datasets, paths)
+    _run_performance_benchmark(
+        args,
+        target,
+        datasets,
+        paths,
+        language_filter,
+    )
 
 
 if __name__ == "__main__":

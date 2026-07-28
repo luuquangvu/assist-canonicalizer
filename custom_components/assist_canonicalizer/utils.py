@@ -105,7 +105,17 @@ def normalized_slot_value_tokens(value: Any) -> frozenset[str]:
         return frozenset()
     if isinstance(value, bool):
         return frozenset({str(value).casefold()})
-    normalized = normalize_text(str(value))
+    return _normalized_value_tokens_cached(str(value))
+
+
+@lru_cache(maxsize=8192)
+def _normalized_value_tokens_cached(value_text: str) -> frozenset[str]:
+    """Return cached normalized tokens for one slot value string.
+
+    Generated candidates massively share slot values, so the same strings are
+    normalized repeatedly inside per-candidate ranking loops.
+    """
+    normalized = normalize_text(value_text)
     return frozenset(normalized.split()) if normalized else frozenset()
 
 
@@ -312,3 +322,4 @@ def clear_utils_caches() -> None:
     normalize_language.cache_clear()
     wildcard_slot_names.cache_clear()
     parse_float.cache_clear()
+    _normalized_value_tokens_cached.cache_clear()

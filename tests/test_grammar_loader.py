@@ -91,6 +91,12 @@ def test_registry_slot_index_inverted_cache_validates_tuple_identity() -> None:
     assert "kitchen" not in lookup
 
 
+def test_list_range_endpoints_uses_consistent_defaults_for_malformed_data() -> None:
+    """Use the normal missing-endpoint defaults when range data is malformed."""
+    assert gl._list_range_endpoints({}) == (0, 100)
+    assert gl._list_range_endpoints(None) == (0, 100)
+
+
 def test_registry_slot_index_skips_inverted_cache_for_scoped_records() -> None:
     """Do not retain query-scoped registry record tuples in the index cache."""
     index = build_registry_slot_index(
@@ -2948,7 +2954,7 @@ def test_query_registry_candidates_mixed_entity_floor_prunes_floor_values() -> N
     )
 
     # Floor values are pruned from constrained, and because {floor} is a required slot the
-    # template produces no candidates at all — no O(entities x floors) cross-product occurs.
+    # template produces no candidates at all, so no O(entities x floors) cross-product occurs.
     assert candidates == ()
 
 
@@ -3142,3 +3148,84 @@ def test_expand_sentence_template_nesting_limit() -> None:
     deep_nested = "[" * 26 + "hello" + "]" * 26
     with pytest.raises(ValueError, match=r"Max template nesting depth \(\d+\) exceeded"):
         expand_sentence_template(deep_nested, {}, {})
+
+
+def test_compact_phrase_matching_tolerates_segmentation_spaces() -> None:
+    """Match unsegmented grammar literals against space-segmented STT output."""
+    assert gl._normalized_phrase_occurs_in_query("卧室灯", "打开 卧室灯")
+    assert gl._normalized_phrase_occurs_in_query("卧室灯", "打开 卧室 灯")
+    # Latin scripts keep strict token-boundary semantics.
+    assert not gl._normalized_phrase_occurs_in_query("lamp", "turn on the lampshade")
+
+
+def test_compact_phrase_matching_can_cross_segmentation_boundaries() -> None:
+    """Document the accepted precision trade-off of stripping STT spaces.
+
+    STT segmentation for compact scripts is unreliable, so spaces are ignored
+    when searching for grammar phrases. The cost is that a phrase may match
+    across what was a genuine boundary; this only feeds bounded registry
+    nomination, and downstream scoring still gates the candidate.
+    """
+    assert gl._normalized_phrase_occurs_in_query("京都", "東京 都心")
+
+
+def test_unknown_expansion_rule_expands_as_empty_text(caplog: pytest.LogCaptureFixture) -> None:
+    """A sentence referencing an undefined rule keeps its other segments."""
+    gl._warn_unknown_expansion_rule.cache_clear()
+    node = gl._parse_hassil("turn on <missing> light")
+    with caplog.at_level("WARNING"):
+        expanded = node.expand({}, {}, frozenset(), 10)
+    assert expanded == ("turn on  light",)
+    assert any("missing" in record.message for record in caplog.records)
+    # The warning is deduplicated per rule name.
+    with caplog.at_level("WARNING"):
+        node.expand({}, {}, frozenset(), 10)
+    assert sum("missing" in record.message for record in caplog.records) == 1
+    gl._warn_unknown_expansion_rule.cache_clear()
+
+
+def test_self_recursive_expansion_rule_terminates_with_finite_variants() -> None:
+    """Recursive rule references terminate as empty text instead of pruning."""
+    rules = {"loop": "very <loop>"}
+    node = gl._parse_hassil("<loop> bright")
+    expanded = node.expand({}, rules, frozenset(), 10)
+    assert expanded == ("very  bright",)
+
+
+def test_range_endpoint_outputs_apply_multiplier() -> None:
+    """Scale spoken range endpoints by the multiplier like interior values."""
+    intent_sources = _build_range_intent_source(
+        "volume_step_down",
+        {"type": "percentage", "from": 0, "to": 100, "multiplier": -1},
+        "HassSetVolumeRelative",
+        ["volume down by {volume_step_down:volume_step}"],
+    )
+    candidates = build_query_registry_candidates(
+        "en",
+        intent_sources,
+        {},
+        "volume down by 100",
+        max_candidates=1,
+    )
+
+    assert [candidate.text for candidate in candidates] == ["volume down by 100"]
+    assert orjson.loads(candidates[0].metadata["slots"]) == {"volume_step": -100}
+
+
+def test_build_candidates_drop_empty_normalized_text() -> None:
+    """Drop expansions whose text normalizes to empty (pure punctuation)."""
+    candidates = build_candidates_from_intent_sources(
+        "en",
+        {
+            "builtin": {
+                "intents": {"HassTurnOn": {"data": [{"sentences": ["...", "turn on the light"]}]}}
+            }
+        },
+    )
+
+    assert [candidate.text for candidate in candidates] == ["turn on the light"]
+
+
+def test_is_fixed_sentence_treats_semicolon_as_template() -> None:
+    """Bare semicolons are HassIL permutation separators, not literal text."""
+    assert not is_fixed_sentence("schalte das licht an;im wohnzimmer")

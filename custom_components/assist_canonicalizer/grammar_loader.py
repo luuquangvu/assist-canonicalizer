@@ -6,13 +6,13 @@ import contextlib
 import logging
 import re
 import unicodedata
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence, Set
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from heapq import nlargest
 from itertools import permutations, product
 from threading import Lock
-from typing import Any
+from typing import Any, NamedTuple
 
 import orjson
 
@@ -49,7 +49,7 @@ from .utils import (
 
 _LOGGER = logging.getLogger(__name__)
 
-_TEMPLATE_MARKERS = frozenset("{}[]<>|()")
+_TEMPLATE_MARKERS = frozenset("{}[]<>|();")
 _CLEAN_ANCHOR_STRIP_CHARS = "[](){}<>|:,.?!;\"'"
 _SLOT_PATTERN = re.compile(r"{([^{}]+)}")
 _RULE_PATTERN = re.compile(r"<([^<>]+)>")
@@ -78,6 +78,15 @@ _TEXT_RUN_STOP_CHARS = frozenset("[]()|{<;")
 _CONTEXT_ANCHOR_WINDOW = 3
 _MAX_TEMPLATE_NESTING_DEPTH = 25
 _EXPANSION_MARKER_CODEPOINTS = range(0xE000, 0xF900)
+
+
+@lru_cache(maxsize=256)
+def _warn_unknown_expansion_rule(name: str) -> None:
+    """Log one warning per unknown or self-recursive expansion rule name."""
+    _LOGGER.warning(
+        "Expansion rule <%s> is undefined or self-recursive; expanding it as empty text",
+        name,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,16 +244,7 @@ class RegistrySlotIndex(dict[str, tuple[RegistrySlotValue, ...]]):
         )
         for records in {id(records): records for records in data.values()}.values():
             lookup = self.get_inverted_for_records(records)
-            deletions: dict[str, list[str]] = {}
-            for value_token in lookup:
-                if len(value_token) < SLOT_FUZZY_TOKEN_MIN_LENGTH:
-                    continue
-                for deletion in _single_character_deletions(value_token):
-                    deletions.setdefault(deletion, []).append(value_token)
-            self._deletion_cache[id(records)] = (
-                records,
-                {deletion: tuple(tokens) for deletion, tokens in deletions.items()},
-            )
+            self._tokens_by_deletion_for_records(records, lookup)
 
     def get_scoped_records(
         self,
@@ -333,38 +333,61 @@ class RegistrySlotIndex(dict[str, tuple[RegistrySlotValue, ...]]):
         if not fuzzy_query_tokens:
             return set()
 
-        record_id = id(records)
-        cached = self._deletion_cache.get(record_id)
-        if cached is not None and cached[0] is records:
-            tokens_by_deletion = cached[1]
-        else:
-            deletions: dict[str, list[str]] = {}
-            for value_token in lookup:
-                if len(value_token) < SLOT_FUZZY_TOKEN_MIN_LENGTH:
-                    continue
-                for deletion in _single_character_deletions(value_token):
-                    deletions.setdefault(deletion, []).append(value_token)
-            tokens_by_deletion = {deletion: tuple(tokens) for deletion, tokens in deletions.items()}
-            if record_id in self._index_record_ids:
-                self._deletion_cache[record_id] = (records, tokens_by_deletion)
-
+        tokens_by_deletion = self._tokens_by_deletion_for_records(records, lookup)
         matched_records: set[RegistrySlotValue] = set()
         for query_token in fuzzy_query_tokens:
-            if stats is not None:
-                stats.postings_consulted += 1
-            possible_tokens = set(tokens_by_deletion.get(query_token, ()))
-            for deletion in _single_character_deletions(query_token):
-                if stats is not None:
-                    stats.postings_consulted += 2
-                if deletion in lookup:
-                    possible_tokens.add(deletion)
-                possible_tokens.update(tokens_by_deletion.get(deletion, ()))
+            possible_tokens = _fuzzy_registry_value_tokens(
+                query_token,
+                lookup,
+                tokens_by_deletion,
+                stats,
+            )
             for value_token in possible_tokens:
                 if _is_bounded_registry_token_match(value_token, query_token):
                     matched_records.update(lookup[value_token])
         if stats is not None:
             stats.fuzzy_values.update(record.normalized_text for record in matched_records)
         return matched_records
+
+    def _tokens_by_deletion_for_records(
+        self,
+        records: tuple[RegistrySlotValue, ...],
+        lookup: Mapping[str, Sequence[RegistrySlotValue]],
+    ) -> dict[str, tuple[str, ...]]:
+        """Return the cached deletion-neighborhood tokens for selected records."""
+        record_id = id(records)
+        cached = self._deletion_cache.get(record_id)
+        if cached is not None and cached[0] is records:
+            return cached[1]
+        deletions: dict[str, list[str]] = {}
+        for value_token in lookup:
+            if len(value_token) < SLOT_FUZZY_TOKEN_MIN_LENGTH:
+                continue
+            for deletion in _single_character_deletions(value_token):
+                deletions.setdefault(deletion, []).append(value_token)
+        tokens_by_deletion = {deletion: tuple(tokens) for deletion, tokens in deletions.items()}
+        if record_id in self._index_record_ids:
+            self._deletion_cache[record_id] = (records, tokens_by_deletion)
+        return tokens_by_deletion
+
+
+def _fuzzy_registry_value_tokens(
+    query_token: str,
+    lookup: Mapping[str, Sequence[RegistrySlotValue]],
+    tokens_by_deletion: Mapping[str, Sequence[str]],
+    stats: RegistryRetrievalStats | None,
+) -> set[str]:
+    """Return value tokens reached through one-edit deletion neighborhoods."""
+    if stats is not None:
+        stats.postings_consulted += 1
+    possible_tokens = set(tokens_by_deletion.get(query_token, ()))
+    for deletion in _single_character_deletions(query_token):
+        if stats is not None:
+            stats.postings_consulted += 2
+        if deletion in lookup:
+            possible_tokens.add(deletion)
+        possible_tokens.update(tokens_by_deletion.get(deletion, ()))
+    return possible_tokens
 
 
 @dataclass(frozen=True, slots=True)
@@ -428,7 +451,14 @@ def build_candidates_from_intent_sources(
     candidates: list[Candidate] = []
     ordered_sources = sorted(
         intent_sources.items(),
-        key=lambda item: candidate_source_priority(_candidate_source_from_key(item[0])),
+        # Tie-break same-priority sources by key: dict insertion order varies
+        # with subscription arrival across restarts, and when per-intent caps
+        # bind, the surviving candidate set must not depend on it (the store
+        # fingerprint sorts mappings, so it cannot detect the difference).
+        key=lambda item: (
+            candidate_source_priority(_candidate_source_from_key(item[0])),
+            item[0],
+        ),
     )
     for source_key, source_config in ordered_sources:
         candidate_source = _candidate_source_from_key(source_key)
@@ -577,36 +607,39 @@ def _compile_slot_anchor_patterns(
     return {target_slot: tuple(patterns)} if patterns else {}
 
 
-def _compile_template_from_sentence(
+def _template_sentence_excluded(
     state: _TemplateCompilationState,
     sentence: str,
+    sentence_slots: frozenset[str],
+    entity_slots: tuple[str, ...],
+    query_slots: tuple[str, ...],
+    variants: tuple[frozenset[str], ...],
     *,
     include_literal_only_templates: bool,
     include_area_only_templates: bool,
-) -> DynamicRegistryTemplate | None:
-    """Compile a single sentence into a DynamicRegistryTemplate, or None to skip."""
-    slot_references = _template_slot_references(sentence, state.expansion_rules)
-    sentence_slots = frozenset(ref.list_name for ref in slot_references)
-    literal_text, variants = _template_literals(sentence, state.expansion_rules)
-    resolved_slots = set(state.base_data_slot_values) | set(state.static_slots)
-    unresolved_slots = sentence_slots - resolved_slots
-    entity_slots = tuple(sorted(unresolved_slots & ENTITY_SLOT_NAME_SET))
-    query_slots = tuple(sorted(unresolved_slots & (ENTITY_SLOT_NAME_SET | LOCATION_SLOT_NAME_SET)))
+) -> bool:
+    """Return whether a sentence template should be skipped during compilation."""
     if (
         not include_area_only_templates
         and query_slots
         and not entity_slots
         and not _is_domain_scoped_location_template(sentence_slots, state.domains)
     ):
-        return None
+        return True
     if not include_literal_only_templates and not query_slots:
-        return None
-    if not query_slots and (not variants or is_fixed_sentence(sentence)):
-        return None
-    no_diac_variants = tuple(
-        frozenset(_cached_normalize_no_diac(token, state.language) for token in tokens)
-        for tokens in variants
-    )
+        return True
+    return not query_slots and (not variants or is_fixed_sentence(sentence))
+
+
+def _template_base_metadata(
+    state: _TemplateCompilationState,
+    sentence: str,
+    literal_text: str,
+    variants: tuple[frozenset[str], ...],
+    query_slots: tuple[str, ...],
+    sentence_wildcards: frozenset[str],
+) -> dict[str, str]:
+    """Build base candidate metadata for one compiled sentence template."""
     base_metadata = _candidate_metadata(
         state.source_key,
         sentence,
@@ -620,26 +653,116 @@ def _compile_template_from_sentence(
         base_metadata["context_slots"] = ",".join(sorted(state.context_slots))
     if query_slots:
         base_metadata["query_slots"] = ",".join(query_slots)
-    sentence_wildcards = sentence_slots & state.wildcard_slots
     if sentence_wildcards:
         base_metadata["wildcard_slots"] = ",".join(sorted(sentence_wildcards))
+    return base_metadata
+
+
+class _TemplateSlotStructure(NamedTuple):
+    """Resolved and unresolved slot names for one compiled sentence."""
+
+    references: tuple[TemplateSlotReference, ...]
+    sentence_slots: frozenset[str]
+    entity_slots: tuple[str, ...]
+    query_slots: tuple[str, ...]
+
+
+def _template_slot_structure(
+    state: _TemplateCompilationState,
+    sentence: str,
+) -> _TemplateSlotStructure:
+    """Classify the slot references in one sentence template."""
+    references = _template_slot_references(sentence, state.expansion_rules)
+    sentence_slots = frozenset(reference.list_name for reference in references)
+    resolved_slots = set(state.base_data_slot_values) | set(state.static_slots)
+    unresolved_slots = sentence_slots - resolved_slots
+    return _TemplateSlotStructure(
+        references=references,
+        sentence_slots=sentence_slots,
+        entity_slots=tuple(sorted(unresolved_slots & ENTITY_SLOT_NAME_SET)),
+        query_slots=tuple(
+            sorted(unresolved_slots & (ENTITY_SLOT_NAME_SET | LOCATION_SLOT_NAME_SET))
+        ),
+    )
+
+
+def _template_range_metadata(
+    state: _TemplateCompilationState,
+    sentence: str,
+    sentence_slots: frozenset[str],
+) -> tuple[
+    dict[str, tuple[float, float]],
+    dict[str, RangeStepMultiplier],
+    dict[str, list[tuple[str | None, str | None]]],
+]:
+    """Return range data restricted to slots referenced by one sentence."""
     range_slots = {
         slot_name: state.range_slots[slot_name]
         for slot_name in sentence_slots
         if slot_name in state.range_slots
     }
+    return (
+        range_slots,
+        {
+            slot_name: state.range_step_multipliers[slot_name]
+            for slot_name in sentence_slots
+            if slot_name in state.range_step_multipliers
+        },
+        {slot_name: _find_slot_context_anchors(sentence, slot_name) for slot_name in range_slots},
+    )
+
+
+def _compile_template_from_sentence(
+    state: _TemplateCompilationState,
+    sentence: str,
+    *,
+    include_literal_only_templates: bool,
+    include_area_only_templates: bool,
+) -> DynamicRegistryTemplate | None:
+    """Compile a single sentence into a DynamicRegistryTemplate, or None to skip."""
+    slot_structure = _template_slot_structure(state, sentence)
+    literal_text, variants = _template_literals(sentence, state.expansion_rules)
+    if _template_sentence_excluded(
+        state,
+        sentence,
+        slot_structure.sentence_slots,
+        slot_structure.entity_slots,
+        slot_structure.query_slots,
+        variants,
+        include_literal_only_templates=include_literal_only_templates,
+        include_area_only_templates=include_area_only_templates,
+    ):
+        return None
+    no_diac_variants = tuple(
+        frozenset(_cached_normalize_no_diac(token, state.language) for token in tokens)
+        for tokens in variants
+    )
+    sentence_wildcards = slot_structure.sentence_slots & state.wildcard_slots
+    base_metadata = _template_base_metadata(
+        state,
+        sentence,
+        literal_text,
+        variants,
+        slot_structure.query_slots,
+        sentence_wildcards,
+    )
+    range_slots, range_step_multipliers, range_slot_anchors = _template_range_metadata(
+        state,
+        sentence,
+        slot_structure.sentence_slots,
+    )
     return DynamicRegistryTemplate(
         sentence=sentence,
-        slot_references=slot_references,
-        sentence_slots=sentence_slots,
+        slot_references=slot_structure.references,
+        sentence_slots=slot_structure.sentence_slots,
         wildcard_slots=sentence_wildcards,
         slot_output_values={
             slot_name: state.slot_output_value_maps[slot_name]
-            for slot_name in sentence_slots
+            for slot_name in slot_structure.sentence_slots
             if slot_name in state.slot_output_value_maps
         },
-        entity_slots=entity_slots,
-        query_slots=query_slots,
+        entity_slots=slot_structure.entity_slots,
+        query_slots=slot_structure.query_slots,
         domains=state.domains,
         expansion_rules=state.expansion_rules,
         base_data_slot_values=state.base_data_slot_values,
@@ -649,19 +772,13 @@ def _compile_template_from_sentence(
         literal_token_variants=variants,
         literal_token_variants_no_diac=no_diac_variants,
         range_slots=range_slots,
-        range_step_multipliers={
-            slot_name: state.range_step_multipliers[slot_name]
-            for slot_name in sentence_slots
-            if slot_name in state.range_step_multipliers
-        },
-        range_slot_anchors={
-            slot_name: _find_slot_context_anchors(sentence, slot_name) for slot_name in range_slots
-        },
+        range_step_multipliers=range_step_multipliers,
+        range_slot_anchors=range_slot_anchors,
         slot_anchor_patterns=_compile_slot_anchor_patterns(
             state,
             sentence,
-            slot_references,
-            query_slots,
+            slot_structure.references,
+            slot_structure.query_slots,
         ),
     )
 
@@ -801,20 +918,61 @@ def build_query_registry_candidates(
 
     query_no_diac = normalize_text_no_diacritics(query, language)
     query_tokens_no_diac = frozenset(query_no_diac.split())
+    query_numeric_tokens = _query_numeric_tokens(query_normalized)
+    selected = _collect_query_registry_candidates(
+        language,
+        compiled_intents,
+        registry_slot_values,
+        registry_slot_index,
+        query_normalized,
+        query_tokens,
+        max_candidates=max_candidates,
+        query_no_diac=query_no_diac,
+        query_tokens_no_diac=query_tokens_no_diac,
+        include_literal_only_templates=include_literal_only_templates,
+        include_area_only_templates=include_area_only_templates,
+        literal_only_wildcards_only=literal_only_wildcards_only,
+        query_numeric_tokens=query_numeric_tokens,
+        retrieval_stats=retrieval_stats,
+    )
+    if retrieval_stats is None:
+        return selected
+    return _tag_fuzzy_retrieval_candidates(selected, retrieval_stats)
 
-    # Precompute query numeric tokens once per query search run
-    q_tokens = query_normalized.split()
+
+def _query_numeric_tokens(query_normalized: str) -> list[tuple[str, float, int]]:
+    """Precompute query numeric tokens once per query search run."""
     query_numeric_tokens: list[tuple[str, float, int]] = []
-    for idx, token in enumerate(q_tokens):
+    for idx, token in enumerate(query_normalized.split()):
         val = parse_float(token)
         if val is not None:
             query_numeric_tokens.append((token, val, idx))
+    return query_numeric_tokens
 
+
+def _collect_query_registry_candidates(
+    language: str,
+    compiled_intents: Sequence[DynamicRegistryIntent],
+    registry_slot_values: Mapping[str, tuple[str, ...]],
+    registry_slot_index: RegistrySlotIndex,
+    query_normalized: str,
+    query_tokens: frozenset[str],
+    *,
+    max_candidates: int,
+    query_no_diac: str,
+    query_tokens_no_diac: frozenset[str],
+    include_literal_only_templates: bool,
+    include_area_only_templates: bool,
+    literal_only_wildcards_only: bool,
+    query_numeric_tokens: Sequence[tuple[str, float, int]],
+    retrieval_stats: RegistryRetrievalStats | None,
+) -> tuple[Candidate, ...]:
+    """Collect and rank query-scoped candidates across all compiled intents."""
     candidates: list[Candidate] = []
     relevant_cache: RegistryRelevanceCache = {}
     scoped_cache: dict[tuple[str, tuple[str, ...]], tuple[RegistrySlotValue, ...]] = {}
     for compiled_intent in compiled_intents:
-        intent_candidates = _query_candidates_from_compiled_intent(
+        if intent_candidates := _query_candidates_from_compiled_intent(
             language,
             compiled_intent,
             registry_slot_values,
@@ -831,18 +989,15 @@ def build_query_registry_candidates(
             literal_only_wildcards_only=literal_only_wildcards_only,
             query_numeric_tokens=query_numeric_tokens,
             retrieval_stats=retrieval_stats,
-        )
-        if not intent_candidates:
-            continue
-        candidates.extend(intent_candidates)
-        if len(candidates) > max_candidates:
-            candidates = _top_query_candidates(
+        ):
+            candidates = _merge_top_query_candidates(
                 candidates,
+                intent_candidates,
                 max_candidates,
                 query_normalized,
                 query_tokens,
             )
-    selected = tuple(
+    return tuple(
         _top_query_candidates(
             candidates,
             max_candidates,
@@ -850,8 +1005,32 @@ def build_query_registry_candidates(
             query_tokens,
         )
     )
-    if retrieval_stats is None:
-        return selected
+
+
+def _merge_top_query_candidates(
+    candidates: list[Candidate],
+    additions: Sequence[Candidate],
+    max_candidates: int,
+    query_normalized: str,
+    query_tokens: frozenset[str],
+) -> list[Candidate]:
+    """Append candidates and retain only the strongest bounded set."""
+    candidates.extend(additions)
+    if len(candidates) <= max_candidates:
+        return candidates
+    return _top_query_candidates(
+        candidates,
+        max_candidates,
+        query_normalized,
+        query_tokens,
+    )
+
+
+def _tag_fuzzy_retrieval_candidates(
+    selected: tuple[Candidate, ...],
+    retrieval_stats: RegistryRetrievalStats,
+) -> tuple[Candidate, ...]:
+    """Record retrieval stats and tag candidates built from fuzzy registry values."""
     retrieval_stats.anchored_dynamic_candidates = sum(
         candidate.metadata.get("registry_retrieval") == "anchored" for candidate in selected
     )
@@ -925,12 +1104,17 @@ def _top_query_candidates(
     return deduplicated[:limit]
 
 
+@lru_cache(maxsize=8192)
 def _text_relevance_key(
     candidate_normalized: str,
     query_normalized: str,
     query_tokens: frozenset[str],
 ) -> tuple[int, int, float, int]:
-    """Return a stable relevance key for normalized candidate text."""
+    """Return a stable relevance key for normalized candidate text.
+
+    Cached because per-intent trimming re-sorts overlapping candidate lists
+    several times per request, re-keying the same (candidate, query) pairs.
+    """
     if not candidate_normalized:
         return (0, 0, 0.0, 0)
     candidate_tokens = frozenset(candidate_normalized.split())
@@ -1027,6 +1211,12 @@ def _build_candidate(
             normalized_expanded_sentence if normalized_expanded_sentence is not None else ""
         ),
     )
+    if not candidate.normalized_text:
+        # A candidate whose text normalizes to empty (e.g. pure punctuation)
+        # can never match a query, and the store deserializer rejects the
+        # whole persisted index when it encounters one, which silently
+        # forces a full rebuild on every restart.
+        return None
     if literal_variants is not None:
         object.__setattr__(candidate, "_literal_variants", literal_variants)
     object.__setattr__(candidate, "_wildcard_infos", expansion.wildcard_infos)
@@ -1396,6 +1586,35 @@ def _matches_context(
     return False
 
 
+def _matched_range_query_tokens(
+    template: DynamicRegistryTemplate,
+    slot_name: str,
+    boundaries: tuple[float, float],
+    query_tokens: list[str],
+    query_numeric_tokens: Sequence[tuple[str, float, int]],
+) -> tuple[str, ...]:
+    """Return query tokens valid for one compiled range slot."""
+    from_value, to_value = boundaries
+    step, fraction_type, grid_start = _resolve_range_grid_params(
+        template,
+        slot_name,
+        from_value,
+    )
+    anchors = template.range_slot_anchors.get(slot_name, [])
+    if len(query_numeric_tokens) > 1 and (
+        not anchors
+        or all(previous is None and following is None for previous, following in anchors)
+    ):
+        return ()
+    return tuple(
+        token
+        for token, value, index in query_numeric_tokens
+        if from_value <= value <= to_value
+        and is_valid_range_value(value, grid_start, step, fraction_type)
+        and (len(query_numeric_tokens) <= 1 or _matches_context(query_tokens, index, anchors))
+    )
+
+
 def _resolve_range_slot_values(
     template: DynamicRegistryTemplate,
     query_normalized: str,
@@ -1403,8 +1622,13 @@ def _resolve_range_slot_values(
 ) -> Mapping[str, tuple[str, ...]]:
     """Resolve and return matched numeric values for range slots.
 
-    This function checks if numeric tokens from the query fall within the range bounds,
-    validating step/fraction alignment. Accepts precomputed query_numeric_tokens.
+    Args:
+        template: Compiled template containing range metadata.
+        query_normalized: Normalized user query.
+        query_numeric_tokens: Optional pre-parsed ``(text, value, index)`` tuples.
+
+    Returns:
+        Base slot values extended with unambiguous, range-valid query numbers.
     """
     if not template.range_slots:
         return template.base_data_slot_values
@@ -1412,42 +1636,18 @@ def _resolve_range_slot_values(
     base_data_slot_values = dict(template.base_data_slot_values)
     q_tokens = query_normalized.split()
     if query_numeric_tokens is None:
-        query_numeric_tokens = []
-        for idx, token in enumerate(q_tokens):
-            val = parse_float(token)
-            if val is not None:
-                query_numeric_tokens.append((token, val, idx))
+        query_numeric_tokens = _query_numeric_tokens(query_normalized)
 
-    for slot_name, (from_val, to_val) in template.range_slots.items():
-        step, fraction_type, grid_start = _resolve_range_grid_params(template, slot_name, from_val)
-        # Find context anchors to map the number to the intended slot
-        anchors = template.range_slot_anchors.get(slot_name, [])
-
-        # If we have multiple numeric tokens in the query but no meaningful context anchors
-        # defined in the template, we skip automatic range resolution for this slot to
-        # prevent assigning arbitrary/mismatched numbers when the query is ambiguous.
-        if len(query_numeric_tokens) > 1 and (
-            not anchors or all(p is None and n is None for p, n in anchors)
+    for slot_name, boundaries in template.range_slots.items():
+        if matched_numbers := _matched_range_query_tokens(
+            template,
+            slot_name,
+            boundaries,
+            q_tokens,
+            query_numeric_tokens,
         ):
-            continue
-
-        matched_numbers = []
-        matched_numbers.extend(
-            token
-            for token, val, idx in query_numeric_tokens
-            if (
-                from_val <= val <= to_val
-                and is_valid_range_value(val, grid_start, step, fraction_type)
-                and (len(query_numeric_tokens) <= 1 or _matches_context(q_tokens, idx, anchors))
-            )
-        )
-        if matched_numbers:
             existing = base_data_slot_values.get(slot_name, ())
-            merged = list(existing) if existing else []
-            for token in matched_numbers:
-                if token not in merged:
-                    merged.append(token)
-            base_data_slot_values[slot_name] = tuple(merged)
+            base_data_slot_values[slot_name] = tuple(dict.fromkeys((*existing, *matched_numbers)))
 
     return base_data_slot_values
 
@@ -1687,6 +1887,60 @@ def _has_exact_query_candidate(
     return False
 
 
+def _base_exact_slot_value_map(
+    template: DynamicRegistryTemplate,
+    slot_values: Mapping[str, tuple[str, ...]],
+    exact_slots: Mapping[str, tuple[str, ...]],
+    optional_location_slots: Set[str],
+) -> dict[str, tuple[str, ...]]:
+    """Return the primary slot map with all exact query values prioritized."""
+    values = dict(slot_values)
+    values |= exact_slots
+    if exact_slots.keys() & set(template.entity_slots):
+        for location_slot in optional_location_slots - exact_slots.keys():
+            values.pop(location_slot, None)
+    return values
+
+
+def _entity_exact_slot_value_maps(
+    template: DynamicRegistryTemplate,
+    slot_values: Mapping[str, tuple[str, ...]],
+    exact_slots: Mapping[str, tuple[str, ...]],
+    optional_location_slots: Set[str],
+) -> Iterable[dict[str, tuple[str, ...]]]:
+    """Yield maps prioritizing each exact entity independently."""
+    required_location_slots = template.required_slots & LOCATION_SLOT_NAME_SET
+    for slot_name in template.entity_slots:
+        exact_values = exact_slots.get(slot_name)
+        if not exact_values:
+            continue
+        values = dict(slot_values)
+        values[slot_name] = exact_values
+        for location_slot in optional_location_slots:
+            values.pop(location_slot, None)
+        for location_slot in required_location_slots:
+            if exact_location_values := exact_slots.get(location_slot):
+                values[location_slot] = exact_location_values
+        yield values
+
+
+def _domain_location_exact_slot_value_maps(
+    template: DynamicRegistryTemplate,
+    slot_values: Mapping[str, tuple[str, ...]],
+    exact_slots: Mapping[str, tuple[str, ...]],
+) -> Iterable[dict[str, tuple[str, ...]]]:
+    """Yield domain-scoped maps prioritizing exact location slots."""
+    if not template.domains:
+        return
+    for slot_name in template.query_slots:
+        if slot_name not in LOCATION_SLOT_NAME_SET:
+            continue
+        if exact_values := exact_slots.get(slot_name):
+            values = dict(slot_values)
+            values[slot_name] = exact_values
+            yield values
+
+
 def _exact_slot_preferred_value_maps(
     template: DynamicRegistryTemplate,
     slot_values: Mapping[str, tuple[str, ...]],
@@ -1720,34 +1974,25 @@ def _exact_slot_preferred_value_maps(
         return ()
 
     optional_location_slots = set(LOCATION_SLOT_NAMES) - template.required_slots
-    values = dict(slot_values)
-    for slot_name, exact_values in exact_slots.items():
-        values[slot_name] = exact_values
-    if exact_slots.keys() & set(template.entity_slots):
-        for location_slot in optional_location_slots:
-            if location_slot not in exact_slots:
-                values.pop(location_slot, None)
-    preferred: list[dict[str, tuple[str, ...]]] = [values]
-    for slot_name in template.entity_slots:
-        if exact_values := exact_slots.get(slot_name):
-            values = dict(slot_values)
-            values[slot_name] = exact_values
-            for location_slot in optional_location_slots:
-                values.pop(location_slot, None)
-            for location_slot in template.required_slots & LOCATION_SLOT_NAME_SET:
-                if exact_location_values := exact_slots.get(location_slot):
-                    values[location_slot] = exact_location_values
-            preferred.append(values)
-
-    if template.domains:
-        for slot_name in template.query_slots:
-            if slot_name not in LOCATION_SLOT_NAME_SET:
-                continue
-            if exact_values := exact_slots.get(slot_name):
-                values = dict(slot_values)
-                values[slot_name] = exact_values
-                preferred.append(values)
-
+    preferred = [
+        _base_exact_slot_value_map(
+            template,
+            slot_values,
+            exact_slots,
+            optional_location_slots,
+        ),
+        *_entity_exact_slot_value_maps(
+            template,
+            slot_values,
+            exact_slots,
+            optional_location_slots,
+        ),
+        *_domain_location_exact_slot_value_maps(
+            template,
+            slot_values,
+            exact_slots,
+        ),
+    ]
     return tuple(_deduplicate_slot_value_maps(preferred))
 
 
@@ -1869,16 +2114,20 @@ def _slot_value_occurs_in_query(
 
 
 def _normalized_phrase_occurs_in_query(phrase: str, query_normalized: str) -> bool:
-    """Return whether a normalized phrase occurs on query token boundaries."""
+    """Return whether a normalized phrase occurs on query token boundaries.
+
+    Compact-script phrases (CJK, Thai, ...) are additionally matched against
+    the space-stripped query: speech-to-text output for those languages may
+    include segmentation spaces that the grammar literals do not carry.
+    """
     if not phrase:
         return False
     if f" {phrase} " in f" {query_normalized} ":
         return True
     return bool(
         " " not in phrase
-        and " " not in query_normalized
         and _uses_compact_non_latin_script(phrase)
-        and phrase in query_normalized
+        and phrase in query_normalized.replace(" ", "")
     )
 
 
@@ -1962,6 +2211,24 @@ def _deduplicate_slot_value_maps(
         yield values
 
 
+def _compiled_template_enabled_for_query(
+    template: DynamicRegistryTemplate,
+    *,
+    include_literal_only_templates: bool,
+    include_area_only_templates: bool,
+    literal_only_wildcards_only: bool,
+) -> bool:
+    """Return whether query-time configuration permits a compiled template."""
+    if not include_literal_only_templates and not template.query_slots:
+        return False
+    if literal_only_wildcards_only and not template.query_slots and not template.wildcard_slots:
+        return False
+    return not _is_area_only_excluded(
+        template,
+        include_area_only_templates=include_area_only_templates,
+    )
+
+
 def _query_candidates_from_compiled_intent(
     language: str,
     compiled_intent: DynamicRegistryIntent,
@@ -1984,12 +2251,11 @@ def _query_candidates_from_compiled_intent(
     """Expand one compiled intent using query-relevant registry values."""
     candidates: list[Candidate] = []
     for template in compiled_intent.templates:
-        if not include_literal_only_templates and not template.query_slots:
-            continue
-        if literal_only_wildcards_only and not template.query_slots and not template.wildcard_slots:
-            continue
-        if _is_area_only_excluded(
-            template, include_area_only_templates=include_area_only_templates
+        if not _compiled_template_enabled_for_query(
+            template,
+            include_literal_only_templates=include_literal_only_templates,
+            include_area_only_templates=include_area_only_templates,
+            literal_only_wildcards_only=literal_only_wildcards_only,
         ):
             continue
         anchored_slot_windows = _template_anchored_slot_query_windows(
@@ -1997,76 +2263,37 @@ def _query_candidates_from_compiled_intent(
             query_normalized,
             query_no_diac,
         )
-        domain_area_rescue = (
-            not include_area_only_templates
-            and template.query_slots
-            and not template.entity_slots
-            and _is_domain_scoped_location_template(template.sentence_slots, template.domains)
-        )
-        if (
-            domain_area_rescue
-            and not anchored_slot_windows
-            and not _has_exact_literal_variant(
-                template.literal_token_variants,
-                query_tokens,
-                template.literal_token_variants_no_diac,
-                query_tokens_no_diac,
-            )
-        ):
-            continue
-        if not anchored_slot_windows and not _literal_token_variants_match_query(
-            template.literal_token_variants,
-            template.literal_token_variants_no_diac,
-            query_tokens,
-            literal_text=template.metadata.get("literal_text"),
-            query_normalized=query_normalized,
-            query_tokens_no_diac=query_tokens_no_diac,
-            query_no_diac=query_no_diac,
-            language=language,
-        ):
-            continue
-        anchored_query_slots: set[str] = set()
-        slot_values = _resolve_template_slot_values(
+        if not _template_matches_query_literals(
+            language,
             template,
+            query_normalized,
+            query_tokens,
+            query_no_diac,
+            query_tokens_no_diac,
+            anchored_slot_windows,
+            include_area_only_templates=include_area_only_templates,
+        ):
+            continue
+        if template_candidates := _query_candidates_from_template(
+            language,
+            template,
+            compiled_intent,
             registry_slot_values,
             registry_slot_index,
             query_normalized,
             query_tokens,
             relevant_cache,
             scoped_cache,
+            max_candidates=max_candidates,
             query_no_diac=query_no_diac,
             query_tokens_no_diac=query_tokens_no_diac,
             query_numeric_tokens=query_numeric_tokens,
             retrieval_stats=retrieval_stats,
             anchored_slot_windows=anchored_slot_windows,
-            anchored_query_slots=anchored_query_slots,
-        )
-        if slot_values is None:
-            continue
-        template_limit = min(DEFAULT_MAX_CANDIDATES_PER_TEMPLATE, max_candidates)
-        template_candidates = _expand_template_candidates(
-            template,
-            compiled_intent.intent_name,
-            compiled_intent.source,
-            language,
-            slot_values,
-            query_normalized,
-            query_tokens,
-            query_no_diac,
-            limit=template_limit,
-        )
-        if anchored_query_slots:
-            template_candidates = tuple(
-                replace(
-                    candidate,
-                    metadata={**candidate.metadata, "registry_retrieval": "anchored"},
-                )
-                for candidate in template_candidates
-            )
-        candidates.extend(template_candidates)
-        if len(candidates) > max_candidates:
-            candidates = _top_query_candidates(
+        ):
+            candidates = _merge_top_query_candidates(
                 candidates,
+                template_candidates,
                 max_candidates,
                 query_normalized,
                 query_tokens,
@@ -2079,6 +2306,107 @@ def _query_candidates_from_compiled_intent(
             query_tokens,
         )
     )
+
+
+def _template_matches_query_literals(
+    language: str,
+    template: DynamicRegistryTemplate,
+    query_normalized: str,
+    query_tokens: frozenset[str],
+    query_no_diac: str | None,
+    query_tokens_no_diac: frozenset[str] | None,
+    anchored_slot_windows: Mapping[str, tuple[SlotQueryWindow, ...]],
+    *,
+    include_area_only_templates: bool,
+) -> bool:
+    """Return whether a template's literals justify expanding it for this query."""
+    domain_area_rescue = (
+        not include_area_only_templates
+        and template.query_slots
+        and not template.entity_slots
+        and _is_domain_scoped_location_template(template.sentence_slots, template.domains)
+    )
+    if (
+        domain_area_rescue
+        and not anchored_slot_windows
+        and not _has_exact_literal_variant(
+            template.literal_token_variants,
+            query_tokens,
+            template.literal_token_variants_no_diac,
+            query_tokens_no_diac,
+        )
+    ):
+        return False
+    return bool(anchored_slot_windows) or _literal_token_variants_match_query(
+        template.literal_token_variants,
+        template.literal_token_variants_no_diac,
+        query_tokens,
+        literal_text=template.metadata.get("literal_text"),
+        query_normalized=query_normalized,
+        query_tokens_no_diac=query_tokens_no_diac,
+        query_no_diac=query_no_diac,
+        language=language,
+    )
+
+
+def _query_candidates_from_template(
+    language: str,
+    template: DynamicRegistryTemplate,
+    compiled_intent: DynamicRegistryIntent,
+    registry_slot_values: Mapping[str, tuple[str, ...]],
+    registry_slot_index: RegistrySlotIndex,
+    query_normalized: str,
+    query_tokens: frozenset[str],
+    relevant_cache: RegistryRelevanceCache,
+    scoped_cache: dict[tuple[str, tuple[str, ...]], tuple[RegistrySlotValue, ...]],
+    *,
+    max_candidates: int,
+    query_no_diac: str | None,
+    query_tokens_no_diac: frozenset[str] | None,
+    query_numeric_tokens: Sequence[tuple[str, float, int]] | None,
+    retrieval_stats: RegistryRetrievalStats | None,
+    anchored_slot_windows: Mapping[str, tuple[SlotQueryWindow, ...]],
+) -> tuple[Candidate, ...]:
+    """Resolve one template's slot values and expand its query candidates."""
+    anchored_query_slots: set[str] = set()
+    slot_values = _resolve_template_slot_values(
+        template,
+        registry_slot_values,
+        registry_slot_index,
+        query_normalized,
+        query_tokens,
+        relevant_cache,
+        scoped_cache,
+        query_no_diac=query_no_diac,
+        query_tokens_no_diac=query_tokens_no_diac,
+        query_numeric_tokens=query_numeric_tokens,
+        retrieval_stats=retrieval_stats,
+        anchored_slot_windows=anchored_slot_windows,
+        anchored_query_slots=anchored_query_slots,
+    )
+    if slot_values is None:
+        return ()
+    template_limit = min(DEFAULT_MAX_CANDIDATES_PER_TEMPLATE, max_candidates)
+    template_candidates = _expand_template_candidates(
+        template,
+        compiled_intent.intent_name,
+        compiled_intent.source,
+        language,
+        slot_values,
+        query_normalized,
+        query_tokens,
+        query_no_diac,
+        limit=template_limit,
+    )
+    if anchored_query_slots:
+        template_candidates = tuple(
+            replace(
+                candidate,
+                metadata={**candidate.metadata, "registry_retrieval": "anchored"},
+            )
+            for candidate in template_candidates
+        )
+    return template_candidates
 
 
 def _has_exact_literal_variant(
@@ -2115,6 +2443,52 @@ def _compiled_query_registry_slot_values(
     anchored_query_slots: set[str] | None = None,
 ) -> dict[str, tuple[str, ...]]:
     """Return narrowed registry slots for a compiled template."""
+    constrained = _constrained_registry_slot_values(
+        template,
+        registry_slot_values,
+        registry_slot_index,
+        scoped_cache,
+    )
+    matched_query_slot = False
+    for slot_name in template.query_slots:
+        slot_domains = template.domains if slot_name in ENTITY_SLOT_NAME_SET else ()
+        records = _scoped_registry_slot_records(
+            slot_name,
+            slot_domains,
+            registry_slot_index,
+            scoped_cache,
+        )
+        if not records:
+            constrained.pop(slot_name, None)
+            continue
+        if relevant := _relevant_query_slot_values(
+            template,
+            slot_name,
+            records,
+            registry_slot_index,
+            query_normalized,
+            query_tokens,
+            relevant_cache,
+            query_no_diac=query_no_diac,
+            query_tokens_no_diac=query_tokens_no_diac,
+            retrieval_stats=retrieval_stats,
+            anchored_slot_windows=anchored_slot_windows,
+            anchored_query_slots=anchored_query_slots,
+        ):
+            constrained[slot_name] = relevant
+            matched_query_slot = True
+        else:
+            constrained.pop(slot_name, None)
+    return constrained if matched_query_slot else {}
+
+
+def _constrained_registry_slot_values(
+    template: DynamicRegistryTemplate,
+    registry_slot_values: Mapping[str, tuple[str, ...]],
+    registry_slot_index: RegistrySlotIndex,
+    scoped_cache: dict[tuple[str, tuple[str, ...]], tuple[RegistrySlotValue, ...]],
+) -> dict[str, tuple[str, ...]]:
+    """Build the initial slot-value constraints before query-slot narrowing."""
     registry_slots = template.sentence_slots - set(template.base_data_slot_values)
     constrained = _registry_slot_values_for_slots(
         registry_slot_values,
@@ -2136,63 +2510,64 @@ def _compiled_query_registry_slot_values(
                 scoped_cache,
             ):
                 constrained[slot_name] = tuple(record.text for record in records)
+    return constrained
 
-    matched_query_slot = False
-    for slot_name in template.query_slots:
-        slot_domains = template.domains if slot_name in ENTITY_SLOT_NAME_SET else ()
-        records = _scoped_registry_slot_records(
-            slot_name,
-            slot_domains,
-            registry_slot_index,
-            scoped_cache,
+
+def _relevant_query_slot_values(
+    template: DynamicRegistryTemplate,
+    slot_name: str,
+    records: tuple[RegistrySlotValue, ...],
+    registry_slot_index: RegistrySlotIndex,
+    query_normalized: str,
+    query_tokens: frozenset[str],
+    relevant_cache: RegistryRelevanceCache,
+    *,
+    query_no_diac: str | None,
+    query_tokens_no_diac: frozenset[str] | None,
+    retrieval_stats: RegistryRetrievalStats | None,
+    anchored_slot_windows: Mapping[str, tuple[SlotQueryWindow, ...]] | None,
+    anchored_query_slots: set[str] | None,
+) -> tuple[str, ...]:
+    """Narrow one query slot via anchored windows, then whole-query fallback."""
+    relevant: tuple[str, ...] = ()
+    slot_windows = anchored_slot_windows.get(slot_name, ()) if anchored_slot_windows else ()
+    for window in slot_windows:
+        window_tokens = frozenset(window.normalized_text.split())
+        window_tokens_no_diac = (
+            frozenset(window.normalized_no_diacritics.split())
+            if window.normalized_no_diacritics
+            else None
         )
-        if not records:
-            constrained.pop(slot_name, None)
-            continue
-        relevant: tuple[str, ...] = ()
-        slot_windows = anchored_slot_windows.get(slot_name, ()) if anchored_slot_windows else ()
-        for window in slot_windows:
-            window_tokens = frozenset(window.normalized_text.split())
-            window_tokens_no_diac = (
-                frozenset(window.normalized_no_diacritics.split())
-                if window.normalized_no_diacritics
-                else None
-            )
-            relevant = _cached_query_relevant_slot_values(
-                records,
-                window.normalized_text,
-                window_tokens,
-                relevant_cache,
-                registry_slot_index,
-                query_no_diac=window.normalized_no_diacritics,
-                query_tokens_no_diac=window_tokens_no_diac,
-                retrieval_stats=retrieval_stats,
-                require_whole_query=True,
-            )
-            if relevant:
-                if anchored_query_slots is not None:
-                    anchored_query_slots.add(slot_name)
-                break
-
-        allow_unanchored_fallback = not template.slot_anchor_patterns or " " in query_normalized
-        if not relevant and allow_unanchored_fallback:
-            relevant = _cached_query_relevant_slot_values(
-                records,
-                query_normalized,
-                query_tokens,
-                relevant_cache,
-                registry_slot_index,
-                query_no_diac=query_no_diac,
-                query_tokens_no_diac=query_tokens_no_diac,
-                retrieval_stats=retrieval_stats,
-                require_whole_query=False,
-            )
+        relevant = _cached_query_relevant_slot_values(
+            records,
+            window.normalized_text,
+            window_tokens,
+            relevant_cache,
+            registry_slot_index,
+            query_no_diac=window.normalized_no_diacritics,
+            query_tokens_no_diac=window_tokens_no_diac,
+            retrieval_stats=retrieval_stats,
+            require_whole_query=True,
+        )
         if relevant:
-            constrained[slot_name] = relevant
-            matched_query_slot = True
-        else:
-            constrained.pop(slot_name, None)
-    return constrained if matched_query_slot else {}
+            if anchored_query_slots is not None:
+                anchored_query_slots.add(slot_name)
+            break
+
+    allow_unanchored_fallback = not template.slot_anchor_patterns or " " in query_normalized
+    if not relevant and allow_unanchored_fallback:
+        relevant = _cached_query_relevant_slot_values(
+            records,
+            query_normalized,
+            query_tokens,
+            relevant_cache,
+            registry_slot_index,
+            query_no_diac=query_no_diac,
+            query_tokens_no_diac=query_tokens_no_diac,
+            retrieval_stats=retrieval_stats,
+            require_whole_query=False,
+        )
+    return relevant
 
 
 def _cached_query_relevant_slot_values(
@@ -2259,68 +2634,140 @@ def _query_relevant_precomputed_slot_values(
     require_whole_query: bool = False,
 ) -> tuple[str, ...]:
     """Return relevant values using precomputed normalization and tokens."""
-    has_specific_fully_anchored_record = False
     if registry_slot_index is None:
         candidate_records = set(values)
+        has_specific_fully_anchored_record = False
     else:
-        lookup = registry_slot_index.get_inverted_for_records(values)
-        candidate_records = set()
-        lookup_tokens = set(query_tokens)
-        lookup_tokens.update(_compound_query_tokens(query_normalized))
-        if query_no_diac:
-            lookup_tokens.update(_compound_query_tokens(query_no_diac))
-        if query_tokens_no_diac:
-            lookup_tokens.update(query_tokens_no_diac)
-        for token in lookup_tokens:
-            if retrieval_stats is not None:
-                retrieval_stats.postings_consulted += 1
-            if token in lookup:
-                candidate_records.update(lookup[token])
-        if require_whole_query:
-            has_specific_fully_anchored_record = any(
-                _slot_value_query_match_key_from_tokens(
-                    record.normalized_text,
-                    record.tokens,
-                    query_normalized,
-                    query_tokens,
-                    value_no_diac=record.normalized_no_diacritics,
-                    value_tokens_no_diac=record.tokens_no_diacritics,
-                    query_no_diac=query_no_diac,
-                    query_tokens_no_diac=query_tokens_no_diac,
-                    allow_fuzzy_tokens=False,
-                    require_whole_query=True,
-                )
-                is not None
-                for record in candidate_records
-            )
-        else:
-            has_specific_fully_anchored_record = any(
-                len(record.tokens) >= 2
-                and (
-                    _normalized_phrase_occurs_in_query(record.normalized_text, query_normalized)
-                    or set(record.tokens).issubset(query_tokens)
-                    or (
-                        query_no_diac
-                        and (
-                            _normalized_phrase_occurs_in_query(
-                                record.normalized_no_diacritics,
-                                query_no_diac,
-                            )
-                            or set(record.tokens_no_diacritics).issubset(query_tokens_no_diac or ())
-                        )
-                    )
-                )
-                for record in candidate_records
-            )
-        if not has_specific_fully_anchored_record:
-            candidate_records.update(
-                registry_slot_index.get_fuzzy_for_records(
-                    values,
-                    lookup_tokens,
-                    retrieval_stats,
-                )
-            )
+        candidate_records, has_specific_fully_anchored_record = _gather_candidate_registry_records(
+            values,
+            registry_slot_index,
+            query_normalized,
+            query_tokens,
+            query_no_diac,
+            query_tokens_no_diac,
+            retrieval_stats,
+            require_whole_query=require_whole_query,
+        )
+    nominated_records = _nominated_registry_records(
+        candidate_records,
+        query_normalized,
+        query_tokens,
+        query_no_diac,
+        query_tokens_no_diac,
+        retrieval_stats,
+    )
+    return _score_nominated_registry_records(
+        nominated_records,
+        query_normalized,
+        query_tokens,
+        query_no_diac,
+        query_tokens_no_diac,
+        has_specific_fully_anchored_record=has_specific_fully_anchored_record,
+        require_whole_query=require_whole_query,
+        limit=limit,
+    )
 
+
+def _has_fully_anchored_registry_record(
+    candidate_records: set[RegistrySlotValue],
+    query_normalized: str,
+    query_tokens: frozenset[str],
+    query_no_diac: str | None,
+    query_tokens_no_diac: frozenset[str] | None,
+    *,
+    require_whole_query: bool,
+) -> bool:
+    """Return whether one candidate record is specific and fully anchored."""
+    if require_whole_query:
+        return any(
+            _slot_value_query_match_key_from_tokens(
+                record.normalized_text,
+                record.tokens,
+                query_normalized,
+                query_tokens,
+                value_no_diac=record.normalized_no_diacritics,
+                value_tokens_no_diac=record.tokens_no_diacritics,
+                query_no_diac=query_no_diac,
+                query_tokens_no_diac=query_tokens_no_diac,
+                allow_fuzzy_tokens=False,
+                require_whole_query=True,
+            )
+            is not None
+            for record in candidate_records
+        )
+    return any(
+        len(record.tokens) >= 2
+        and (
+            _normalized_phrase_occurs_in_query(record.normalized_text, query_normalized)
+            or set(record.tokens).issubset(query_tokens)
+            or (
+                query_no_diac
+                and (
+                    _normalized_phrase_occurs_in_query(
+                        record.normalized_no_diacritics,
+                        query_no_diac,
+                    )
+                    or set(record.tokens_no_diacritics).issubset(query_tokens_no_diac or ())
+                )
+            )
+        )
+        for record in candidate_records
+    )
+
+
+def _gather_candidate_registry_records(
+    values: tuple[RegistrySlotValue, ...],
+    registry_slot_index: RegistrySlotIndex,
+    query_normalized: str,
+    query_tokens: frozenset[str],
+    query_no_diac: str | None,
+    query_tokens_no_diac: frozenset[str] | None,
+    retrieval_stats: RegistryRetrievalStats | None,
+    *,
+    require_whole_query: bool,
+) -> tuple[set[RegistrySlotValue], bool]:
+    """Collect inverted-index candidate records, with fuzzy fallback when unanchored."""
+    lookup = registry_slot_index.get_inverted_for_records(values)
+    candidate_records: set[RegistrySlotValue] = set()
+    lookup_tokens = set(query_tokens)
+    lookup_tokens.update(_compound_query_tokens(query_normalized))
+    if query_no_diac:
+        lookup_tokens.update(_compound_query_tokens(query_no_diac))
+    if query_tokens_no_diac:
+        lookup_tokens.update(query_tokens_no_diac)
+    for token in lookup_tokens:
+        if retrieval_stats is not None:
+            retrieval_stats.postings_consulted += 1
+        if token in lookup:
+            candidate_records.update(lookup[token])
+    has_specific_fully_anchored_record = _has_fully_anchored_registry_record(
+        candidate_records,
+        query_normalized,
+        query_tokens,
+        query_no_diac,
+        query_tokens_no_diac,
+        require_whole_query=require_whole_query,
+    )
+    if not has_specific_fully_anchored_record:
+        candidate_records.update(
+            registry_slot_index.get_fuzzy_for_records(
+                values,
+                lookup_tokens,
+                retrieval_stats,
+            )
+        )
+    return candidate_records, has_specific_fully_anchored_record
+
+
+def _nominated_registry_records(
+    candidate_records: set[RegistrySlotValue],
+    query_normalized: str,
+    query_tokens: frozenset[str],
+    query_no_diac: str | None,
+    query_tokens_no_diac: frozenset[str] | None,
+    retrieval_stats: RegistryRetrievalStats | None,
+) -> list[RegistrySlotValue]:
+    """Nominate the best candidate records within the per-query scoring budget."""
     score_limit = DEFAULT_MAX_REGISTRY_VALUES_NOMINATED
     if retrieval_stats is not None:
         score_limit = min(
@@ -2331,7 +2778,7 @@ def _query_relevant_precomputed_slot_values(
             ),
         )
     if score_limit <= 0:
-        return ()
+        return []
     nominated_records = nlargest(
         score_limit,
         candidate_records,
@@ -2346,7 +2793,21 @@ def _query_relevant_precomputed_slot_values(
     if retrieval_stats is not None:
         retrieval_stats.values_nominated += len(nominated_records)
         retrieval_stats.values_scored += len(nominated_records)
+    return nominated_records
 
+
+def _score_nominated_registry_records(
+    nominated_records: list[RegistrySlotValue],
+    query_normalized: str,
+    query_tokens: frozenset[str],
+    query_no_diac: str | None,
+    query_tokens_no_diac: frozenset[str] | None,
+    *,
+    has_specific_fully_anchored_record: bool,
+    require_whole_query: bool,
+    limit: int,
+) -> tuple[str, ...]:
+    """Score nominated records and return deduplicated texts in relevance order."""
     scored: list[tuple[tuple[bool, bool, bool, int, int], int, str]] = []
     query_match_tokens = query_tokens | _compound_query_tokens(query_normalized)
     query_no_diac_match_tokens = (
@@ -2369,7 +2830,7 @@ def _query_relevant_precomputed_slot_values(
         )
         if match_key is not None:
             scored.append((match_key, value.position, value.text))
-    scored.sort(key=lambda item: (item[0], -item[1]), reverse=True)
+    scored.sort(key=lambda item: (item[0], -item[1], item[2]), reverse=True)
     return tuple(_deduplicate_texts((value for _, _, value in scored), limit))
 
 
@@ -2379,7 +2840,7 @@ def _registry_nomination_key(
     query_tokens: frozenset[str],
     query_no_diac: str | None,
     query_tokens_no_diac: frozenset[str] | None,
-) -> tuple[bool, bool, int, int]:
+) -> tuple[bool, bool, int, int, str]:
     """Return a cheap exact-first key before bounded full registry scoring."""
     phrase_match = _normalized_phrase_occurs_in_query(
         record.normalized_text,
@@ -2402,6 +2863,9 @@ def _registry_nomination_key(
         phrase_match,
         exact_tokens,
         -record.position,
+        # Deterministic tiebreak: candidate records come from sets, so without
+        # this the nomination cut depends on hash-randomized iteration order.
+        record.normalized_text,
     )
 
 
@@ -2512,12 +2976,12 @@ def _compact_script_query_spans(query_normalized: str) -> Iterable[str]:
 
 @lru_cache(maxsize=2048)
 def _compact_script_phrase_fallback_enabled(query_normalized: str) -> bool:
-    """Return whether literal phrase fallback can find compact-script text."""
-    return bool(
-        query_normalized
-        and " " not in query_normalized
-        and _uses_compact_non_latin_script(query_normalized)
-    )
+    """Return whether literal phrase fallback can find compact-script text.
+
+    Segmentation spaces from speech-to-text do not disable the fallback:
+    ``_uses_compact_non_latin_script`` already ignores whitespace and ASCII.
+    """
+    return bool(query_normalized and _uses_compact_non_latin_script(query_normalized))
 
 
 @lru_cache(maxsize=65536)
@@ -2733,6 +3197,28 @@ def _binding_tags_are_consistent(
     return True
 
 
+def _binding_consistency_filter(
+    bindings_by_tag: Mapping[str, _SlotBinding],
+    tag_context: _ExpansionTagContext,
+    slot_output_values: Mapping[str, Mapping[str, Any]] | None,
+    repeated_output_names: frozenset[str],
+) -> Callable[[str], bool] | None:
+    """Return a tagged-expansion filter for repeated output slots."""
+    if not repeated_output_names:
+        return None
+
+    def binding_tags_are_consistent(tagged_text: str) -> bool:
+        return _binding_tags_are_consistent(
+            tagged_text,
+            bindings_by_tag,
+            tag_context,
+            slot_output_values,
+            repeated_output_names,
+        )
+
+    return binding_tags_are_consistent
+
+
 def _expand_candidate_template(
     sentence: str,
     slot_values: Mapping[str, tuple[str, ...]],
@@ -2766,26 +3252,18 @@ def _expand_candidate_template(
         tag_context,
     )
     repeated_output_names = _template_repeated_output_names(sentence, expansion_rules)
-    expansion_filter: Callable[[str], bool] | None = None
-    if repeated_output_names:
-
-        def _filter_binding_tags(tagged_text: str) -> bool:
-            return _binding_tags_are_consistent(
-                tagged_text,
-                bindings_by_tag,
-                tag_context,
-                slot_output_values,
-                repeated_output_names,
-            )
-
-        expansion_filter = _filter_binding_tags
     tagged_expansions = expand_sentence_template(
         sentence,
         tagged_values,
         expansion_rules,
         max_expansions=max_expansions,
         fair=fair,
-        expansion_filter=expansion_filter,
+        expansion_filter=_binding_consistency_filter(
+            bindings_by_tag,
+            tag_context,
+            slot_output_values,
+            repeated_output_names,
+        ),
     )
     unique: dict[
         tuple[str, tuple[_SlotBinding, ...], tuple[tuple[int, str], ...]],
@@ -2809,7 +3287,13 @@ def _candidate_expansions(
     *,
     slot_output_values: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> tuple[_CandidateExpansion, ...]:
-    """Return bounded candidate expansions for a sentence template."""
+    """Return bounded candidate expansions for a sentence template.
+
+    Expansion is deliberately not ``fair``: interleaving alternation branches
+    spreads the per-template budget across verb forms at the cost of entity
+    coverage per form, which measurably hurts matching; missing surface forms
+    are recovered by the query-scoped dynamic registry path instead.
+    """
     return _expand_candidate_template(
         sentence,
         slot_values,
@@ -2933,7 +3417,6 @@ def _slot_value_query_match_key_from_tokens(
         return None
     token_count = len(value_tokens)
 
-    # 1. Exact matches
     exact = value_normalized == query_normalized
     if not exact and value_no_diac and query_no_diac:
         exact = value_no_diac == query_no_diac
@@ -2941,43 +3424,89 @@ def _slot_value_query_match_key_from_tokens(
         return (True, True, True, token_count, -token_count)
 
     if require_whole_query:
-        value_compact = value_normalized.replace(" ", "")
-        query_compact = query_normalized.replace(" ", "")
-        compact_exact = bool(value_compact and value_compact == query_compact)
-        if not compact_exact and value_no_diac and query_no_diac:
-            compact_exact = value_no_diac.replace(" ", "") == query_no_diac.replace(" ", "")
-        if compact_exact:
-            return (False, True, True, token_count, -token_count)
-
-        compact_fuzzy = (
-            allow_fuzzy_tokens
-            and min(len(value_compact), len(query_compact)) >= REGISTRY_FUZZY_TOKEN_MIN_LENGTH
-            and _is_bounded_registry_token_match(
-                value_compact,
-                query_compact,
-            )
+        return _whole_query_match_key(
+            value_normalized,
+            query_normalized,
+            value_no_diac,
+            query_no_diac,
+            token_count,
+            allow_fuzzy_tokens=allow_fuzzy_tokens,
         )
-        if not compact_fuzzy and allow_fuzzy_tokens and value_no_diac and query_no_diac:
-            value_no_diac_compact = value_no_diac.replace(" ", "")
-            query_no_diac_compact = query_no_diac.replace(" ", "")
-            compact_fuzzy = min(
-                len(value_no_diac_compact), len(query_no_diac_compact)
-            ) >= REGISTRY_FUZZY_TOKEN_MIN_LENGTH and _is_bounded_registry_token_match(
-                value_no_diac_compact,
-                query_no_diac_compact,
-            )
-        if compact_fuzzy:
-            return (False, False, True, token_count, -token_count)
-        return None
 
-    # 2. Token-boundary phrase matches
+    if _phrase_or_compact_value_match(
+        value_normalized,
+        query_normalized,
+        query_tokens,
+        value_no_diac,
+        query_no_diac,
+        query_tokens_no_diac,
+    ):
+        return (False, True, True, token_count, -token_count)
+
+    return _token_overlap_match_key(
+        value_tokens,
+        query_tokens,
+        value_tokens_no_diac,
+        query_tokens_no_diac,
+        allow_fuzzy_tokens=allow_fuzzy_tokens,
+    )
+
+
+def _whole_query_match_key(
+    value_normalized: str,
+    query_normalized: str,
+    value_no_diac: str | None,
+    query_no_diac: str | None,
+    token_count: int,
+    *,
+    allow_fuzzy_tokens: bool,
+) -> tuple[bool, bool, bool, int, int] | None:
+    """Match a value against the whole query using compact exact and fuzzy forms."""
+    value_compact = value_normalized.replace(" ", "")
+    query_compact = query_normalized.replace(" ", "")
+    compact_exact = bool(value_compact and value_compact == query_compact)
+    if not compact_exact and value_no_diac and query_no_diac:
+        compact_exact = value_no_diac.replace(" ", "") == query_no_diac.replace(" ", "")
+    if compact_exact:
+        return (False, True, True, token_count, -token_count)
+
+    compact_fuzzy = (
+        allow_fuzzy_tokens
+        and min(len(value_compact), len(query_compact)) >= REGISTRY_FUZZY_TOKEN_MIN_LENGTH
+        and _is_bounded_registry_token_match(
+            value_compact,
+            query_compact,
+        )
+    )
+    if not compact_fuzzy and allow_fuzzy_tokens and value_no_diac and query_no_diac:
+        value_no_diac_compact = value_no_diac.replace(" ", "")
+        query_no_diac_compact = query_no_diac.replace(" ", "")
+        compact_fuzzy = min(
+            len(value_no_diac_compact), len(query_no_diac_compact)
+        ) >= REGISTRY_FUZZY_TOKEN_MIN_LENGTH and _is_bounded_registry_token_match(
+            value_no_diac_compact,
+            query_no_diac_compact,
+        )
+    if compact_fuzzy:
+        return (False, False, True, token_count, -token_count)
+    return None
+
+
+def _phrase_or_compact_value_match(
+    value_normalized: str,
+    query_normalized: str,
+    query_tokens: frozenset[str],
+    value_no_diac: str | None,
+    query_no_diac: str | None,
+    query_tokens_no_diac: frozenset[str] | None,
+) -> bool:
+    """Match token-boundary phrases, then compound/spacing-insensitive phrases."""
     phrase_match = _normalized_phrase_occurs_in_query(value_normalized, query_normalized)
     if not phrase_match and value_no_diac and query_no_diac:
         phrase_match = _normalized_phrase_occurs_in_query(value_no_diac, query_no_diac)
     if phrase_match:
-        return (False, True, True, token_count, -token_count)
+        return True
 
-    # 3. Compound/spacing-insensitive phrase matches
     value_compact = _compact_slot_text(value_normalized)
     compact_match = bool(value_compact and value_compact in query_tokens)
     if (
@@ -2987,10 +3516,19 @@ def _slot_value_query_match_key_from_tokens(
         and (value_no_diac_compact := _compact_slot_text(value_no_diac))
     ):
         compact_match = value_no_diac_compact in query_tokens_no_diac
-    if compact_match:
-        return (False, True, True, token_count, -token_count)
+    return compact_match
 
-    # 4. Token overlaps
+
+def _token_overlap_match_key(
+    value_tokens: tuple[str, ...],
+    query_tokens: frozenset[str],
+    value_tokens_no_diac: tuple[str, ...] | None,
+    query_tokens_no_diac: frozenset[str] | None,
+    *,
+    allow_fuzzy_tokens: bool,
+) -> tuple[bool, bool, bool, int, int] | None:
+    """Score exact and bounded-fuzzy token overlaps between value and query."""
+    token_count = len(value_tokens)
     exact_matched = len(query_tokens.intersection(value_tokens))
     matched = exact_matched
     if allow_fuzzy_tokens:
@@ -3243,8 +3781,12 @@ class _HassilSlotNode(_HassilNode):
     """AST node representing a template slot."""
 
     def __init__(self, name: str):
-        """Initialize SlotNode."""
-        self.name = name
+        """Initialize SlotNode.
+
+        Component whitespace is stripped so ``{name : area}`` resolves the
+        same slot keys as ``{name:area}``, matching ``_slot_reference``.
+        """
+        self.name = ":".join(part.strip() for part in name.split(":"))
 
     def required_slots(self, rules: Mapping[str, str], seen: frozenset[str]) -> set[str]:
         """Return slot names required by this node."""
@@ -3319,10 +3861,13 @@ class _HassilRuleNode(_HassilNode):
     ) -> tuple[str, ...]:
         """Expand node into all spoken text variants using slots and rules."""
         if self.name in seen:
-            return ()
+            return ("",)
         rule_text = rules.get(self.name)
         if rule_text is None:
-            return ()
+            # Mirror literal_variants: an unknown rule contributes empty text
+            # instead of silently zeroing out the whole sentence product.
+            _warn_unknown_expansion_rule(self.name)
+            return ("",)
         node = _parse_hassil(rule_text)
         return node.expand(
             slot_values,
@@ -3691,6 +4236,37 @@ def _parse_delimited_node(
     return node_factory(text[i + 1 : end].strip()), end + 1
 
 
+def _parse_hassil_group(
+    text: str,
+    index: int,
+    opener: str,
+    depth: int,
+) -> tuple[_HassilNode, int]:
+    """Parse a grouped expression and wrap optional groups."""
+    close_char = "]" if opener == "[" else ")"
+    child, next_index = _parse_hassil_expr(
+        text,
+        index + 1,
+        close_char,
+        depth=depth + 1,
+    )
+    return (_HassilOptionalNode(child) if opener == "[" else child), next_index
+
+
+def _start_hassil_branch(
+    separator: str,
+    current_branch: list[_HassilNode],
+    branches: list[_HassilNode],
+    active_separator: str | None,
+) -> tuple[list[_HassilNode], str | None]:
+    """Finish a branch or preserve a conflicting separator as literal text."""
+    if active_separator is not None and active_separator != separator:
+        current_branch.append(_HassilTextNode(separator))
+        return current_branch, active_separator
+    branches.append(_make_branch_node(current_branch))
+    return [], separator
+
+
 @lru_cache(maxsize=8192)
 def _parse_hassil(text: str) -> _HassilNode:
     """Parse HassIL template string into an AST node, caching the results.
@@ -3713,10 +4289,17 @@ def _parse_hassil_expr(
 ) -> tuple[_HassilNode, int]:
     """Parse a HassIL expression from a given index.
 
-    Note on depth limit:
-    To prevent stack overflow and combination explosions, depth checks are performed
-    at grouping recursion entry points ([ and (). If future parser features introduce
-    recursive pathways, they MUST increment and pass the depth parameter.
+    Args:
+        text: Complete HassIL template text.
+        i: Index where parsing starts.
+        close_char: Delimiter that ends this recursive expression.
+        depth: Current grouping depth.
+
+    Returns:
+        Parsed node and the next unread text index.
+
+    Raises:
+        ValueError: If nested groups exceed the configured safety limit.
     """
     if depth >= _MAX_TEMPLATE_NESTING_DEPTH:
         raise ValueError(f"Max template nesting depth ({_MAX_TEMPLATE_NESTING_DEPTH}) exceeded.")
@@ -3727,37 +4310,22 @@ def _parse_hassil_expr(
     while i < len(text):
         char = text[i]
         match char:
-            case "[":
-                # Recurse for optional grouping: depth parameter MUST be incremented
-                child, i = _parse_hassil_expr(text, i + 1, "]", depth=depth + 1)
-                current_branch.append(_HassilOptionalNode(child))
+            case "[" | "(":
+                node, i = _parse_hassil_group(text, i, char, depth)
+                current_branch.append(node)
             case "]" | ")":
                 if char == close_char:
                     i += 1
                     break
                 current_branch.append(_HassilTextNode(char))
                 i += 1
-            case "(":
-                # Recurse for nested expression grouping: depth parameter MUST be incremented
-                child, i = _parse_hassil_expr(text, i + 1, ")", depth=depth + 1)
-                current_branch.append(child)
-            case "|":
-                if branch_separator == ";":
-                    current_branch.append(_HassilTextNode(char))
-                    i += 1
-                    continue
-                branch_separator = "|"
-                branches.append(_make_branch_node(current_branch))
-                current_branch = []
-                i += 1
-            case ";":
-                if branch_separator == "|":
-                    current_branch.append(_HassilTextNode(char))
-                    i += 1
-                    continue
-                branch_separator = ";"
-                branches.append(_make_branch_node(current_branch))
-                current_branch = []
+            case "|" | ";":
+                current_branch, branch_separator = _start_hassil_branch(
+                    char,
+                    current_branch,
+                    branches,
+                    branch_separator,
+                )
                 i += 1
             case "{":
                 node, i = _parse_delimited_node(text, i, "}", _HassilSlotNode)
@@ -3892,8 +4460,13 @@ def _cached_template_slot_references(
 
 
 def _slot_reference(raw: str) -> TemplateSlotReference:
-    """Parse a HassIL slot reference into expansion list and output slot names."""
-    raw_name = raw.strip()
+    """Parse a HassIL slot reference into expansion list and output slot names.
+
+    ``raw_name`` strips whitespace around the colon so ``{name : area}``
+    stores tagged values under the same key that ``_HassilSlotNode``
+    (which normalizes component whitespace) later resolves.
+    """
+    raw_name = ":".join(part.strip() for part in raw.strip().split(":"))
     list_name, separator, output_name = raw_name.partition(":")
     list_name = list_name.strip()
     output_name = output_name.strip() if separator else list_name
@@ -3992,6 +4565,52 @@ def _wildcard_slots(
     )
 
 
+def _range_boundaries(
+    range_data: Mapping[str, Any],
+) -> tuple[float, float, tuple[float, float]] | None:
+    """Return original and ordered range boundaries when both are valid."""
+    if "from" not in range_data or "to" not in range_data:
+        return None
+    try:
+        from_value = float(range_data["from"])
+        to_value = float(range_data["to"])
+    except (ValueError, TypeError):
+        return None
+    lower, upper = sorted((from_value, to_value))
+    return from_value, to_value, (lower, upper)
+
+
+def _optional_range_number(
+    range_data: Mapping[str, Any],
+    key: str,
+    *,
+    positive: bool = False,
+) -> float | None:
+    """Return an optional numeric range setting when it is valid."""
+    if key not in range_data:
+        return None
+    try:
+        value = float(range_data[key])
+    except (ValueError, TypeError):
+        return None
+    return value if not positive or value > 0 else None
+
+
+def _range_fraction_type(range_data: Mapping[str, Any], list_name: str) -> str | None:
+    """Return a supported fraction type and log invalid configured strings."""
+    fraction_type = range_data.get("fractions")
+    if not isinstance(fraction_type, str):
+        return None
+    if fraction_type in ("halves", "tenths"):
+        return fraction_type
+    _LOGGER.debug(
+        "Invalid fraction type '%s' in range config for list '%s', ignoring.",
+        fraction_type,
+        list_name,
+    )
+    return None
+
+
 def _compile_range_data(
     source_config: Mapping[str, Any],
     intent_config: Mapping[str, Any],
@@ -4011,46 +4630,15 @@ def _compile_range_data(
         range_data = list_config.get("range")
         if not isinstance(range_data, Mapping):
             continue
-
-        if "from" not in range_data or "to" not in range_data:
+        boundaries = _range_boundaries(range_data)
+        if boundaries is None:
             continue
-
-        try:
-            from_val = float(range_data["from"])
-            to_val = float(range_data["to"])
-        except (ValueError, TypeError):
-            continue
-
-        low, high = sorted((from_val, to_val))
+        from_val, _to_val, (low, high) = boundaries
         ranges[list_name] = (low, high)
-
-        step = None
-        if "step" in range_data:
-            with contextlib.suppress(ValueError, TypeError):
-                step = float(range_data["step"])
-                step = step if step > 0 else None
-
-        multiplier = None
-        if "multiplier" in range_data:
-            with contextlib.suppress(ValueError, TypeError):
-                multiplier = float(range_data["multiplier"])
-
-        fraction_type = range_data.get("fractions")
-        if isinstance(fraction_type, str):
-            if fraction_type not in ("halves", "tenths"):
-                _LOGGER.debug(
-                    "Invalid fraction type '%s' in range config for list '%s', ignoring.",
-                    fraction_type,
-                    list_name,
-                )
-                fraction_type = None
-        else:
-            fraction_type = None
-
         step_mult[list_name] = RangeStepMultiplier(
-            step=step,
-            multiplier=multiplier,
-            fraction_type=fraction_type,
+            step=_optional_range_number(range_data, "step", positive=True),
+            multiplier=_optional_range_number(range_data, "multiplier"),
+            fraction_type=_range_fraction_type(range_data, list_name),
             original_from=from_val,
         )
 
@@ -4105,14 +4693,22 @@ def _slot_output_value_maps(
 
 
 def _static_slot_values(data_item: Mapping[str, Any]) -> dict[str, str]:
-    """Return static string slots declared on a HassIL data item."""
+    """Return static slots declared on a HassIL data item.
+
+    HassIL permits numeric and boolean static slots; they are kept as their
+    string form so slot metadata and ranking signals see them.
+    """
     static_slots: dict[str, str] = {}
     slots = data_item.get("slots", {})
     if not isinstance(slots, Mapping):
         return static_slots
     for slot_name, slot_value in slots.items():
-        if isinstance(slot_name, str) and isinstance(slot_value, str):
+        if not isinstance(slot_name, str):
+            continue
+        if isinstance(slot_value, str):
             static_slots[slot_name] = slot_value
+        elif isinstance(slot_value, bool | int | float):
+            static_slots[slot_name] = str(slot_value)
     return static_slots
 
 
@@ -4133,6 +4729,22 @@ def _expansion_rules(
     return rules
 
 
+def _list_range_endpoints(range_data: Any) -> tuple[Any, Any]:
+    """Return configured range endpoints or safe fallback values."""
+    try:
+        return range_data.get("from", 0), range_data.get("to", 100)
+    except (AttributeError, ValueError, TypeError):
+        return 0, 100
+
+
+def _range_endpoint_output(value: Any, multiplier: float | None) -> Any:
+    """Return an endpoint output scaled consistently with interior range values."""
+    if multiplier is None:
+        return value
+    parsed = parse_float(str(value))
+    return value if parsed is None else to_output_value(parsed * multiplier)
+
+
 def _values_from_list_config(list_config: Any, list_name: str | None = None) -> Iterable[str]:
     """Yield spoken values from a HassIL list config."""
     if isinstance(list_config, Mapping):
@@ -4145,15 +4757,10 @@ def _values_from_list_config(list_config: Any, list_name: str | None = None) -> 
             return
 
         if "range" in list_config:
-            range_data = list_config["range"]
-            try:
-                from_val = range_data.get("from", 0)
-                to_val = range_data.get("to", 100)
-                yield str(from_val)
-                if from_val != to_val:
-                    yield str(to_val)
-            except (ValueError, TypeError):
-                yield from ("1", "100")
+            from_val, to_val = _list_range_endpoints(list_config["range"])
+            yield str(from_val)
+            if from_val != to_val:
+                yield str(to_val)
             return
 
         if list_config.get("wildcard"):
@@ -4181,15 +4788,15 @@ def _value_outputs_from_list_config(
 
         if "range" in list_config:
             range_data = list_config["range"]
-            try:
-                from_val = range_data.get("from", 0)
-                to_val = range_data.get("to", 100)
-            except (AttributeError, ValueError, TypeError):
-                from_val = "1"
-                to_val = "100"
+            from_val, to_val = _list_range_endpoints(range_data)
+            multiplier = (
+                _optional_range_number(range_data, "multiplier")
+                if isinstance(range_data, Mapping)
+                else None
+            )
             for value in (from_val, to_val):
                 text_value = str(value)
-                yield text_value, value
+                yield text_value, _range_endpoint_output(value, multiplier)
             return
 
         if list_config.get("wildcard"):
@@ -4270,7 +4877,9 @@ def _candidate_source_from_key(source_key: str) -> CandidateSource:
 
 def clear_grammar_loader_caches() -> None:
     """Clear all global LRU caches in grammar loader module."""
+    _warn_unknown_expansion_rule.cache_clear()
     _normalized_literal_phrase_variants.cache_clear()
+    _text_relevance_key.cache_clear()
     _compound_query_tokens.cache_clear()
     _compact_script_phrase_fallback_enabled.cache_clear()
     _uses_compact_non_latin_script.cache_clear()
