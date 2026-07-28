@@ -101,7 +101,7 @@ People do not always phrase the same request in the same way. Word order, filler
 
 ## How It Works
 
-Assist Canonicalizer gives Home Assistant's built-in HassIL agent the first chance to handle each request. Canonicalization begins only if HassIL cannot handle the original text:
+Home Assistant gives its built-in HassIL agent the first chance when the Assist pipeline has `prefer_local_intents` enabled. When that option is disabled, Assist Canonicalizer supplies the equivalent HassIL-first shortcut. Canonicalization begins only if HassIL cannot handle the original text:
 
 ```mermaid
 flowchart TD
@@ -127,7 +127,7 @@ flowchart TD
     K -->|Failure| G
 ```
 
-1. **HassIL First**: The request is sent unchanged to Home Assistant's built-in conversation agent before any canonicalization. The Assist pipeline may already have tried a subset of local intents, but whenever Assist Canonicalizer is invoked, it still sends the complete original request to HassIL regardless of the pipeline setting. If HassIL succeeds, its result is returned immediately and the remaining steps are skipped.
+1. **HassIL First**: With `prefer_local_intents` enabled, Home Assistant tries HassIL before falling back to Assist Canonicalizer. With it disabled, the pipeline delegates directly to Assist Canonicalizer, which sends the unchanged request to HassIL as a shortcut. The integration skips its shortcut when Home Assistant has already performed the local-intent pass. If HassIL succeeds, its result is returned immediately and the remaining steps are skipped.
 
 2. **Text Normalization**: The input is NFKC-normalized, casefolded, stripped of punctuation, and collapsed to a consistent whitespace form. The same process is applied to the input and candidate sentences.
 
@@ -158,7 +158,7 @@ flowchart TD
 
 ## Benchmark Results
 
-The managed-live benchmark runs every query twice against the same Home Assistant fixture: once directly through HassIL and once through Assist Canonicalizer's direct path. To mirror production routing, the reported Assist Canonicalizer result uses the HassIL outcome when it is correct and uses the direct canonicalizer outcome only when HassIL fails. Both runs are evaluated against executable controls for intent, slot, and target resolution.
+The managed-live benchmark runs every query twice against the same Home Assistant fixture: once directly through HassIL and once through Assist Canonicalizer's direct path. To mirror production routing, the reported Assist Canonicalizer result uses the HassIL outcome when it is correct and uses the direct canonicalizer outcome only when HassIL fails. This models both HassIL-first routes: Home Assistant's local-intent pass when `prefer_local_intents` is enabled and Assist Canonicalizer's shortcut when it is disabled. Both runs are evaluated against executable controls for intent, slot, and target resolution.
 
 ### Overall Results
 
