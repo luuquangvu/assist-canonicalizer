@@ -29,6 +29,16 @@
     }
   },
   "services": {
+    "set_fallback_agent": {
+      "name": "Ange reservagent",
+      "description": "Ändrar reservkonversationsagenten som används för framtida förfrågningar.",
+      "fields": {
+        "agent_id": {
+          "name": "Konversationsagent",
+          "description": "Konversationsagenten som ska användas när Assist Canonicalizer använder reservhantering."
+        }
+      }
+    },
     "test_match": {
       "name": "Testa matchning",
       "description": "Returnerar rankade kandidater för en textinmatning med lexikalisk poängsättning och anpassade tröskelvärden.",

@@ -61,7 +61,9 @@ async def async_setup_entry(
         "entry": entry,
         DATA_RUNTIME: runtime,
     }
-    entry.async_on_unload(entry.add_update_listener(_async_update_options))
+    # Every current option is resolved from this ConfigEntry for each request.
+    # Add an update listener only if a future option is cached during setup and
+    # therefore requires a reload when it changes.
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     async_setup_services(hass)
@@ -87,13 +89,6 @@ async def async_unload_entry(
     if not domain_data:
         hass.data.pop(DOMAIN, None)
     return True
-
-
-async def _async_update_options(
-    hass: HomeAssistantInstance, entry: AssistCanonicalizerConfigEntry
-) -> None:
-    """Reload the config entry when options change."""
-    await hass.config_entries.async_reload(entry.entry_id)
 
 
 def _refresh_registry_slot_values(

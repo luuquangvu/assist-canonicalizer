@@ -29,6 +29,16 @@
     }
   },
   "services": {
+    "set_fallback_agent": {
+      "name": "Definir agente de fallback",
+      "description": "Altera o agente de conversa de fallback usado em solicitações futuras.",
+      "fields": {
+        "agent_id": {
+          "name": "Agente de conversa",
+          "description": "O agente de conversa a usar quando o Assist Canonicalizer recorrer ao fallback."
+        }
+      }
+    },
     "test_match": {
       "name": "Testar correspondência",
       "description": "Retorna candidatos classificados para uma entrada de texto com pontuação lexical e limites personalizados.",

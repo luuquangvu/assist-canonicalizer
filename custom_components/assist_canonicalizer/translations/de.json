@@ -29,6 +29,16 @@
     }
   },
   "services": {
+    "set_fallback_agent": {
+      "name": "Fallback-Agent festlegen",
+      "description": "Ändert den Fallback-Konversationsagenten für zukünftige Anfragen.",
+      "fields": {
+        "agent_id": {
+          "name": "Konversationsagent",
+          "description": "Der Konversationsagent, den Assist Canonicalizer beim Fallback verwendet."
+        }
+      }
+    },
     "test_match": {
       "name": "Übereinstimmung testen",
       "description": "Gibt bewertete Kandidaten für eine Texteingabe mit lexikalischer Bewertung und benutzerdefinierten Schwellenwerten zurück.",

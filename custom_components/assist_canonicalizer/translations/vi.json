@@ -29,6 +29,16 @@
     }
   },
   "services": {
+    "set_fallback_agent": {
+      "name": "Đặt tác nhân dự phòng",
+      "description": "Thay đổi tác nhân hội thoại dự phòng dùng cho các yêu cầu tiếp theo.",
+      "fields": {
+        "agent_id": {
+          "name": "Tác nhân hội thoại",
+          "description": "Tác nhân hội thoại được sử dụng khi Assist Canonicalizer chuyển sang xử lý dự phòng."
+        }
+      }
+    },
     "test_match": {
       "name": "Thử nghiệm so khớp",
       "description": "Trả về các kết quả trùng khớp tiềm năng được xếp hạng cho văn bản đầu vào bằng cách tính điểm từ vựng và các ngưỡng tùy chỉnh.",

@@ -1589,6 +1589,47 @@ async def test_validation_delegate_exception_fallback_keeps_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_conversation_resolves_updated_options_without_reload() -> None:
+    """Resolve every current option from the live config entry for each request."""
+    entry = MagicMock()
+    entry.entry_id = "this_agent"
+    entry.data = {}
+    entry.options = {
+        CONF_FALLBACK_AGENT_ID: "first_agent",
+        CONF_MIN_CONFIDENCE: 0.60,
+        CONF_MIN_MARGIN: 0.05,
+    }
+    entity = AssistCanonicalizerConversationEntity(entry, CanonicalizerRuntime())
+    user_input = MockConversationInput("turn on the light", "en")
+    decision = MagicMock()
+
+    with patch.object(
+        entity,
+        "_async_rank_user_input",
+        AsyncMock(return_value=((), decision)),
+    ) as rank:
+        first_request = await entity._async_rank_request(user_input, "en", MagicMock())
+        assert entity._fallback_agent_id("default") == "first_agent"
+
+        entry.options = {
+            CONF_FALLBACK_AGENT_ID: "second_agent",
+            CONF_MIN_CONFIDENCE: 0.80,
+            CONF_MIN_MARGIN: 0.10,
+        }
+        second_request = await entity._async_rank_request(user_input, "en", MagicMock())
+
+    assert first_request is not None
+    assert (first_request.min_confidence, first_request.min_margin) == (0.60, 0.05)
+    assert second_request is not None
+    assert (second_request.min_confidence, second_request.min_margin) == (0.80, 0.10)
+    assert entity._fallback_agent_id("default") == "second_agent"
+    assert [(call.args[-2], call.args[-1]) for call in rank.await_args_list] == [
+        (0.60, 0.05),
+        (0.80, 0.10),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_conversation_delegate_and_fallback_agent_logic() -> None:
     """Test delegation and fallback agent ID selection branch options."""
     entry = MagicMock()

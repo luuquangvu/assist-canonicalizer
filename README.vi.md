@@ -29,6 +29,7 @@ Trong thực tế, cùng một yêu cầu có thể được diễn đạt theo 
   - [Cách hoạt động](#cách-hoạt-động)
   - [Kết quả đo kiểm](#kết-quả-đo-kiểm)
   - [Các hành động trong Công cụ nhà phát triển](#các-hành-động-trong-công-cụ-nhà-phát-triển)
+    - [Đặt tác nhân dự phòng](#đặt-tác-nhân-dự-phòng)
     - [Thử nghiệm so khớp](#thử-nghiệm-so-khớp)
     - [Xây dựng lại chỉ mục](#xây-dựng-lại-chỉ-mục)
     - [Xóa chỉ mục](#xóa-chỉ-mục)
@@ -54,7 +55,7 @@ Trong thực tế, cùng một yêu cầu có thể được diễn đạt theo 
 - **Lưu ứng viên trên ổ đĩa (On-Disk Candidate Persistence)**: Lưu danh sách ứng viên chuẩn trong hệ thống lưu trữ của Home Assistant. Các lần xây dựng sau có thể dùng lại danh sách này thay vì phân tích lại toàn bộ mẫu câu và tệp YAML.
 - **Bộ lọc độ tin cậy có thể cấu hình (Configurable Confidence Gates)**: Điều chỉnh việc chấp nhận kết quả qua hai ngưỡng **Độ tin cậy tối thiểu (Minimum Match Confidence)** và **Khoảng cách độ tin cậy cơ sở (Base Confidence Margin)**. Kết quả khớp từ vựng chính xác và các chính sách có bằng chứng mạnh khác có thể giảm khoảng cách yêu cầu. Nếu không có chính sách nới lỏng phù hợp, các hành động cạnh tranh, kể cả hành động đối nghịch đã biết, phải đạt mức chênh lệch đầy đủ theo cấu hình.
 - **Tiền kiểm nhận diện theo trạng thái thực tế và khôi phục có giới hạn (Live Recognition Preflight and Bounded Recovery)**: Xác minh câu lệnh chuẩn bằng bộ nhận diện ý định tích hợp sẵn của Home Assistant trước khi thực thi. Hệ thống thử tối đa ba ứng viên có độ tin cậy cao trước khi chuyển sang dự phòng, đồng thời cho phép một lần khôi phục nếu lệnh bị từ chối trước khi bộ xử lý ý định chạy.
-- **Hành động dành cho nhà phát triển**: Năm hành động `test_match`, `rebuild_index`, `clear_index`, `diagnostics` và `dump_candidates` cung cấp điểm xếp hạng, thông tin chỉ mục, dữ liệu chẩn đoán và khả năng quản lý vòng đời chỉ mục ngay trong bảng Hành động của Home Assistant.
+- **Hành động dành cho nhà phát triển**: Sáu hành động `set_fallback_agent`, `test_match`, `rebuild_index`, `clear_index`, `diagnostics` và `dump_candidates` cho phép thay đổi tuyến dự phòng, xem điểm xếp hạng, thông tin chỉ mục, dữ liệu chẩn đoán và quản lý vòng đời chỉ mục ngay trong bảng Hành động của Home Assistant.
 - **Chỉ mục riêng theo ngôn ngữ**: Quản lý độc lập chỉ mục cho từng ngôn ngữ và tự động đối chiếu biến thể ngôn ngữ với danh sách Home Assistant hỗ trợ.
 - **Sử dụng tài nguyên có giới hạn (Bounded Resource Use)**: Giới hạn số ứng viên theo ý định và theo lượt xếp hạng, kết hợp tra cứu thưa tại thời điểm truy vấn trên dữ liệu sổ đăng ký (sparse query-time registry lookup). Cách này giúp kiểm soát mức sử dụng bộ nhớ trong khi vẫn đưa tên và bí danh thực thể động vào quá trình so khớp.
 - **Chuẩn hóa cục bộ**: Các bước chuẩn hóa, lập chỉ mục, xếp hạng và kiểm tra khả năng khôi phục đều chạy trong Home Assistant. Bản thân bộ tích hợp không gửi dữ liệu đo từ xa hoặc yêu cầu tới dịch vụ đám mây; việc xử lý bên ngoài, nếu có, phụ thuộc vào tác nhân dự phòng bạn chọn.
@@ -197,6 +198,7 @@ Benchmark `managed_live` chạy mỗi truy vấn hai lần trên cùng một mô
 Để tái tạo bài đo kiểm hiệu năng từ [`tests/real_world/`](tests/real_world/), chạy lệnh:
 
 ```bash
+uv sync --all-groups
 uv run tools/benchmark.py
 ```
 
@@ -214,6 +216,18 @@ Các ngôn ngữ được xác thực theo hai cấp độ:
 Tất cả các hành động của bộ tích hợp đều có thể truy cập từ **Công cụ nhà phát triển** > **Hành động** (Developer Tools > Actions) trong Home Assistant.
 
 Khi kết quả không như mong đợi, các hành động này cho biết câu lệnh đã được chuẩn hóa và xếp hạng ra sao, chỉ mục hiện có gì và vì sao hệ thống chuyển sang dự phòng. Nhờ đó, bạn có thể xác định bước xảy ra vấn đề thay vì phải phỏng đoán.
+
+### Đặt tác nhân dự phòng
+
+**Hành động**: `assist_canonicalizer.set_fallback_agent`
+
+Thay đổi tác nhân hội thoại dự phòng cho các yêu cầu tiếp theo. Lựa chọn này được lưu vào tùy chọn của bộ tích hợp và có hiệu lực ngay mà không cần tải lại, phù hợp với các tự động hóa chuyển đổi tác nhân theo điều kiện hiện tại.
+
+| Trường     | Bắt buộc | Mô tả                                     |
+| ---------- | -------- | ----------------------------------------- |
+| `agent_id` | Có       | Tác nhân hội thoại được dùng làm dự phòng |
+
+Phản hồi tùy chọn cho biết `fallback_agent_id`, `previous_fallback_agent_id` và `changed`. Giá trị `changed` là `true` khi Home Assistant đã cập nhật mục cấu hình được lưu, hoặc `false` khi mục đó đã giống hệt.
 
 ### Thử nghiệm so khớp
 
@@ -247,8 +261,7 @@ Kích hoạt thủ công quá trình quét dữ liệu và xây dựng lại ch�
 | ---------- | -------- | -------------------------------------------- |
 | `language` | Không    | Mã ngôn ngữ cần xây dựng lại dữ liệu chỉ mục |
 
-**Phản hồi** bao gồm `language` đã chuẩn hóa, `candidate_count` của ngôn ngữ sau
-khi xây dựng và thời gian thực hiện trong `rebuild_latency_ms`.
+**Phản hồi** bao gồm `language` đã chuẩn hóa, `candidate_count` của ngôn ngữ sau khi xây dựng và thời gian thực hiện trong `rebuild_latency_ms`.
 
 ### Xóa chỉ mục
 
@@ -260,8 +273,7 @@ Xóa chỉ mục trong bộ nhớ đệm của một ngôn ngữ cụ thể, ho�
 | ---------- | -------- | ------------------------------ |
 | `language` | Không    | Mã ngôn ngữ có chỉ mục cần xóa |
 
-**Phản hồi** bao gồm mã `language` đã chuẩn hóa, `scope`, các ngôn ngữ và ứng
-viên đã xóa khỏi bộ nhớ đệm, cùng trạng thái bộ nhớ đệm còn lại.
+**Phản hồi** bao gồm mã `language` đã chuẩn hóa, `scope`, các ngôn ngữ đã xóa khỏi bộ nhớ đệm, số lượng ứng viên đã xóa và trạng thái bộ nhớ đệm còn lại.
 
 ### Chẩn đoán
 
@@ -291,11 +303,7 @@ Trả về thông tin chi tiết về nhóm ứng viên của một ngôn ngữ,
 | `language` | Không    | Mã ngôn ngữ cần kiểm tra                                                                  |
 | `rebuild`  | Không    | Nếu là `true`, bắt buộc xây dựng lại chỉ mục trước khi trả về dữ liệu (mặc định: `false`) |
 
-Phản hồi có cùng cấu trúc cho mọi giá trị `index_status`: `missing`, `cached`
-hoặc `rebuilt`. Nội dung bao gồm thời gian xây dựng lại, thống kê theo ý định và
-nguồn ứng viên, số lượng giá trị từ sổ đăng ký cho từng slot và một phần danh sách
-ứng viên. `candidate_sample.truncated` cho biết danh sách này đã được rút gọn và
-chỉ mục vẫn còn các ứng viên khác.
+Phản hồi có cùng cấu trúc cho mọi giá trị `index_status`: `missing`, `cached` hoặc `rebuilt`. Nội dung bao gồm thời gian xây dựng lại, thống kê theo ý định và nguồn ứng viên, số lượng giá trị từ sổ đăng ký cho từng slot và một phần danh sách ứng viên. `candidate_sample.truncated` cho biết danh sách này đã được rút gọn và chỉ mục vẫn còn các ứng viên khác.
 
 ---
 
@@ -303,11 +311,9 @@ chỉ mục vẫn còn các ứng viên khác.
 
 Bộ tích hợp sử dụng hai ngưỡng cấu hình để quyết định có chấp nhận ứng viên đứng đầu hay không:
 
-**Độ tin cậy tối thiểu (Minimum Match Confidence - `min_confidence`)**
-: Điểm tổng hợp có trọng số của ứng viên dẫn đầu phải lớn hơn hoặc bằng giá trị này. Điểm dao động từ `0.0` (không khớp) đến `1.0` (điểm tổng hợp tối đa).
+**Độ tin cậy tối thiểu (Minimum Match Confidence - `min_confidence`)**: Điểm tổng hợp có trọng số của ứng viên dẫn đầu phải lớn hơn hoặc bằng giá trị này. Điểm dao động từ `0.0` (không khớp) đến `1.0` (điểm tổng hợp tối đa).
 
-**Khoảng cách độ tin cậy cơ sở (Base Confidence Margin - `min_margin`)**
-: Mức chênh lệch thông thường so với ứng viên cạnh tranh phù hợp tiếp theo. Các chính sách khớp từ vựng chính xác, điểm tin cậy cao và bằng chứng an toàn khác được đánh giá trước nên có thể giảm hoặc bỏ qua yêu cầu này ngay cả khi có cạnh tranh giữa các hành động. Nếu không có chính sách nới lỏng phù hợp, các hành động cạnh tranh, kể cả hành động đối nghịch đã biết, phải đạt đầy đủ mức chênh lệch đã cấu hình. **Diagnostics** và **Test Match** hiển thị chính sách đang áp dụng; dữ liệu ứng viên không bảo đảm lệnh sẽ thực thi, vì bước nhận diện theo trạng thái thực tế chỉ chạy trong luồng hội thoại Assist thông thường.
+**Khoảng cách độ tin cậy cơ sở (Base Confidence Margin - `min_margin`)**: Mức chênh lệch thông thường so với ứng viên cạnh tranh phù hợp tiếp theo. Các chính sách khớp từ vựng chính xác, điểm tin cậy cao và bằng chứng an toàn khác được đánh giá trước nên có thể giảm hoặc bỏ qua yêu cầu này ngay cả khi có cạnh tranh giữa các hành động. Nếu không có chính sách nới lỏng phù hợp, các hành động cạnh tranh, kể cả hành động đối nghịch đã biết, phải đạt đầy đủ mức chênh lệch đã cấu hình. **Diagnostics** và **Test Match** hiển thị chính sách đang áp dụng; dữ liệu ứng viên không bảo đảm lệnh sẽ thực thi, vì bước nhận diện theo trạng thái thực tế chỉ chạy trong luồng hội thoại Assist thông thường.
 
 Khi câu lệnh bị **chuyển tiếp dự phòng (fallback)**, nguyên nhân cụ thể sẽ được lưu lại trong bảng chẩn đoán dưới các mã sau:
 

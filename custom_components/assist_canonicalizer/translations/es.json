@@ -29,6 +29,16 @@
     }
   },
   "services": {
+    "set_fallback_agent": {
+      "name": "Establecer agente de respaldo",
+      "description": "Cambia el agente de conversación de respaldo utilizado para solicitudes futuras.",
+      "fields": {
+        "agent_id": {
+          "name": "Agente de conversación",
+          "description": "El agente de conversación que se utilizará cuando Assist Canonicalizer recurra al respaldo."
+        }
+      }
+    },
     "test_match": {
       "name": "Probar coincidencia",
       "description": "Devuelve candidatos clasificados para una entrada de texto con puntuación léxica y umbrales personalizados.",

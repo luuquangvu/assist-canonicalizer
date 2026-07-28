@@ -29,6 +29,7 @@ People do not always phrase the same request in the same way. Word order, filler
   - [How It Works](#how-it-works)
   - [Benchmark Results](#benchmark-results)
   - [Developer Tools Actions](#developer-tools-actions)
+    - [Set Fallback Agent](#set-fallback-agent)
     - [Test Match](#test-match)
     - [Rebuild Index](#rebuild-index)
     - [Clear Index](#clear-index)
@@ -54,7 +55,7 @@ People do not always phrase the same request in the same way. Word order, filler
 - **On-Disk Candidate Persistence**: Stores canonical candidate lists in Home Assistant storage. Later rebuilds can reuse these lists instead of parsing every sentence template and YAML file again.
 - **Configurable Confidence Gates**: Fine-tune match acceptance with **Minimum Match Confidence** and **Base Confidence Margin** thresholds. Exact lexical matches and other strong-evidence policies can reduce the required margin; if no earlier relaxation applies, competing actions, including known opposing actions, must clear the full configured margin.
 - **Live Recognition Preflight and Bounded Recovery**: Verifies whether a matched sentence is executable using Home Assistant's native intent parser before triggering an action. The engine tests up to three high-confidence candidates before falling back and allows one recovery attempt if a command is rejected before the handler runs.
-- **Developer Tools Actions**: Five actions (`test_match`, `rebuild_index`, `clear_index`, `diagnostics`, and `dump_candidates`) provide ranking details, index summaries, diagnostics, and manual index lifecycle controls from Home Assistant's standard Actions panel.
+- **Developer Tools Actions**: Six actions (`set_fallback_agent`, `test_match`, `rebuild_index`, `clear_index`, `diagnostics`, and `dump_candidates`) provide dynamic fallback routing, ranking details, index summaries, diagnostics, and manual index lifecycle controls from Home Assistant's standard Actions panel.
 - **Per-Language Isolation**: Maintains a dedicated candidate index for each language, with automatic language variant matching against Home Assistant's supported language list. Slot values are dynamically expanded per language.
 - **Bounded Resource Use**: Applies candidate limits per intent and ranking pass, together with sparse query-time registry lookups. This keeps memory use predictable while retaining dynamic entity names and aliases for matching.
 - **Local Canonicalization**: Normalization, indexing, ranking, and recovery checks run inside your Home Assistant instance. The integration itself sends no telemetry and makes no cloud requests; any external processing depends on the fallback agent you configure.
@@ -197,6 +198,7 @@ The managed-live benchmark runs every query twice against the same Home Assistan
 To reproduce the benchmark from [`tests/real_world/`](tests/real_world/), run:
 
 ```bash
+uv sync --all-groups
 uv run tools/benchmark.py
 ```
 
@@ -214,6 +216,18 @@ Supported languages are verified across two tiers:
 All actions are accessible from **Developer Tools** > **Actions** in Home Assistant.
 
 When a request produces an unexpected result, these actions show how it was normalized and ranked, what the index contains, and why the request fell back. This makes it easier to identify where matching went wrong.
+
+### Set Fallback Agent
+
+**Action**: `assist_canonicalizer.set_fallback_agent`
+
+Changes the fallback conversation agent for future requests. The selection is persisted in the integration options and takes effect immediately without reloading the integration, making the action suitable for automations that switch agents based on current conditions.
+
+| Field      | Required | Description                               |
+| ---------- | -------- | ----------------------------------------- |
+| `agent_id` | Yes      | The conversation agent to use as fallback |
+
+The optional response reports `fallback_agent_id`, `previous_fallback_agent_id`, and `changed`, which is `true` when Home Assistant updated the persisted config entry and `false` when it was already identical.
 
 ### Test Match
 
@@ -247,8 +261,7 @@ Manually triggers a full rebuild of the canonical candidate index for one langua
 | ---------- | -------- | ---------------------------- |
 | `language` | No       | Language code to rebuild for |
 
-**Response includes** the normalized `language`, the resulting `candidate_count`
-for that language, and the time taken in `rebuild_latency_ms`.
+**Response includes** the normalized `language`, the resulting `candidate_count` for that language, and the time taken in `rebuild_latency_ms`.
 
 ### Clear Index
 
@@ -260,9 +273,7 @@ Clears the cached index for a specific language, or every cached index if no lan
 | ---------- | -------- | ---------------------- |
 | `language` | No       | Language code to clear |
 
-**Response includes** the normalized target `language`, the clear `scope`, the
-cached languages and candidates that were removed, and the cache state that
-remains.
+**Response includes** the normalized target `language`, the clear `scope`, the cached languages that were removed, the count of candidates removed, and the cache state that remains.
 
 ### Diagnostics
 
@@ -292,11 +303,7 @@ Returns detailed candidate source information for a language, including source c
 | `language` | No       | Language code to inspect                                             |
 | `rebuild`  | No       | If `true`, forces an index rebuild before dumping (default: `false`) |
 
-The response has the same structure for every `index_status`: `missing`,
-`cached`, or `rebuilt`. It includes rebuild latency, intent and candidate-source
-counts, registry slot counts, and a limited candidate sample.
-`candidate_sample.truncated` indicates that additional candidates exist beyond
-the returned sample.
+The response has the same structure for every `index_status`: `missing`, `cached`, or `rebuilt`. It includes rebuild latency, intent and candidate-source counts, registry slot counts, and a limited candidate sample. `candidate_sample.truncated` indicates that additional candidates exist beyond the returned sample.
 
 ---
 
@@ -304,11 +311,9 @@ the returned sample.
 
 The integration uses two configurable thresholds to decide whether to accept a top-ranked candidate:
 
-**Minimum Match Confidence** (`min_confidence`)
-: The weighted final score of the best candidate must be at or above this value. Scores range from 0.0 (no match) to 1.0 (the maximum weighted score).
+**Minimum Match Confidence** (`min_confidence`): The weighted final score of the best candidate must be at or above this value. Scores range from 0.0 (no match) to 1.0 (the maximum weighted score).
 
-**Base Confidence Margin** (`min_margin`)
-: The normal minimum lead over the next meaningful competitor. Exact lexical, high-confidence, and other safe-evidence policies are evaluated first and may reduce or bypass this margin even when action competition is present. If no earlier relaxation applies, competing actions, including known opposing actions, must clear the full configured margin. Diagnostics and **Test Match** expose the effective policy; candidate metadata alone does not guarantee execution because live recognition runs only through the normal Assist conversation path.
+**Base Confidence Margin** (`min_margin`): The normal minimum lead over the next meaningful competitor. Exact lexical, high-confidence, and other safe-evidence policies are evaluated first and may reduce or bypass this margin even when action competition is present. If no earlier relaxation applies, competing actions, including known opposing actions, must clear the full configured margin. Diagnostics and **Test Match** expose the effective policy; candidate metadata alone does not guarantee execution because live recognition runs only through the normal Assist conversation path.
 
 When a query **falls back**, the reason is recorded in diagnostics as one of:
 

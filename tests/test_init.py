@@ -10,7 +10,6 @@ from homeassistant.core import HassJob, HassJobType
 
 import custom_components.assist_canonicalizer
 from custom_components.assist_canonicalizer import (
-    _async_update_options,
     _async_warmup_pipeline_languages,
     _debounced_registry_rebuild,
     _discover_pipeline_languages,
@@ -166,20 +165,6 @@ async def test_async_unload_entry(monkeypatch: pytest.MonkeyPatch) -> None:
     assert DOMAIN in hass.data
     assert "test_entry" not in hass.data[DOMAIN]
     assert "other_entry" in hass.data[DOMAIN]
-
-
-@pytest.mark.asyncio
-async def test_async_update_options() -> None:
-    """Test reloading configuration entry when options are modified."""
-    hass = MagicMock()
-    hass.config_entries = MagicMock()
-    hass.config_entries.async_reload = AsyncMock()
-
-    entry = MagicMock()
-    entry.entry_id = "test_entry"
-
-    await _async_update_options(hass, entry)
-    hass.config_entries.async_reload.assert_called_once_with("test_entry")
 
 
 def test_discover_pipeline_languages_import_failed() -> None:

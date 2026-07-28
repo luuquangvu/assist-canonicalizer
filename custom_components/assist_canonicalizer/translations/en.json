@@ -29,6 +29,16 @@
     }
   },
   "services": {
+    "set_fallback_agent": {
+      "name": "Set fallback agent",
+      "description": "Change the fallback conversation agent used for future requests.",
+      "fields": {
+        "agent_id": {
+          "name": "Conversation agent",
+          "description": "The conversation agent to use when Assist Canonicalizer falls back."
+        }
+      }
+    },
     "test_match": {
       "name": "Test match",
       "description": "Return ranked candidates for a text input using lexical scoring and custom thresholds.",

@@ -29,6 +29,16 @@
     }
   },
   "services": {
+    "set_fallback_agent": {
+      "name": "设置回退代理",
+      "description": "更改后续请求使用的回退对话代理。",
+      "fields": {
+        "agent_id": {
+          "name": "对话代理",
+          "description": "Assist Canonicalizer 回退时使用的对话代理。"
+        }
+      }
+    },
     "test_match": {
       "name": "测试匹配",
       "description": "使用词汇评分和自定义阈值，返回文本输入的候选匹配项并按顺序排名。",

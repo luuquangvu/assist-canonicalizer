@@ -6,12 +6,15 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from homeassistant.core import ServiceCall, SupportsResponse
+from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
+from pytest_homeassistant_custom_component.common import MockConfigEntry as HassMockConfigEntry
 from voluptuous import Invalid
 
 from custom_components.assist_canonicalizer.candidate import Candidate
 from custom_components.assist_canonicalizer.const import (
+    ATTR_AGENT_ID,
+    CONF_FALLBACK_AGENT_ID,
     CONF_MIN_CONFIDENCE,
     CONF_MIN_MARGIN,
     DATA_RUNTIME,
@@ -20,6 +23,7 @@ from custom_components.assist_canonicalizer.const import (
     SERVICE_DIAGNOSTICS,
     SERVICE_DUMP_CANDIDATES,
     SERVICE_REBUILD_INDEX,
+    SERVICE_SET_FALLBACK_AGENT,
     SERVICE_TEST_MATCH,
 )
 from custom_components.assist_canonicalizer.indexer import build_index
@@ -30,11 +34,13 @@ from custom_components.assist_canonicalizer.services import (
     DIAGNOSTICS_SCHEMA,
     DUMP_CANDIDATES_SCHEMA,
     REBUILD_INDEX_SCHEMA,
+    SET_FALLBACK_AGENT_SCHEMA,
     TEST_MATCH_SCHEMA,
     _handle_clear_index,
     _handle_diagnostics,
     _handle_dump_candidates,
     _handle_rebuild_index,
+    _handle_set_fallback_agent,
     _handle_test_match,
     _runtime_from_hass,
     _service_language,
@@ -45,11 +51,20 @@ from custom_components.assist_canonicalizer.services import (
 from custom_components.assist_canonicalizer.utils import wildcard_slot_names
 
 _EXPECTED_SERVICE_SCHEMAS = {
+    SERVICE_SET_FALLBACK_AGENT: SET_FALLBACK_AGENT_SCHEMA,
     SERVICE_TEST_MATCH: TEST_MATCH_SCHEMA,
     SERVICE_REBUILD_INDEX: REBUILD_INDEX_SCHEMA,
     SERVICE_CLEAR_INDEX: CLEAR_INDEX_SCHEMA,
     SERVICE_DIAGNOSTICS: DIAGNOSTICS_SCHEMA,
     SERVICE_DUMP_CANDIDATES: DUMP_CANDIDATES_SCHEMA,
+}
+_EXPECTED_SERVICE_RESPONSE_SUPPORT = {
+    SERVICE_SET_FALLBACK_AGENT: SupportsResponse.OPTIONAL,
+    SERVICE_TEST_MATCH: SupportsResponse.ONLY,
+    SERVICE_REBUILD_INDEX: SupportsResponse.ONLY,
+    SERVICE_CLEAR_INDEX: SupportsResponse.ONLY,
+    SERVICE_DIAGNOSTICS: SupportsResponse.ONLY,
+    SERVICE_DUMP_CANDIDATES: SupportsResponse.ONLY,
 }
 
 
@@ -75,6 +90,7 @@ class MockHass:
             }
         }
         self.config = MockConfig()
+        self.config_entries = MagicMock()
 
     async def async_add_executor_job(self, func: Any, *args: Any) -> Any:
         """Execute the job immediately."""
@@ -94,6 +110,7 @@ class MockConfigEntry:
 
     def __init__(self, options: dict[str, Any], data: dict[str, Any]) -> None:
         """Initialize options and data properties."""
+        self.entry_id = "mock_entry_id"
         self.options = options
         self.data = data
 
@@ -117,7 +134,7 @@ class _ServiceRegistrationRecorder:
         """Mock service registration callback."""
         assert domain == DOMAIN, f"Expected domain {DOMAIN}, got {domain}"
         assert kwargs.get("schema") is _EXPECTED_SERVICE_SCHEMAS[service]
-        assert kwargs.get("supports_response") is SupportsResponse.ONLY
+        assert kwargs.get("supports_response") is _EXPECTED_SERVICE_RESPONSE_SUPPORT[service]
         self.registered_services[service] = callback
         self.registration_kwargs[service] = dict(kwargs)
 
@@ -129,6 +146,95 @@ def test_service_language_normalizes_cache_keys() -> None:
     call = MockServiceCall({"text": "bật đèn", "language": "Vi"})
 
     assert _service_language(hass, cast(ServiceCall, call)) == "vi"
+
+
+@pytest.mark.asyncio
+async def test_set_fallback_agent_service_reports_config_entry_change(
+    hass: HomeAssistant,
+) -> None:
+    """Report the real Home Assistant config-entry update result."""
+    runtime = CanonicalizerRuntime()
+    entry = HassMockConfigEntry(
+        domain=DOMAIN,
+        options={CONF_MIN_CONFIDENCE: 0.7},
+        data={CONF_FALLBACK_AGENT_ID: "old_agent"},
+    )
+    entry.add_to_hass(hass)
+    hass.data[DOMAIN] = {
+        entry.entry_id: {
+            DATA_RUNTIME: runtime,
+            "entry": entry,
+        }
+    }
+    call = MockServiceCall({ATTR_AGENT_ID: "new_agent"})
+
+    with patch(
+        "custom_components.assist_canonicalizer.services.async_get_agent",
+        return_value=MagicMock(unique_id="new-agent"),
+    ):
+        result = await _handle_set_fallback_agent(hass, cast(ServiceCall, call))
+        unchanged_result = await _handle_set_fallback_agent(hass, cast(ServiceCall, call))
+
+    assert result == {
+        CONF_FALLBACK_AGENT_ID: "new_agent",
+        "previous_fallback_agent_id": "old_agent",
+        "changed": True,
+    }
+    assert dict(entry.options) == {
+        CONF_MIN_CONFIDENCE: 0.7,
+        CONF_FALLBACK_AGENT_ID: "new_agent",
+    }
+    assert unchanged_result == {
+        CONF_FALLBACK_AGENT_ID: "new_agent",
+        "previous_fallback_agent_id": "new_agent",
+        "changed": False,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("agent_id", "agent", "error"),
+    [
+        ("mock_entry_id", MagicMock(), "cannot use itself"),
+        ("missing_agent", None, "is not available"),
+        (
+            "conversation.assist_canonicalizer",
+            MagicMock(unique_id="mock_entry_id-conversation"),
+            "cannot use itself",
+        ),
+    ],
+)
+async def test_set_fallback_agent_service_rejects_invalid_targets(
+    agent_id: str,
+    agent: Any,
+    error: str,
+) -> None:
+    """Reject missing agents and both canonicalizer agent identifiers."""
+    runtime = CanonicalizerRuntime()
+    entry = MockConfigEntry(options={}, data={})
+    hass = MockHass(runtime, entry)
+    hass.config_entries = MagicMock()
+
+    with (
+        patch(
+            "custom_components.assist_canonicalizer.services.async_get_agent",
+            return_value=agent,
+        ),
+        pytest.raises(HomeAssistantError, match=error),
+    ):
+        await _handle_set_fallback_agent(
+            hass,
+            cast(ServiceCall, MockServiceCall({ATTR_AGENT_ID: agent_id})),
+        )
+
+    hass.config_entries.async_update_entry.assert_not_called()
+
+
+def test_set_fallback_agent_schema_trims_and_rejects_empty_ids() -> None:
+    """Normalize hand-authored action data before resolving an agent."""
+    assert SET_FALLBACK_AGENT_SCHEMA({ATTR_AGENT_ID: "  agent-id  "}) == {ATTR_AGENT_ID: "agent-id"}
+    with pytest.raises(Invalid):
+        SET_FALLBACK_AGENT_SCHEMA({ATTR_AGENT_ID: "  "})
 
 
 @pytest.mark.asyncio
@@ -479,10 +585,10 @@ def test_async_setup_and_unload_services() -> None:
     hass = MagicMock()
 
     async_setup_services(hass)
-    assert hass.services.async_register.call_count == 5
+    assert hass.services.async_register.call_count == 6
 
     async_unload_services(hass)
-    assert hass.services.async_remove.call_count == 5
+    assert hass.services.async_remove.call_count == 6
 
 
 def test_runtime_from_hass_skips_invalid_runtime() -> None:
@@ -508,6 +614,10 @@ async def test_async_services_dispatch() -> None:
     # Mock corresponding handlers called inside callbacks
     with (
         patch(
+            "custom_components.assist_canonicalizer.services._handle_set_fallback_agent",
+            AsyncMock(return_value={"status": "updated"}),
+        ) as mock_set_fallback,
+        patch(
             "custom_components.assist_canonicalizer.services._handle_test_match",
             AsyncMock(return_value={"status": "tested"}),
         ) as mock_test,
@@ -529,9 +639,13 @@ async def test_async_services_dispatch() -> None:
         ) as mock_diagnostics,
     ):
         async_setup_services(hass)
-        assert len(recorder.registered_services) == 5
+        assert len(recorder.registered_services) == 6
 
         call = MockServiceCall({})
+
+        res_set_fallback = await recorder.registered_services[SERVICE_SET_FALLBACK_AGENT](call)
+        assert res_set_fallback == {"status": "updated"}
+        mock_set_fallback.assert_called_once_with(hass, call)
 
         # Test handle_test_match
         res_test = await recorder.registered_services[SERVICE_TEST_MATCH](call)
@@ -588,7 +702,27 @@ async def test_services_exception_wrapping() -> None:
     ):
         await _handle_test_match(hass, cast(ServiceCall, call))
 
-    # 2. _handle_rebuild_index raising error
+    # 2. _handle_set_fallback_agent raising error while persisting the option
+    entry = MockConfigEntry(options={}, data={})
+    hass.data[DOMAIN]["mock_entry_id"]["entry"] = entry
+    hass.config_entries = MagicMock()
+    hass.config_entries.async_update_entry.side_effect = RuntimeError("Test update error")
+    with (
+        patch(
+            "custom_components.assist_canonicalizer.services.async_get_agent",
+            return_value=MagicMock(unique_id="other-agent"),
+        ),
+        pytest.raises(
+            HomeAssistantError,
+            match="Fallback agent update failed; see logs for details",
+        ),
+    ):
+        await _handle_set_fallback_agent(
+            hass,
+            cast(ServiceCall, MockServiceCall({ATTR_AGENT_ID: "other_agent"})),
+        )
+
+    # 3. _handle_rebuild_index raising error
     with (
         patch(
             "custom_components.assist_canonicalizer.services._rebuild_index",
@@ -598,7 +732,7 @@ async def test_services_exception_wrapping() -> None:
     ):
         await _handle_rebuild_index(hass, cast(ServiceCall, call))
 
-    # 3. _handle_clear_index raising error
+    # 4. _handle_clear_index raising error
     with (
         patch.object(
             CanonicalizerRuntime,
@@ -609,7 +743,7 @@ async def test_services_exception_wrapping() -> None:
     ):
         await _handle_clear_index(hass, cast(ServiceCall, call))
 
-    # 4. _handle_dump_candidates raising error
+    # 5. _handle_dump_candidates raising error
     with (
         patch.object(
             CanonicalizerRuntime,
@@ -620,7 +754,7 @@ async def test_services_exception_wrapping() -> None:
     ):
         await _handle_dump_candidates(hass, cast(ServiceCall, call))
 
-    # 5. Verify RuntimeError is also caught and wrapped (it is a subclass of Exception)
+    # 6. Verify RuntimeError is also caught and wrapped (it is a subclass of Exception)
     with (
         patch(
             "custom_components.assist_canonicalizer.services._index_for_language",

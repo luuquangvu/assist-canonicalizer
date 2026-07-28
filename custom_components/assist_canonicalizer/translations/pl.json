@@ -29,6 +29,16 @@
     }
   },
   "services": {
+    "set_fallback_agent": {
+      "name": "Ustaw zapasowego agenta",
+      "description": "Zmienia zapasowego agenta konwersacyjnego używanego dla przyszłych żądań.",
+      "fields": {
+        "agent_id": {
+          "name": "Agent konwersacyjny",
+          "description": "Agent konwersacyjny używany, gdy Assist Canonicalizer przechodzi na tryb zapasowy."
+        }
+      }
+    },
     "test_match": {
       "name": "Testuj dopasowanie",
       "description": "Zwraca uszeregowanych kandydatów dla wprowadzonego tekstu z oceną leksykalną i niestandardowymi progami.",
