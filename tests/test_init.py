@@ -14,6 +14,7 @@ from custom_components.assist_canonicalizer import (
     _debounced_registry_rebuild,
     _discover_pipeline_languages,
     _schedule_registry_refresh,
+    _subscribe_intent_updates,
     _warmup_single_language,
     async_setup_entry,
     async_unload_entry,
@@ -33,6 +34,41 @@ class _IntentSubscriptionRecorder:
         """Mock subscribing to intent changes."""
         self.saved_callback = cb
         return lambda: None
+
+
+def test_subscribe_intent_updates_allows_legacy_agent_manager(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skip dynamic intent subscriptions on Home Assistant versions without the API."""
+    hass = MagicMock()
+    runtime = CanonicalizerRuntime()
+    monkeypatch.setattr(
+        "custom_components.assist_canonicalizer.agent_manager.get_agent_manager",
+        lambda _hass: object(),
+    )
+
+    _subscribe_intent_updates(hass, runtime)
+
+    assert runtime.cleanup_callbacks == []
+
+
+def test_subscribe_intent_updates_rejects_invalid_unsubscribe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail setup when Home Assistant violates its subscription callback contract."""
+    hass = MagicMock()
+    runtime = CanonicalizerRuntime()
+    manager = MagicMock()
+    manager.subscribe_intents.return_value = None
+    monkeypatch.setattr(
+        "custom_components.assist_canonicalizer.agent_manager.get_agent_manager",
+        lambda _hass: manager,
+    )
+
+    with pytest.raises(TypeError, match="non-callable unsubscribe callback"):
+        _subscribe_intent_updates(hass, runtime)
+
+    assert runtime.cleanup_callbacks == []
 
 
 def test_registry_debounce_jobs_are_callback_safe() -> None:

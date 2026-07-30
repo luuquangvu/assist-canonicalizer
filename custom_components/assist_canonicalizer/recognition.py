@@ -13,6 +13,12 @@ from homeassistant.components.conversation.agent_manager import async_get_agent
 from homeassistant.components.conversation.const import HOME_ASSISTANT_AGENT
 from homeassistant.components.conversation.models import ConversationInput
 
+from .const import (
+    CONVERSATION_INPUT_AREA_CONTEXT_FIELD,
+    CONVERSATION_INPUT_AREA_CONTEXT_FIELDS,
+    CONVERSATION_INPUT_OPTIONAL_CONTEXT_FIELDS,
+    CONVERSATION_INPUT_REQUIRED_CONTEXT_FIELDS,
+)
 from .normalization import normalize_text
 from .utils import elapsed_ms
 
@@ -192,22 +198,17 @@ def metadata_matches_observation(
 
 def _forwarded_context_fields(user_input: ConversationInput) -> tuple[str, ...]:
     """Return request-context field names preserved by the copied input."""
-    fields = ["context", "language"]
+    fields: list[str] = list(CONVERSATION_INPUT_REQUIRED_CONTEXT_FIELDS)
     fields.extend(
         field_name
-        for field_name in (
-            "conversation_id",
-            "device_id",
-            "satellite_id",
-            "extra_system_prompt",
-        )
+        for field_name in CONVERSATION_INPUT_OPTIONAL_CONTEXT_FIELDS
         if getattr(user_input, field_name, None) is not None
     )
-    if (
-        getattr(user_input, "device_id", None) is not None
-        or getattr(user_input, "satellite_id", None) is not None
+    if any(
+        getattr(user_input, field_name, None) is not None
+        for field_name in CONVERSATION_INPUT_AREA_CONTEXT_FIELDS
     ):
-        fields.append("area_context")
+        fields.append(CONVERSATION_INPUT_AREA_CONTEXT_FIELD)
     return tuple(fields)
 
 

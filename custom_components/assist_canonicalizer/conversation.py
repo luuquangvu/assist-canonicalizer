@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import contextvars
 import hashlib
+import inspect
 import logging
 import time
 from collections.abc import Callable, Iterator, Sequence
@@ -30,6 +31,9 @@ from homeassistant.helpers import area_registry, device_registry, entity_registr
 
 from .const import (
     CONF_FALLBACK_AGENT_ID,
+    CONVERSATION_INPUT_DEVICE_ID_FIELD,
+    CONVERSATION_INPUT_OPTIONAL_FIELDS,
+    CONVERSATION_INPUT_SATELLITE_ID_FIELD,
     DATA_RUNTIME,
     DEFAULT_MAX_CANDIDATES,
     DEFAULT_MAX_PREFLIGHT_ATTEMPTS,
@@ -54,6 +58,8 @@ from .utils import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+_ASYNC_CONVERSE_PARAMETERS = frozenset(inspect.signature(conversation.async_converse).parameters)
 
 
 @dataclass(frozen=True, slots=True)
@@ -583,14 +589,18 @@ class AssistCanonicalizerConversationEntity(
 
         area_id: str | None = None
         device_id = user_input.device_id
-        satellite_id = getattr(user_input, "satellite_id", None)
+        satellite_id = getattr(user_input, CONVERSATION_INPUT_SATELLITE_ID_FIELD, None)
 
         if (
             satellite_id is not None
             and (entity_entry := reg_entity.async_get(satellite_id)) is not None
         ):
             area_id = getattr(entity_entry, "area_id", None)
-            if satellite_device_id := getattr(entity_entry, "device_id", None):
+            if satellite_device_id := getattr(
+                entity_entry,
+                CONVERSATION_INPUT_DEVICE_ID_FIELD,
+                None,
+            ):
                 device_id = satellite_device_id
 
         if (
@@ -1088,6 +1098,11 @@ class AssistCanonicalizerConversationEntity(
         agent_id = (
             HOME_ASSISTANT_AGENT if primary else self._fallback_agent_id(HOME_ASSISTANT_AGENT)
         )
+        optional_arguments = {
+            argument: getattr(user_input, argument, None)
+            for argument in CONVERSATION_INPUT_OPTIONAL_FIELDS
+            if argument in _ASYNC_CONVERSE_PARAMETERS
+        }
         return await conversation.async_converse(
             self.hass,
             text,
@@ -1096,8 +1111,7 @@ class AssistCanonicalizerConversationEntity(
             language=user_input.language,
             agent_id=agent_id,
             device_id=user_input.device_id,
-            satellite_id=getattr(user_input, "satellite_id", None),
-            extra_system_prompt=getattr(user_input, "extra_system_prompt", None),
+            **optional_arguments,
         )
 
     @contextlib.contextmanager
