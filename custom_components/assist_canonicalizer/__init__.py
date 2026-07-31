@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from functools import partial
-from typing import Any
+from typing import Any, cast
 
 from homeassistant.components.conversation import agent_manager
 from homeassistant.components.homeassistant import exposed_entities
@@ -49,11 +50,7 @@ async def async_setup_entry(
     runtime = CanonicalizerRuntime()
     runtime.configure_config_path(hass.config.path)
 
-    runtime.add_cleanup_callback(
-        agent_manager.get_agent_manager(hass).subscribe_intents(
-            partial(_handle_intent_updates, hass, runtime)
-        )
-    )
+    _subscribe_intent_updates(hass, runtime)
     _refresh_registry_slot_values(hass, runtime)
     _subscribe_registry_updates(hass, runtime)
     domain_data = hass.data.setdefault(DOMAIN, {})
@@ -73,6 +70,24 @@ async def async_setup_entry(
     )
 
     return True
+
+
+def _subscribe_intent_updates(
+    hass: HomeAssistantInstance,
+    runtime: CanonicalizerRuntime,
+) -> None:
+    """Subscribe when the installed Home Assistant exposes dynamic intent updates."""
+    subscribe_intents = getattr(
+        agent_manager.get_agent_manager(hass),
+        "subscribe_intents",
+        None,
+    )
+    if subscribe_intents is None:
+        return
+    unsubscribe = subscribe_intents(partial(_handle_intent_updates, hass, runtime))
+    if not callable(unsubscribe):
+        raise TypeError("subscribe_intents returned a non-callable unsubscribe callback")
+    runtime.add_cleanup_callback(cast(Callable[[], None], unsubscribe))
 
 
 async def async_unload_entry(

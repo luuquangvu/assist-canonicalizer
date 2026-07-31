@@ -1,6 +1,6 @@
 """Tests for the multi-version Home Assistant compatibility runner."""
 
-import contextlib
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -8,6 +8,12 @@ import pytest
 from tools import validate_compatibility
 
 TEST_DEP_VERSIONS = {"home-assistant-intents": "2026.6.1"}
+ASSIST_RUNTIME_VERSIONS = {
+    "ha-ffmpeg": "3.2.2",
+    "mutagen": "1.47.0",
+    "pymicro-vad": "1.0.1",
+    "pyspeex-noise": "1.0.2",
+}
 
 
 def test_cleanup_compatibility_bytecode_is_scoped_and_missing_safe(
@@ -251,6 +257,7 @@ def test_missing_required_deps_request_full_install(
 
     def fake_versions(_python_bin: Path, _pinned_versions: dict[str, str]) -> dict[str, str]:
         return {
+            **ASSIST_RUNTIME_VERSIONS,
             "hassil": "3.3.0",
             "home-assistant-intents": "2026.6.1",
             "pytest": "8.3.4",
@@ -282,6 +289,7 @@ def test_missing_dep_uses_targeted_refresh(
 
     def fake_versions(_python_bin: Path, _pinned_versions: dict[str, str]) -> dict[str, str]:
         return {
+            **ASSIST_RUNTIME_VERSIONS,
             "hassil": "3.3.0",
             "pytest": "8.3.4",
             "pytest-asyncio": "1.3.0",
@@ -317,6 +325,26 @@ def test_required_deps_use_exact_intents_version() -> None:
 
     assert "home-assistant-intents==2024.12.4" in deps
     assert "home-assistant-intents" not in deps
+
+
+def test_required_deps_use_exact_harness_version() -> None:
+    """The Home Assistant test harness should use the matrix's exact version."""
+    deps = validate_compatibility._required_test_deps(
+        {"pytest-homeassistant-custom-component": "0.13.190"}
+    )
+
+    assert "pytest-homeassistant-custom-component==0.13.190" in deps
+    assert "pytest-homeassistant-custom-component" not in deps
+
+
+def test_required_deps_pin_assist_runtime_packages() -> None:
+    """Assist pipeline runtime packages should use target Home Assistant pins."""
+    pins = ASSIST_RUNTIME_VERSIONS
+
+    deps = validate_compatibility._required_test_deps(pins)
+
+    assert all(f"{package}=={version}" in deps for package, version in pins.items())
+    assert not set(pins).intersection(deps)
 
 
 def test_venv_dependency_marker_tracks_full_pin_set(tmp_path: Path) -> None:
@@ -391,11 +419,6 @@ def test_install_dependencies_resets_before_marker_reinstall(
         run_calls.append(tuple(cmd))
 
     monkeypatch.setattr(validate_compatibility, "_reset_venv", fake_reset_venv)
-    monkeypatch.setattr(
-        validate_compatibility,
-        "_overrides_file",
-        lambda _ha_ver: contextlib.nullcontext("overrides.txt"),
-    )
     monkeypatch.setattr(validate_compatibility.subprocess, "run", fake_run)
 
     venv_path = tmp_path / "venv"
@@ -417,6 +440,12 @@ def test_install_dependencies_resets_before_marker_reinstall(
         "pip",
         "install",
         "--upgrade",
+    )
+    assert run_calls[0][5:9] == (
+        "--prerelease",
+        "allow",
+        "--python",
+        venv_path / "bin" / "python",
     )
 
 
@@ -482,7 +511,7 @@ def test_run_tests_resets_before_forced_reinstall(
     monkeypatch.setattr(
         validate_compatibility,
         "_resolve_test_dependency_versions",
-        lambda _ha: TEST_DEP_VERSIONS,
+        lambda _ha, _harness: TEST_DEP_VERSIONS,
     )
     monkeypatch.setattr(validate_compatibility, "_get_installed_ha_version", lambda _py: "2026.6.0")
     monkeypatch.setattr(
@@ -515,10 +544,12 @@ def test_run_tests_resets_before_forced_reinstall(
         "_install_dependencies",
         fake_install_dependencies,
     )
+    monkeypatch.setattr(validate_compatibility, "_verify_harness_pair", lambda *_args: True)
     monkeypatch.setattr(validate_compatibility, "_run_pytest", lambda *_args: None)
 
     success, ha_version = validate_compatibility._run_tests_for_version(
         "2026.6.0",
+        "0.13.330",
         "3.14",
         True,
     )
@@ -534,16 +565,17 @@ def test_run_tests_reports_latest_lookup_error_as_row_failure(
 ) -> None:
     """Latest-version lookup failures should be reported as one failed matrix row."""
 
-    def fail_latest_lookup() -> str:
+    def fail_latest_lookup() -> validate_compatibility.LatestMatchedPair:
         raise ValueError("PyPI lookup failed")
 
     monkeypatch.setattr(
         validate_compatibility,
-        "_get_latest_ha_version",
+        "_get_latest_matched_pair",
         fail_latest_lookup,
     )
 
     success, ha_version = validate_compatibility._run_tests_for_version(
+        "latest",
         "latest",
         "3.14",
         False,
@@ -552,6 +584,199 @@ def test_run_tests_reports_latest_lookup_error_as_row_failure(
     assert not success
     assert ha_version == "latest"
     assert "VALIDATION_ERROR: PyPI lookup failed" in capsys.readouterr().out
+
+
+def test_latest_matched_pair_includes_ha_beta_and_reports_newer_unmatched_ha(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The moving gate should follow the newest exact pair and retain the HA edge."""
+
+    def fake_fetch(url: str) -> str:
+        if url == validate_compatibility._PYPI_HA_JSON_URL:
+            return (
+                '{"releases": {'
+                '"2026.7.4": [{"filename": "stable.whl"}],'
+                '"2026.8.0b0": [{"filename": "matched-beta.whl"}],'
+                '"2026.8.0b1": [{"filename": "unmatched-beta.whl"}],'
+                '"2026.9.0b0": [],'
+                '"invalid-version!": [{"filename": "invalid.whl"}]'
+                "}}"
+            )
+        assert url == validate_compatibility._PYPI_TEST_HARNESS_JSON_URL
+        return (
+            '{"info": {'
+            '"requires_dist": ['
+            '"homeassistant==2026.8.0b0",'
+            '"pytest>=8.0"'
+            "]"
+            '}, "releases": {'
+            '"0.13.348": [{"filename": "old.whl"}],'
+            '"0.13.349": [{"filename": "latest.whl"}]'
+            "}}"
+        )
+
+    monkeypatch.setattr(validate_compatibility, "_fetch_remote_text", fake_fetch)
+
+    assert validate_compatibility._get_latest_matched_pair() == {
+        "ha_ver": "2026.8.0b0",
+        "harness_ver": "0.13.349",
+        "absolute_latest_ha_ver": "2026.8.0b1",
+    }
+
+
+@pytest.mark.parametrize(
+    "requirements",
+    [
+        [],
+        ["homeassistant>=2026.8.0b0"],
+        ["homeassistant==2026.8.*"],
+        ["homeassistant==2026.8.0b0", "HomeAssistant==2026.8.0b0"],
+    ],
+)
+def test_exact_homeassistant_requirement_rejects_non_exact_metadata(
+    requirements: list[str],
+) -> None:
+    """Harness metadata must expose exactly one non-wildcard Home Assistant pin."""
+    with pytest.raises(ValueError, match="Home Assistant"):
+        validate_compatibility.exact_homeassistant_requirement(
+            requirements,
+            "test harness",
+        )
+
+
+def test_prepare_latest_pair_reports_harness_lag(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A harness delay should be visible while the matched pair remains testable."""
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_get_latest_matched_pair",
+        lambda: validate_compatibility.LatestMatchedPair(
+            ha_ver="2026.8.0b0",
+            harness_ver="0.13.349",
+            absolute_latest_ha_ver="2026.8.0b1",
+        ),
+    )
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_resolve_test_dependency_versions",
+        lambda _ha, _harness: TEST_DEP_VERSIONS,
+    )
+
+    assert validate_compatibility._prepare_version_and_deps(
+        "latest",
+        "latest",
+    ) == ("2026.8.0b0", "0.13.349", TEST_DEP_VERSIONS)
+    assert "CANARY_LAG: newest Home Assistant 2026.8.0b1" in capsys.readouterr().out
+
+
+def test_verify_harness_pair_rejects_wrong_target(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The pre-pytest guard should reject a harness pinned to another HA release."""
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_get_installed_harness_pair",
+        lambda _python: ("0.13.349", "2026.8.0b0"),
+    )
+
+    assert not validate_compatibility._verify_harness_pair(
+        Path("python"),
+        "2026.8.0b1",
+        "0.13.349",
+    )
+    output = capsys.readouterr().out
+    assert "HARNESS_MISMATCH:" in output
+    assert "requires Home Assistant 2026.8.0b0" in output
+
+
+def test_verify_harness_pair_accepts_exact_target(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The pre-pytest guard should accept an exact installed pair."""
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_get_installed_harness_pair",
+        lambda _python: ("0.13.349", "2026.8.0b0"),
+    )
+
+    assert validate_compatibility._verify_harness_pair(
+        Path("python"),
+        "2026.8.0b0",
+        "0.13.349",
+    )
+    assert "STEP_OK: harness 0.13.349 matches Home Assistant 2026.8.0b0" in capsys.readouterr().out
+
+
+def test_verify_harness_pair_accepts_pep440_equivalent_versions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Equivalent normalized versions should not produce harness mismatches."""
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_get_installed_harness_pair",
+        lambda _python: ("0.13.349.0", "2026.08.0b0"),
+    )
+
+    assert validate_compatibility._verify_harness_pair(
+        Path("python"),
+        "2026.8.0b0",
+        "0.13.349",
+    )
+
+
+def test_get_installed_harness_pair_reports_probe_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Expose probe output when installed harness metadata cannot be inspected."""
+    error = subprocess.CalledProcessError(
+        1,
+        ["uv", "run"],
+        output="probe stdout",
+        stderr="probe stderr",
+    )
+
+    def fail_probe(*_args: object, **_kwargs: object) -> None:
+        raise error
+
+    monkeypatch.setattr(
+        validate_compatibility.subprocess,
+        "run",
+        fail_probe,
+    )
+
+    with pytest.raises(ValueError, match="could not inspect installed test harness") as raised:
+        validate_compatibility._get_installed_harness_pair(Path("python"))
+
+    message = str(raised.value)
+    assert "probe stdout" in message
+    assert "probe stderr" in message
+
+
+def test_latest_matched_pair_rejects_unpublished_harness_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A harness pin cannot make an unpublished Home Assistant target valid."""
+
+    def fake_fetch(url: str) -> str:
+        if url == validate_compatibility._PYPI_HA_JSON_URL:
+            return '{"releases": {"2026.8.0b0": [{"filename": "beta.whl"}]}}'
+        return (
+            '{"info": {"requires_dist": ["homeassistant==2026.8.0b1"]}, '
+            '"releases": {"0.13.349": [{"filename": "harness.whl"}]}}'
+        )
+
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_fetch_remote_text",
+        fake_fetch,
+    )
+
+    with pytest.raises(ValueError, match="targets unpublished Home Assistant"):
+        validate_compatibility._get_latest_matched_pair()
 
 
 def test_compatibility_pytest_args_skip_current_intents_marker() -> None:
@@ -571,6 +796,7 @@ def test_test_matrix_loads_matrix_lazily(monkeypatch: pytest.MonkeyPatch) -> Non
         lambda: [
             {
                 "ha_version": "2026.6.0",
+                "harness_version": "0.13.330",
                 "python_version": "3.14",
             }
         ],
@@ -579,6 +805,7 @@ def test_test_matrix_loads_matrix_lazily(monkeypatch: pytest.MonkeyPatch) -> Non
     assert validate_compatibility._test_matrix() == [
         {
             "ha_ver": "2026.6.0",
+            "harness_ver": "0.13.330",
             "python_ver": "3.14",
         }
     ]
@@ -588,6 +815,7 @@ def test_test_matrix_loads_matrix_lazily(monkeypatch: pytest.MonkeyPatch) -> Non
     ("field_name", "field_value", "match"),
     [
         ("ha_version", "../2026.6.0", "Invalid ha_version"),
+        ("harness_version", "0.13..330", "Invalid harness_version"),
         ("python_version", "3..14", "Invalid python_version"),
     ],
 )
@@ -600,12 +828,33 @@ def test_test_matrix_validates_version_fields(
     """Compatibility matrix version fields should be sanitized before storage."""
     entry: dict[str, object] = {
         "ha_version": "2026.6.0",
+        "harness_version": "0.13.330",
         "python_version": "3.14",
         field_name: field_value,
     }
     monkeypatch.setattr(validate_compatibility, "_load_matrix_data", lambda: [entry])
 
     with pytest.raises(ValueError, match=match):
+        validate_compatibility._test_matrix()
+
+
+def test_test_matrix_requires_latest_pair_to_move_together(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A moving HA row cannot silently use a fixed or independently moving harness."""
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_load_matrix_data",
+        lambda: [
+            {
+                "ha_version": "latest",
+                "harness_version": "0.13.349",
+                "python_version": "3.14",
+            }
+        ],
+    )
+
+    with pytest.raises(ValueError, match="must both be 'latest' or both be fixed"):
         validate_compatibility._test_matrix()
 
 
@@ -617,21 +866,24 @@ def test_main_preserves_duplicate_ha_python_matrix_rows(
     matrix: list[validate_compatibility.CompatibilityConfig] = [
         {
             "ha_ver": "2026.6.0",
+            "harness_ver": "0.13.330",
             "python_ver": "3.14",
         },
         {
             "ha_ver": "2026.6.0",
+            "harness_ver": "0.13.330",
             "python_ver": "3.14",
         },
     ]
-    calls: list[tuple[str, str, bool]] = []
+    calls: list[tuple[str, str, str, bool]] = []
 
     def fake_run_tests(
         ha_ver: str,
+        harness_ver: str,
         py_ver: str,
         reinstall: bool,
     ) -> tuple[bool, str]:
-        calls.append((ha_ver, py_ver, reinstall))
+        calls.append((ha_ver, harness_ver, py_ver, reinstall))
         return True, ha_ver
 
     monkeypatch.setattr(validate_compatibility, "_test_matrix", lambda: matrix)
@@ -643,8 +895,69 @@ def test_main_preserves_duplicate_ha_python_matrix_rows(
 
     output = capsys.readouterr().out
     assert len(calls) == 2
-    assert "Matrix row 1: Home Assistant 2026.6.0 (Python 3.14): PASSED" in output
-    assert "Matrix row 2: Home Assistant 2026.6.0 (Python 3.14): PASSED" in output
+    assert (
+        "Matrix row 1: Home Assistant 2026.6.0, harness 0.13.330 (Python 3.14): PASSED"
+    ) in output
+    assert (
+        "Matrix row 2: Home Assistant 2026.6.0, harness 0.13.330 (Python 3.14): PASSED"
+    ) in output
+
+
+def test_main_outputs_required_test_dependency_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Expose the authoritative compatibility dependency metadata for CI."""
+    monkeypatch.setattr(
+        validate_compatibility.sys,
+        "argv",
+        [
+            "validate_compatibility.py",
+            "--required-test-dependency-metadata-json",
+        ],
+    )
+
+    validate_compatibility.main()
+
+    assert validate_compatibility.orjson.loads(capsys.readouterr().out) == {
+        "required_packages": list(validate_compatibility._REQUIRED_TEST_DEPS),
+        "homeassistant_constraint_packages": list(validate_compatibility._HA_CONSTRAINED_TEST_DEPS),
+        "test_harness_package": validate_compatibility._TEST_HARNESS_PACKAGE,
+    }
+
+
+def test_verify_pair_requires_uv_before_inspection(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Reject pair verification before invoking a uv-backed metadata probe."""
+    calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(validate_compatibility.shutil, "which", lambda _cmd: None)
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_verify_harness_pair",
+        lambda *args: calls.append(args) or True,
+    )
+    monkeypatch.setattr(
+        validate_compatibility.sys,
+        "argv",
+        [
+            "validate_compatibility.py",
+            "--verify-pair-python",
+            "python",
+            "--expected-ha",
+            "2026.8.0b0",
+            "--expected-harness",
+            "0.13.349",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as raised:
+        validate_compatibility.main()
+
+    assert raised.value.code == 1
+    assert not calls
+    assert "VALIDATION_ERROR: 'uv' is not installed." in capsys.readouterr().out
 
 
 def test_parse_requirements_dependency_version_reads_home_assistant_intents() -> None:
@@ -692,12 +1005,20 @@ def test_resolve_test_dependency_versions_uses_ha_requirements(
         "_get_hassil_version",
         lambda _ha_ver: "2.0.5",
     )
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_get_required_package_version",
+        lambda _ha_ver, package: ASSIST_RUNTIME_VERSIONS[package],
+    )
 
     assert validate_compatibility._resolve_test_dependency_versions(
         "2024.12.0",
+        "0.13.190",
     ) == {
         "home-assistant-intents": "2024.12.4",
         "hassil": "2.0.5",
+        "pytest-homeassistant-custom-component": "0.13.190",
+        **ASSIST_RUNTIME_VERSIONS,
     }
 
 

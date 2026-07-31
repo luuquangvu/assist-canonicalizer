@@ -41,9 +41,6 @@ ha-benchmark = [
   "rf-protocols",
 ]
 
-[tool.uv]
-override-dependencies = ["homeassistant>=2026.7.0"]
-
 [tool.ruff]
 line-length = 100
 target-version = "py313"
@@ -84,8 +81,10 @@ testpaths = ["tests"]
 filterwarnings = [
   "ignore::DeprecationWarning",
   "ignore::pytest.PytestDeprecationWarning",
+  "error::DeprecationWarning:custom_components.assist_canonicalizer",
 ]
 markers = [
+  "compatibility: functional integration contract run against every supported Home Assistant version",
   "current_intents: tests that assert the current home-assistant-intents corpus or metadata",
 ]
 addopts = [

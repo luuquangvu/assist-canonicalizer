@@ -12,6 +12,18 @@ from homeassistant.components.conversation.const import HOME_ASSISTANT_AGENT
 from homeassistant.components.conversation.models import ConversationInput
 from homeassistant.core import Context
 
+from custom_components.assist_canonicalizer.const import (
+    CONVERSATION_INPUT_AGENT_ID_FIELD,
+    CONVERSATION_INPUT_AREA_CONTEXT_FIELD,
+    CONVERSATION_INPUT_CONTEXT_FIELD,
+    CONVERSATION_INPUT_CONVERSATION_ID_FIELD,
+    CONVERSATION_INPUT_DEVICE_ID_FIELD,
+    CONVERSATION_INPUT_EXTRA_SYSTEM_PROMPT_FIELD,
+    CONVERSATION_INPUT_LANGUAGE_FIELD,
+    CONVERSATION_INPUT_OPTIONAL_FIELDS,
+    CONVERSATION_INPUT_SATELLITE_ID_FIELD,
+    CONVERSATION_INPUT_TEXT_FIELD,
+)
 from custom_components.assist_canonicalizer.recognition import (
     _MAX_OBSERVED_VALUE_LENGTH,
     RecognitionKind,
@@ -25,16 +37,16 @@ def _conversation_input() -> ConversationInput:
     """Return a request populated with every supported context field."""
     signature = inspect.signature(ConversationInput)
     kwargs: dict[str, Any] = {
-        "text": "turn teh lamp on",
-        "context": Context(user_id="benchmark-user"),
-        "conversation_id": "recognition-request",
-        "device_id": "device-kitchen",
-        "language": "en-US",
+        CONVERSATION_INPUT_TEXT_FIELD: "turn teh lamp on",
+        CONVERSATION_INPUT_CONTEXT_FIELD: Context(user_id="benchmark-user"),
+        CONVERSATION_INPUT_CONVERSATION_ID_FIELD: "recognition-request",
+        CONVERSATION_INPUT_DEVICE_ID_FIELD: "device-kitchen",
+        CONVERSATION_INPUT_LANGUAGE_FIELD: "en-US",
     }
     optional = {
-        "agent_id": "conversation.assist_canonicalizer",
-        "satellite_id": "assist_satellite.kitchen",
-        "extra_system_prompt": "stay local",
+        CONVERSATION_INPUT_AGENT_ID_FIELD: "conversation.assist_canonicalizer",
+        CONVERSATION_INPUT_SATELLITE_ID_FIELD: "assist_satellite.kitchen",
+        CONVERSATION_INPUT_EXTRA_SYSTEM_PROMPT_FIELD: "stay local",
     }
     kwargs |= {name: value for name, value in optional.items() if name in signature.parameters}
     return ConversationInput(**kwargs)
@@ -79,11 +91,11 @@ async def test_recognition_forwards_context_and_observes_intent_without_executio
     assert observation.required_context == ("domain",)
     assert observation.excluded_context == ("state",)
     assert set(observation.forwarded_context) >= {
-        "context",
-        "conversation_id",
-        "device_id",
-        "language",
-        "area_context",
+        CONVERSATION_INPUT_CONTEXT_FIELD,
+        CONVERSATION_INPUT_CONVERSATION_ID_FIELD,
+        CONVERSATION_INPUT_DEVICE_ID_FIELD,
+        CONVERSATION_INPUT_LANGUAGE_FIELD,
+        CONVERSATION_INPUT_AREA_CONTEXT_FIELD,
     }
     recognize_trigger.assert_awaited_once()
     recognize_intent.assert_awaited_once()
@@ -97,7 +109,7 @@ async def test_recognition_forwards_context_and_observes_intent_without_executio
     assert recognition_input.conversation_id == user_input.conversation_id
     assert recognition_input.device_id == user_input.device_id
     assert recognition_input.language == user_input.language
-    for optional_field in ("satellite_id", "extra_system_prompt"):
+    for optional_field in CONVERSATION_INPUT_OPTIONAL_FIELDS:
         if hasattr(user_input, optional_field):
             assert getattr(recognition_input, optional_field) == getattr(user_input, optional_field)
     assert user_input.text == "turn teh lamp on"

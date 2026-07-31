@@ -15,12 +15,22 @@ from homeassistant.core import Context
 from homeassistant.helpers import intent
 
 import custom_components.assist_canonicalizer as assist_canonicalizer
+import custom_components.assist_canonicalizer.conversation as conversation_platform
 from custom_components.assist_canonicalizer import _discover_pipeline_languages
 from custom_components.assist_canonicalizer.candidate import Candidate
 from custom_components.assist_canonicalizer.const import (
     CONF_FALLBACK_AGENT_ID,
     CONF_MIN_CONFIDENCE,
     CONF_MIN_MARGIN,
+    CONVERSATION_INPUT_AGENT_ID_FIELD,
+    CONVERSATION_INPUT_CONTEXT_FIELD,
+    CONVERSATION_INPUT_CONVERSATION_ID_FIELD,
+    CONVERSATION_INPUT_DEVICE_ID_FIELD,
+    CONVERSATION_INPUT_EXTRA_SYSTEM_PROMPT_FIELD,
+    CONVERSATION_INPUT_LANGUAGE_FIELD,
+    CONVERSATION_INPUT_OPTIONAL_FIELDS,
+    CONVERSATION_INPUT_SATELLITE_ID_FIELD,
+    CONVERSATION_INPUT_TEXT_FIELD,
     DATA_RUNTIME,
     DOMAIN,
     FallbackReason,
@@ -46,20 +56,20 @@ class MockConversationInput(ConversationInput):
         """Initialize."""
         sig = inspect.signature(super().__init__)
         kwargs: dict[str, Any] = {
-            "text": text,
-            "context": Context(),
-            "conversation_id": conversation_id,
-            "device_id": None,
-            "language": language,
+            CONVERSATION_INPUT_TEXT_FIELD: text,
+            CONVERSATION_INPUT_CONTEXT_FIELD: Context(),
+            CONVERSATION_INPUT_CONVERSATION_ID_FIELD: conversation_id,
+            CONVERSATION_INPUT_DEVICE_ID_FIELD: None,
+            CONVERSATION_INPUT_LANGUAGE_FIELD: language,
         }
-        if "agent_id" in sig.parameters:
-            kwargs["agent_id"] = "test_agent"
-        if "satellite_id" in sig.parameters:
-            kwargs["satellite_id"] = None
+        if CONVERSATION_INPUT_AGENT_ID_FIELD in sig.parameters:
+            kwargs[CONVERSATION_INPUT_AGENT_ID_FIELD] = "test_agent"
+        if CONVERSATION_INPUT_SATELLITE_ID_FIELD in sig.parameters:
+            kwargs[CONVERSATION_INPUT_SATELLITE_ID_FIELD] = None
         super().__init__(**kwargs)
-        if not hasattr(self, "agent_id"):
+        if not hasattr(self, CONVERSATION_INPUT_AGENT_ID_FIELD):
             self.agent_id = "test_agent"
-        if not hasattr(self, "satellite_id"):
+        if not hasattr(self, CONVERSATION_INPUT_SATELLITE_ID_FIELD):
             self.satellite_id = None
 
 
@@ -83,6 +93,88 @@ class MockIntentResponse:
     def async_set_error(self, code: Any, message: str) -> None:
         """Set error."""
         self.error_code = code
+
+
+@pytest.mark.asyncio
+async def test_delegate_text_filters_newer_home_assistant_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Delegate through the argument set supported by the installed HA release."""
+    entry = MagicMock()
+    entry.entry_id = "test_entry"
+    entry.options = {}
+    entity = AssistCanonicalizerConversationEntity(entry, CanonicalizerRuntime())
+    entity.hass = MagicMock()
+    user_input = MockConversationInput("turn on the light", "en")
+    user_input.satellite_id = "assist_satellite.kitchen"
+    user_input.extra_system_prompt = "stay local"
+    result = MagicMock()
+    converse = AsyncMock(return_value=result)
+    monkeypatch.setattr(conversation_platform.conversation, "async_converse", converse)
+    monkeypatch.setattr(
+        conversation_platform,
+        "_ASYNC_CONVERSE_PARAMETERS",
+        frozenset(
+            {
+                "hass",
+                CONVERSATION_INPUT_TEXT_FIELD,
+                CONVERSATION_INPUT_CONVERSATION_ID_FIELD,
+                CONVERSATION_INPUT_CONTEXT_FIELD,
+                CONVERSATION_INPUT_LANGUAGE_FIELD,
+                CONVERSATION_INPUT_AGENT_ID_FIELD,
+                CONVERSATION_INPUT_DEVICE_ID_FIELD,
+            }
+        ),
+    )
+
+    assert await entity._delegate_text(user_input.text, user_input, primary=True) is result
+    converse.assert_awaited_once_with(
+        entity.hass,
+        user_input.text,
+        user_input.conversation_id,
+        user_input.context,
+        language=user_input.language,
+        agent_id=HOME_ASSISTANT_AGENT,
+        device_id=user_input.device_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_delegate_text_forwards_newer_home_assistant_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forward newer arguments when the installed HA release supports them."""
+    entry = MagicMock()
+    entry.entry_id = "test_entry"
+    entry.options = {}
+    entity = AssistCanonicalizerConversationEntity(entry, CanonicalizerRuntime())
+    entity.hass = MagicMock()
+    user_input = MockConversationInput("turn on the light", "en")
+    user_input.satellite_id = "assist_satellite.kitchen"
+    user_input.extra_system_prompt = "stay local"
+    result = MagicMock()
+    converse = AsyncMock(return_value=result)
+    monkeypatch.setattr(conversation_platform.conversation, "async_converse", converse)
+    monkeypatch.setattr(
+        conversation_platform,
+        "_ASYNC_CONVERSE_PARAMETERS",
+        frozenset(CONVERSATION_INPUT_OPTIONAL_FIELDS),
+    )
+
+    assert await entity._delegate_text(user_input.text, user_input, primary=True) is result
+    converse.assert_awaited_once_with(
+        entity.hass,
+        user_input.text,
+        user_input.conversation_id,
+        user_input.context,
+        language=user_input.language,
+        agent_id=HOME_ASSISTANT_AGENT,
+        device_id=user_input.device_id,
+        **{
+            CONVERSATION_INPUT_SATELLITE_ID_FIELD: user_input.satellite_id,
+            CONVERSATION_INPUT_EXTRA_SYSTEM_PROMPT_FIELD: user_input.extra_system_prompt,
+        },
+    )
 
 
 async def _executor_job_returning_empty_snapshot_index(target: Any, *args: Any, **kwargs: Any):
@@ -536,6 +628,11 @@ async def test_exact_collision_delegates_text_to_hassil_with_original_context() 
             result = await entity._async_process_with_runtime(user_input)
 
         assert result is hassil_result
+        optional_arguments = {
+            argument: getattr(user_input, argument)
+            for argument in CONVERSATION_INPUT_OPTIONAL_FIELDS
+            if argument in conversation_platform._ASYNC_CONVERSE_PARAMETERS
+        }
         converse.assert_awaited_once_with(
             hass,
             "all fan on",
@@ -544,8 +641,7 @@ async def test_exact_collision_delegates_text_to_hassil_with_original_context() 
             language="en",
             agent_id=HOME_ASSISTANT_AGENT,
             device_id="device-1",
-            satellite_id="assist_satellite.kitchen",
-            extra_system_prompt="stay local",
+            **optional_arguments,
         )
 
 
@@ -1186,7 +1282,9 @@ async def test_recovery_handler_error_routes_to_fallback_agent() -> None:
         "turn on kitchen lamp",
         user_input.text,
     ]
-    assert [call.kwargs["agent_id"] for call in converse.await_args_list] == [
+    assert [
+        call.kwargs[CONVERSATION_INPUT_AGENT_ID_FIELD] for call in converse.await_args_list
+    ] == [
         HOME_ASSISTANT_AGENT,
         HOME_ASSISTANT_AGENT,
         "llm_agent",
@@ -1670,6 +1768,11 @@ async def test_conversation_delegate_and_fallback_agent_logic() -> None:
     ) as mock_converse:
         res = await entity._delegate_raw_text(user_input)
         assert res is mock_result
+        optional_arguments = {
+            argument: getattr(user_input, argument, None)
+            for argument in CONVERSATION_INPUT_OPTIONAL_FIELDS
+            if argument in conversation_platform._ASYNC_CONVERSE_PARAMETERS
+        }
         mock_converse.assert_called_once_with(
             entity.hass,
             "tắt đèn bếp",
@@ -1678,8 +1781,7 @@ async def test_conversation_delegate_and_fallback_agent_logic() -> None:
             language=user_input.language,
             agent_id="options_agent",
             device_id=user_input.device_id,
-            satellite_id=None,
-            extra_system_prompt=None,
+            **optional_arguments,
         )
 
     # 6. Test async_process success path executes and updates diagnostics
