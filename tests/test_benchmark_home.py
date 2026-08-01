@@ -76,13 +76,14 @@ def test_benchmark_fixture_fingerprint_is_reviewed() -> None:
 
 
 def test_benchmark_configuration_is_deterministic_and_loopback_only() -> None:
-    """Keep the automation-owned benchmark home deterministic and local."""
+    """Keep the benchmark deterministic and move HTTP ownership out of YAML."""
     configuration = CONFIG_PATH.read_text(encoding="utf-8")
 
     assert "demo:" in configuration
     assert "assist_canonicalizer_benchmark:" in configuration
-    assert "server_host: 127.0.0.1" in configuration
-    assert "server_port: 8123" in configuration
+    assert not any(line.startswith("http:") for line in configuration.splitlines())
+    assert benchmark.BASE_URL == "http://127.0.0.1:8123"
+    assert benchmark.WEBSOCKET_URL == "ws://127.0.0.1:8123/api/websocket"
 
 
 @pytest.mark.current_intents

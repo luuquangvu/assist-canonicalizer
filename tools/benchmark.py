@@ -63,12 +63,13 @@ SCRATCH_DIR = REPO_ROOT / "scratch"
 DEFAULT_OUTPUT_JSON = SCRATCH_DIR / "benchmark" / "managed_live_report.json"
 DEFAULT_OUTPUT_MARKDOWN = SCRATCH_DIR / "benchmark" / "managed_live_report.md"
 
-BENCHMARK_SCHEMA_VERSION = 3
+BENCHMARK_SCHEMA_VERSION = 4
 BENCHMARK_GROUP = "ha-benchmark"
 REAL_WORLD_SUITE_ID = "managed_live_real_world_v1"
 HOST = "127.0.0.1"
 PORT = 8123
 BASE_URL = f"http://{HOST}:{PORT}"
+WEBSOCKET_URL = f"ws://{HOST}:{PORT}/api/websocket"
 FIXTURE_ENTITY_ID = "sensor.assist_canonicalizer_benchmark_fixture"
 AGENT_ENTITY_ID = "conversation.assist_canonicalizer"
 HOME_ASSISTANT_AGENT_ID = "conversation.home_assistant"
@@ -76,6 +77,7 @@ CONTEXT_SATELLITE_ID = "light.living_room_rgbww_lights"
 BENCHMARK_DEVICE_ID = "assist-canonicalizer-benchmark-device"
 HTTP_TIMEOUT_SECONDS = 30.0
 PROCESS_TIMEOUT_SECONDS = 180.0
+RESTART_TIMEOUT_SECONDS = 30.0
 DEPENDENCIES_WITHOUT_HA_MANIFEST_REQUIREMENTS = frozenset({"colorlog"})
 SECRET_PATTERNS = (
     (
@@ -648,7 +650,7 @@ async def _run_config_check(config_dir: Path) -> None:
 async def _start_home_assistant(config_dir: Path) -> ManagedProcess:
     """Start Home Assistant with dependency installation disabled."""
     log_path = config_dir / "home-assistant-process.log"
-    log_handle = log_path.open("wb")
+    log_handle = log_path.open("ab")
     try:
         process = await asyncio.create_subprocess_exec(
             "uv",
@@ -782,6 +784,194 @@ async def _onboard(session: aiohttp.ClientSession) -> str:
     if not isinstance(token_payload, dict):
         raise BenchmarkError("Authentication token response must be an object")
     return _required_string(token_payload, "access_token", "token response")
+
+
+async def _receive_websocket_object(
+    websocket: aiohttp.ClientWebSocketResponse,
+    phase: str,
+) -> dict[str, Any]:
+    """Receive one bounded Home Assistant WebSocket object."""
+    try:
+        payload = await asyncio.wait_for(
+            websocket.receive_json(loads=orjson.loads),
+            timeout=HTTP_TIMEOUT_SECONDS,
+        )
+    except (aiohttp.ClientError, TimeoutError, TypeError, ValueError) as err:
+        raise BenchmarkError(f"Home Assistant WebSocket {phase} failed: {err}") from err
+    if not isinstance(payload, dict):
+        raise BenchmarkError(f"Home Assistant WebSocket {phase} response must be an object")
+    return payload
+
+
+async def _open_authenticated_websocket(
+    session: aiohttp.ClientSession,
+    access_token: str,
+) -> aiohttp.ClientWebSocketResponse:
+    """Open and authenticate one Home Assistant WebSocket connection."""
+    websocket: aiohttp.ClientWebSocketResponse | None = None
+    try:
+        websocket = await session.ws_connect(WEBSOCKET_URL)
+        auth_required = await _receive_websocket_object(websocket, "authentication start")
+        if auth_required.get("type") != "auth_required":
+            raise BenchmarkError("Home Assistant WebSocket did not request authentication")
+        await websocket.send_json({"type": "auth", "access_token": access_token})
+        auth_result = await _receive_websocket_object(websocket, "authentication")
+        if auth_result.get("type") != "auth_ok":
+            message = _sanitize_text(str(auth_result.get("message", "authentication rejected")))
+            raise BenchmarkError(f"Home Assistant WebSocket authentication failed: {message}")
+        return websocket
+    except BenchmarkError:
+        if websocket is not None:
+            with contextlib.suppress(aiohttp.ClientError):
+                await websocket.close()
+        raise
+    except (aiohttp.ClientError, TimeoutError) as err:
+        if websocket is not None:
+            with contextlib.suppress(aiohttp.ClientError):
+                await websocket.close()
+        raise BenchmarkError(f"Home Assistant WebSocket request failed: {err}") from err
+
+
+def _websocket_result(
+    payload: Mapping[str, Any],
+    request_id: int,
+    action: str,
+) -> Any:
+    """Return one successful, request-correlated WebSocket result."""
+    if payload.get("type") != "result" or payload.get("id") != request_id:
+        raise BenchmarkError(f"Home Assistant WebSocket {action} returned an unexpected response")
+    if payload.get("success") is not True:
+        error = _sanitize_text(str(payload.get("error", "unknown error")))
+        raise BenchmarkError(f"Home Assistant WebSocket {action} failed: {error}")
+    return payload.get("result")
+
+
+async def _inspect_http_config(
+    websocket: aiohttp.ClientWebSocketResponse,
+    request_id: int,
+) -> dict[str, Any]:
+    """Return Home Assistant's stable/pending HTTP configuration state."""
+    await websocket.send_json({"id": request_id, "type": "http/config"})
+    payload = await _receive_websocket_object(websocket, "HTTP config inspection")
+    result = _websocket_result(payload, request_id, "HTTP config inspection")
+    if not isinstance(result, dict):
+        raise BenchmarkError("Home Assistant HTTP config result must be an object")
+    return result
+
+
+def _is_managed_http_config(config: object) -> bool:
+    """Return whether an HTTP config matches the managed loopback endpoint."""
+    return (
+        isinstance(config, dict)
+        and config.get("server_host") == [HOST]
+        and config.get("server_port") == PORT
+    )
+
+
+async def _configure_managed_http_config(
+    session: aiohttp.ClientSession,
+    access_token: str,
+) -> bool:
+    """Stage the managed loopback HTTP config and request a restart if needed.
+
+    Returns whether Home Assistant requested a restart to apply a newly staged
+    configuration.
+    """
+    websocket = await _open_authenticated_websocket(session, access_token)
+    try:
+        config_result = await _inspect_http_config(websocket, 1)
+        active_config_type = config_result.get("active_config_type")
+        if active_config_type == "pending":
+            if not _is_managed_http_config(config_result.get("pending")):
+                raise BenchmarkError(
+                    "Home Assistant pending HTTP config differs from the managed loopback endpoint"
+                )
+            return False
+        if active_config_type == "stable" and _is_managed_http_config(config_result.get("stable")):
+            return False
+
+        configure_request_id = 2
+        await websocket.send_json(
+            {
+                "id": configure_request_id,
+                "type": "http/config/configure",
+                "config": {"server_host": [HOST], "server_port": PORT},
+            }
+        )
+        configure_payload = await _receive_websocket_object(
+            websocket,
+            "HTTP config configuration",
+        )
+        configure_result = _websocket_result(
+            configure_payload,
+            configure_request_id,
+            "HTTP config configuration",
+        )
+        if not isinstance(configure_result, dict) or configure_result.get("restart") is not True:
+            raise BenchmarkError(
+                "Home Assistant did not request a restart for the managed HTTP config"
+            )
+        return True
+    finally:
+        with contextlib.suppress(aiohttp.ClientError):
+            await websocket.close()
+
+
+async def _restart_managed_home_assistant(managed: ManagedProcess) -> None:
+    """Wait for a requested Home Assistant restart and start the managed process again."""
+    try:
+        await asyncio.wait_for(managed.process.wait(), timeout=RESTART_TIMEOUT_SECONDS)
+    except TimeoutError as err:
+        raise BenchmarkError("Timed out waiting for Home Assistant HTTP config restart") from err
+    if managed.process.returncode != 100:
+        raise BenchmarkError(
+            "Home Assistant HTTP config restart returned unexpected exit code "
+            f"{managed.process.returncode}"
+        )
+    managed.log_handle.close()
+    restarted = await _start_home_assistant(managed.log_path.parent)
+    managed.process = restarted.process
+    managed.log_handle = restarted.log_handle
+
+
+async def _confirm_managed_http_config(
+    session: aiohttp.ClientSession,
+    access_token: str,
+) -> bool:
+    """Promote the managed loopback HTTP config when Home Assistant stages it.
+
+    Returns whether a pending configuration was promoted. Home Assistant 2026.8+
+    migrates YAML HTTP settings into a pending trial that otherwise auto-reverts and
+    restarts after five minutes.
+    """
+    websocket = await _open_authenticated_websocket(session, access_token)
+    try:
+        config_result = await _inspect_http_config(websocket, 1)
+        if config_result.get("active_config_type") != "pending":
+            if not _is_managed_http_config(config_result.get("stable")):
+                raise BenchmarkError(
+                    "Home Assistant active HTTP config differs from the managed loopback endpoint"
+                )
+            return False
+
+        pending = config_result.get("pending")
+        if not _is_managed_http_config(pending):
+            raise BenchmarkError(
+                "Home Assistant pending HTTP config differs from the managed loopback endpoint"
+            )
+
+        promote_request_id = 2
+        await websocket.send_json({"id": promote_request_id, "type": "http/config/promote"})
+        promote_payload = await _receive_websocket_object(websocket, "HTTP config promotion")
+        _websocket_result(
+            promote_payload,
+            promote_request_id,
+            "HTTP config promotion",
+        )
+        return True
+    finally:
+        with contextlib.suppress(aiohttp.ClientError):
+            await websocket.close()
 
 
 async def _call_service(
@@ -926,7 +1116,7 @@ def _language_smoke_case(command: LanguageSmokeCommand) -> BenchmarkCase:
         category="compatibility_smoke",
         expected_intent="HassTurnOn",
         expected_canonical=command.text,
-        expected_slots={},
+        expected_slots=dict(command.expected_slots),
         expected_fallback=False,
         satellite_id=CONTEXT_SATELLITE_ID,
         expected_response_type=None,
@@ -944,12 +1134,26 @@ async def _language_smoke_attempt(
     attempt: int,
 ) -> dict[str, Any]:
     """Execute and observe one language-smoke attempt."""
+    domain_states = await _domain_entity_states(session, command.target_domain)
+    if command.target_entity_id not in domain_states:
+        raise BenchmarkError(
+            f"Language smoke target {command.target_entity_id} is missing from "
+            f"the managed {command.target_domain} domain"
+        )
+    expected_off_states = dict.fromkeys(domain_states, "off")
     await _call_service(
         session,
         command.target_domain,
         "turn_off",
-        {"entity_id": command.target_entity_id},
+        {"entity_id": sorted(domain_states)},
     )
+    prepared_states = await _wait_for_domain_states(
+        session, command.target_domain, expected_off_states
+    )
+    if prepared_states != expected_off_states:
+        raise BenchmarkError(
+            f"Language smoke could not prepare {command.language} bystanders: {prepared_states}"
+        )
     conversation_id = f"language-smoke-{command.language}-{attempt}"
     payload, _latency_ms, trace = await _run_observed_conversation(
         session,
@@ -961,9 +1165,12 @@ async def _language_smoke_attempt(
     if diagnostics.get("last_request_id") != conversation_id:
         raise BenchmarkError(f"Language smoke request correlation failed for {command.language}")
     response = _response_observation(payload)
-    state = await _wait_for_expected_state(
-        session,
-        ExpectedState(entity_id=command.target_entity_id, state="on"),
+    expected_result_states = {
+        **expected_off_states,
+        command.target_entity_id: "on",
+    }
+    result_states = await _wait_for_domain_states(
+        session, command.target_domain, expected_result_states
     )
     confidence_gate = diagnostics.get("confidence_gate")
     return {
@@ -972,7 +1179,8 @@ async def _language_smoke_attempt(
         "intent": trace.actual_intent,
         "slots": dict(trace.actual_slots),
         "entity_ids": response["entity_ids"],
-        "target_state": state.get("state") if isinstance(state, dict) else None,
+        "target_state": result_states.get(command.target_entity_id),
+        "domain_states": result_states,
         "delegated_text_sha256": hashlib.sha256(trace.delegated_text.encode()).hexdigest(),
         "fallback_reason": diagnostics.get("last_fallback_reason"),
         "recognition_kind": diagnostics.get("recognition_kind"),
@@ -1008,23 +1216,31 @@ async def _execute_language_smoke_command(
     if not _language_smoke_observation_succeeded(
         observation,
         command.target_entity_id,
+        dict(command.expected_slots),
     ):
         raise BenchmarkError(f"Language smoke failed for {command.language}: {observation}")
     await _call_service(
         session,
         command.target_domain,
         "turn_off",
-        {"entity_id": command.target_entity_id},
+        {"entity_id": sorted(observation["domain_states"])},
     )
-    await _wait_for_expected_state(
+    expected_cleanup_states = dict.fromkeys(observation["domain_states"], "off")
+    cleanup_states = await _wait_for_domain_states(
         session,
-        ExpectedState(entity_id=command.target_entity_id, state="off"),
+        command.target_domain,
+        expected_cleanup_states,
     )
+    if cleanup_states != expected_cleanup_states:
+        raise BenchmarkError(
+            f"Language smoke cleanup failed for {command.language}: {cleanup_states}"
+        )
     return {
         "language": command.language,
         "command_sha256": hashlib.sha256(command.text.encode()).hexdigest(),
         "target_domain": command.target_domain,
         "target_entity_id": command.target_entity_id,
+        "expected_slots": dict(command.expected_slots),
         "outcome": observation,
     }
 
@@ -1042,7 +1258,9 @@ async def _execute_language_smoke(
 
 
 def _language_smoke_observation_succeeded(
-    observation: Mapping[str, Any], target_entity_id: str
+    observation: Mapping[str, Any],
+    target_entity_id: str,
+    expected_slots: Mapping[str, str],
 ) -> bool:
     """Return whether a compatibility smoke request achieved its action contract.
 
@@ -1053,12 +1271,60 @@ def _language_smoke_observation_succeeded(
     though the action succeeds. Treating response wording as correctness here would
     turn an upstream translation defect into a false integration regression.
     """
+    actual_slots = observation.get("slots")
+    domain_states = observation.get("domain_states")
+    if not isinstance(actual_slots, Mapping) or not isinstance(domain_states, Mapping):
+        return False
+    actual_target_slots = {
+        slot: value for slot, value in actual_slots.items() if slot in {"name", "area", "floor"}
+    }
+    expected_domain_states = dict.fromkeys(domain_states, "off")
+    expected_domain_states[target_entity_id] = "on"
     return (
-        observation["response_type"] != "error"
-        and observation["intent"] == "HassTurnOn"
-        and target_entity_id in observation["entity_ids"]
-        and observation["target_state"] == "on"
+        observation.get("response_type") == "action_done"
+        and observation.get("error_code") is None
+        and observation.get("intent") == "HassTurnOn"
+        and observation.get("entity_ids") == [target_entity_id]
+        and actual_target_slots == dict(expected_slots)
+        and observation.get("target_state") == "on"
+        and domain_states == expected_domain_states
     )
+
+
+async def _domain_entity_states(session: aiohttp.ClientSession, domain: str) -> dict[str, str]:
+    """Return the exact state map for one managed fixture domain."""
+    payload = await _request_json(session, "GET", "/api/states")
+    if not isinstance(payload, list):
+        raise BenchmarkError("Home Assistant states response must be a list")
+    prefix = f"{domain}."
+    states: dict[str, str] = {}
+    for state in payload:
+        if not isinstance(state, dict):
+            raise BenchmarkError("Home Assistant state entry must be an object")
+        entity_id = state.get("entity_id")
+        if not isinstance(entity_id, str) or not entity_id.startswith(prefix):
+            continue
+        state_value = state.get("state")
+        if not isinstance(state_value, str):
+            raise BenchmarkError(f"Home Assistant state is invalid for {entity_id}")
+        states[entity_id] = state_value
+    return dict(sorted(states.items()))
+
+
+async def _wait_for_domain_states(
+    session: aiohttp.ClientSession,
+    domain: str,
+    expected_states: Mapping[str, str],
+) -> dict[str, str]:
+    """Poll until the managed domain has exactly the expected entity states."""
+    deadline = time.monotonic() + 5.0
+    states: dict[str, str] = {}
+    while time.monotonic() < deadline:
+        states = await _domain_entity_states(session, domain)
+        if states == expected_states:
+            return states
+        await asyncio.sleep(0.25)
+    return states
 
 
 async def _run_conversation(
@@ -2837,7 +3103,7 @@ class _LiveBenchmarkResults:
 
 def _language_smoke_manifest(
     commands: Sequence[LanguageSmokeCommand],
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     """Return the stable language-smoke fingerprint payload."""
     return [
         {
@@ -2845,6 +3111,7 @@ def _language_smoke_manifest(
             "text": command.text,
             "target_domain": command.target_domain,
             "target_entity_id": command.target_entity_id,
+            "expected_slots": dict(command.expected_slots),
         }
         for command in commands
     ]
@@ -2885,6 +3152,22 @@ async def _run_live_benchmark_session(
     print("HA_HTTP_READY", flush=True)
     token = await _onboard(session)
     session.headers.update({"Authorization": f"Bearer {token}"})
+    # The HTTP configure command is accepted only after Home Assistant reaches the
+    # running state. Fixture provisioning begins on EVENT_HOMEASSISTANT_STARTED, so
+    # readiness is also the benchmark's concrete startup-complete signal.
+    await _wait_for_fixture(session, inputs.fixture)
+    restart_for_http_config = await _configure_managed_http_config(session, token)
+    if restart_for_http_config:
+        print("HA_HTTP_CONFIG_RESTARTING", flush=True)
+        await _restart_managed_home_assistant(managed)
+        await _wait_for_http(session, managed)
+        print("HA_HTTP_RESTARTED", flush=True)
+        await _wait_for_fixture(session, inputs.fixture)
+    promoted_http_config = await _confirm_managed_http_config(session, token)
+    print(
+        "HA_HTTP_CONFIG_PROMOTED" if promoted_http_config else "HA_HTTP_CONFIG_STABLE",
+        flush=True,
+    )
     await _wait_for_fixture(session, inputs.fixture)
     await _create_config_entry(session, "shopping_list")
     await _call_service(session, "assist_canonicalizer_benchmark", "reapply")

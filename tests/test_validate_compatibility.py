@@ -887,7 +887,11 @@ def test_main_preserves_duplicate_ha_python_matrix_rows(
         return True, ha_ver
 
     monkeypatch.setattr(validate_compatibility, "_test_matrix", lambda: matrix)
-    monkeypatch.setattr(validate_compatibility.shutil, "which", lambda _cmd: "/usr/bin/uv")
+    monkeypatch.setattr(
+        validate_compatibility,
+        "resolve_global_uv_path",
+        lambda: "/usr/bin/uv",
+    )
     monkeypatch.setattr(validate_compatibility.sys, "argv", ["validate_compatibility.py"])
     monkeypatch.setattr(validate_compatibility, "_run_tests_for_version", fake_run_tests)
 
@@ -930,9 +934,21 @@ def test_verify_pair_requires_uv_before_inspection(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Reject pair verification before invoking a uv-backed metadata probe."""
+    """Reject pair verification before invoking a global-uv-backed metadata probe."""
     calls: list[tuple[object, ...]] = []
-    monkeypatch.setattr(validate_compatibility.shutil, "which", lambda _cmd: None)
+
+    def missing_global_uv() -> str:
+        raise FileNotFoundError(
+            2,
+            "global uv executable not found outside the active virtual environment",
+            "global uv executable",
+        )
+
+    monkeypatch.setattr(
+        validate_compatibility,
+        "resolve_global_uv_path",
+        missing_global_uv,
+    )
     monkeypatch.setattr(
         validate_compatibility,
         "_verify_harness_pair",
@@ -957,7 +973,7 @@ def test_verify_pair_requires_uv_before_inspection(
 
     assert raised.value.code == 1
     assert not calls
-    assert "VALIDATION_ERROR: 'uv' is not installed." in capsys.readouterr().out
+    assert "VALIDATION_ERROR: 'global uv executable' not found." in capsys.readouterr().out
 
 
 def test_parse_requirements_dependency_version_reads_home_assistant_intents() -> None:

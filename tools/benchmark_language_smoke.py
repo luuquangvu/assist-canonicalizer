@@ -49,6 +49,7 @@ class LanguageSmokeCommand:
     text: str
     target_entity_id: str
     target_domain: str
+    expected_slots: tuple[tuple[str, str], ...]
 
 
 def build_language_smoke_commands() -> tuple[LanguageSmokeCommand, ...]:
@@ -58,7 +59,7 @@ def build_language_smoke_commands() -> tuple[LanguageSmokeCommand, ...]:
         for target_entity_id, target_domain, default_name in FIXTURE_TARGETS:
             entity_name = LANGUAGE_ENTITY_NAMES.get(language, default_name)
             try:
-                text = _sample_turn_on_command(language, entity_name, target_domain)
+                text, expected_slots = _sample_turn_on_command(language, entity_name, target_domain)
             except ValueError:
                 continue
             commands.append(
@@ -67,6 +68,7 @@ def build_language_smoke_commands() -> tuple[LanguageSmokeCommand, ...]:
                     text=text,
                     target_entity_id=target_entity_id,
                     target_domain=target_domain,
+                    expected_slots=expected_slots,
                 )
             )
             break
@@ -119,12 +121,22 @@ def _fixture_sentence_sample(
 ) -> tuple[str, frozenset[str], str] | None:
     """Return the preferred fixture slot and sampled sentence."""
     try:
-        fixture_slots = frozenset(sentence.list_names(expansion_rules)).intersection(
-            _PREFERRED_FIXTURE_SLOTS
+        list_references = tuple(sentence.expression.list_references(expansion_rules))
+        fixture_references = tuple(
+            list_reference
+            for list_reference in list_references
+            if list_reference.slot_name in _PREFERRED_FIXTURE_SLOTS
         )
-        if not fixture_slots:
+        if any(
+            list_reference.list_name != list_reference.slot_name
+            for list_reference in fixture_references
+        ):
             return None
-        preferred_slot = next(slot for slot in _PREFERRED_FIXTURE_SLOTS if slot in fixture_slots)
+        referenced_fixture_slots = frozenset(
+            list_reference.slot_name for list_reference in fixture_references
+        )
+        if not referenced_fixture_slots:
+            return None
         samples = sample_sentence(
             sentence,
             slot_lists,
@@ -132,16 +144,31 @@ def _fixture_sentence_sample(
             language=language,
             skip_optionals=True,
         )
-        fixture_samples = [
-            (sample_index, sample.strip())
-            for sample_index, sample in enumerate(islice(samples, MAX_SAMPLES_PER_SENTENCE))
-            if fixture_values[preferred_slot] in sample
-        ]
+        fixture_samples = []
+        for sample_index, raw_sample in enumerate(islice(samples, MAX_SAMPLES_PER_SENTENCE)):
+            sample = raw_sample.strip()
+            unmatched_sample = sample
+            sampled_fixture_slots: set[str] = set()
+            for slot in sorted(
+                referenced_fixture_slots,
+                key=lambda referenced_slot: len(fixture_values[referenced_slot]),
+                reverse=True,
+            ):
+                fixture_value = fixture_values[slot]
+                if fixture_value in unmatched_sample:
+                    sampled_fixture_slots.add(slot)
+                    unmatched_sample = unmatched_sample.replace(fixture_value, "", 1)
+            if sampled_fixture_slots:
+                fixture_slots = frozenset(sampled_fixture_slots)
+                preferred_slot = next(
+                    slot for slot in _PREFERRED_FIXTURE_SLOTS if slot in fixture_slots
+                )
+                fixture_samples.append((sample_index, sample, preferred_slot, fixture_slots))
     except (MissingListError, MissingRuleError, ValueError):
         return None
     if not fixture_samples:
         return None
-    _, sample = min(
+    _, sample, preferred_slot, fixture_slots = min(
         fixture_samples,
         key=lambda indexed_value: (
             indexed_value[1].count(FIXTURE_AREA_NAME) + indexed_value[1].count(FIXTURE_FLOOR_NAME),
@@ -158,11 +185,21 @@ def _turn_on_sample_candidates(
     fixture_values: Mapping[str, str],
     target_domain: str,
     language: str,
-) -> list[tuple[int, int, int, tuple[int, int], str]]:
+) -> list[tuple[int, int, tuple[int, int], str, tuple[tuple[str, str], ...]]]:
     """Return ranked fixture-bound HassTurnOn sentence samples."""
     candidates = []
     for data_index, intent_data in enumerate(intent.data):
         if not _intent_data_supports_domain(intent_data, target_domain):
+            continue
+        fixed_fixture_slots = {
+            slot: intent_data.slots[slot]
+            for slot in _PREFERRED_FIXTURE_SLOTS
+            if slot in intent_data.slots
+        }
+        if any(
+            not isinstance(value, str) or value != fixture_values[slot]
+            for slot, value in fixed_fixture_slots.items()
+        ):
             continue
         expansion_rules = {
             **intents.expansion_rules,
@@ -180,19 +217,26 @@ def _turn_on_sample_candidates(
             if sampled is None:
                 continue
             preferred_slot, fixture_slots, sample = sampled
+            expected_slots = tuple(
+                (slot, fixture_values[slot])
+                for slot in _PREFERRED_FIXTURE_SLOTS
+                if slot in fixture_slots or slot in fixed_fixture_slots
+            )
             candidates.append(
                 (
                     _PREFERRED_FIXTURE_SLOTS.index(preferred_slot),
-                    sample.count(FIXTURE_AREA_NAME) + sample.count(FIXTURE_FLOOR_NAME),
-                    len(fixture_slots),
+                    len(expected_slots),
                     (data_index, sentence_index),
                     sample,
+                    expected_slots,
                 )
             )
     return candidates
 
 
-def _sample_turn_on_command(language: str, entity_name: str, target_domain: str) -> str:
+def _sample_turn_on_command(
+    language: str, entity_name: str, target_domain: str
+) -> tuple[str, tuple[tuple[str, str], ...]]:
     """Sample a fixture-bound command without evaluating it in-process."""
     if sample_sentence is None:
         raise RuntimeError("sample_sentence is not available in the installed version of hassil")
@@ -221,5 +265,6 @@ def _sample_turn_on_command(language: str, entity_name: str, target_domain: str)
         target_domain,
         language,
     ):
-        return min(candidates)[4]
+        selected = min(candidates)
+        return selected[3], selected[4]
     raise ValueError(f"Unable to generate a {target_domain} HassTurnOn command for {language!r}")

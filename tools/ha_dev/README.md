@@ -26,7 +26,7 @@ f63468a726b289243ca9ff6b0e387f8e470bc5c0c5239b051e2846cd93cbf9e8
 
 Tracked benchmark inputs include:
 
-- `configuration.yaml`: Configures locale and unit settings, enabled components, the loopback HTTP endpoint, and fixture activation.
+- `configuration.yaml`: Configures locale and unit settings, enabled components, and fixture activation. The runner configures the loopback HTTP endpoint through Home Assistant's managed HTTP API.
 - `custom_components/assist_canonicalizer_benchmark/fixture.json`: Defines floors, areas, entity identities, names, aliases, and exposure rules.
 - `custom_components/assist_canonicalizer_benchmark/__init__.py`: Provisions and verifies the fixture, prepares stateful cases, records traces, and publishes readiness metadata.
 - `tests/real_world/*.json`: Contains the maintained multilingual corpus, including canonical controls and curated intent, slot, and category labels.
@@ -38,10 +38,11 @@ The benchmark runner (`tools/benchmark.py`) manages the following lifecycle:
 1. **Input and dependency verification**: Loads and fingerprints the tracked inputs, then verifies that installed packages satisfy the Home Assistant component manifests.
 2. **Temporary configuration**: Confirms that the loopback port is available, creates a temporary directory under `scratch/`, and links the tracked configuration, active Assist Canonicalizer source, and fixture component.
 3. **Startup**: Validates the generated Home Assistant configuration and starts the Home Assistant process.
-4. **Onboarding**: Creates an ephemeral owner, waits for the initial fixture, and adds the shopping list integration.
-5. **Fixture and integration setup**: Reapplies and verifies the fixture, adds Assist Canonicalizer, and prepares the required language indexes. Verification checks the fixture ID, entity counts, domain distribution, and fingerprint.
-6. **Execution and evaluation**: Runs each query first through the built-in Assist pipeline and then through Assist Canonicalizer, resetting prerequisite state before each side of the comparison. Responses, traces, resolved entity IDs, and slots are evaluated against the live canonical control.
-7. **Cleanup**: Stops Home Assistant and removes the temporary configuration, generated state, database, and ephemeral credentials.
+4. **Onboarding and HTTP configuration**: Creates an ephemeral owner, waits for startup completion, configures `127.0.0.1:8123` through Home Assistant's managed HTTP API, handles the required restart, and promotes the verified pending configuration.
+5. **Fixture initialization**: Verifies the fixture after the HTTP restart and adds the shopping list integration.
+6. **Fixture and integration setup**: Reapplies and verifies the fixture, adds Assist Canonicalizer, and prepares the required language indexes. Verification checks the fixture ID, entity counts, domain distribution, and fingerprint.
+7. **Execution and evaluation**: Runs each query first through the built-in Assist pipeline and then through Assist Canonicalizer, resetting prerequisite state before each side of the comparison. Responses, traces, resolved entity IDs, and slots are evaluated against the live canonical control.
+8. **Cleanup**: Stops Home Assistant and removes the temporary configuration, generated state, database, and ephemeral credentials.
 
 > [!NOTE]
 > Home Assistant state is not reused between runs. The offline evaluator (`tools/benchmark_offline.py`) remains useful for diagnostics and focused profiling, but its results are not managed-live accuracy evidence.
