@@ -21,10 +21,6 @@ demo:
 
 assist_canonicalizer_benchmark:
 
-http:
-  server_host: 127.0.0.1
-  server_port: 8123
-
 logger:
   default: info
   logs:

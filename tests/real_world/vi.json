@@ -528,12 +528,14 @@
       }
     },
     {
-      "query": "là cái gì độ",
+      "query": "nhiệt độ phòng khách là bao nhiêu",
       "language": "vi",
       "expected_intent": "HassClimateGetTemperature",
-      "expected_canonical": "là cái gì độ",
+      "expected_canonical": "nhiệt độ phòng khách là bao nhiêu",
       "category": "intent_coverage",
-      "expected_slots": {}
+      "expected_slots": {
+        "area": "phòng khách"
+      }
     },
     {
       "query": "đèn phòng khách là gì",
@@ -573,22 +575,24 @@
       "expected_slots": {}
     },
     {
-      "query": "đặt nhiệt thành 0",
+      "query": "đặt nhiệt độ phòng khách thành 0",
       "language": "vi",
       "expected_intent": "HassClimateSetTemperature",
-      "expected_canonical": "đặt nhiệt thành 0",
+      "expected_canonical": "đặt nhiệt độ phòng khách thành 0",
       "category": "intent_coverage",
       "expected_slots": {
+        "area": "phòng khách",
         "temperature": "0.0"
       }
     },
     {
-      "query": "đặt nhiệt độ thành 0 độ",
+      "query": "đặt nhiệt độ phòng khách thành 0 độ",
       "language": "vi",
       "expected_intent": "HassClimateSetTemperature",
-      "expected_canonical": "đặt nhiệt thành 0độ",
+      "expected_canonical": "đặt nhiệt độ phòng khách thành 0 độ",
       "category": "intent_coverage",
       "expected_slots": {
+        "area": "phòng khách",
         "temperature": "0.0"
       }
     },
@@ -655,10 +659,10 @@
       }
     },
     {
-      "query": "đặt sữa vào",
+      "query": "thêm sữa lên danh sách của tôi",
       "language": "vi",
       "expected_intent": "HassShoppingListAddItem",
-      "expected_canonical": "đặt sữa vào",
+      "expected_canonical": "thêm sữa lên danh sách của tôi",
       "category": "intent_coverage",
       "expected_slots": {
         "item": "sữa"
@@ -707,7 +711,7 @@
       }
     },
     {
-      "query": "ngắt quạt phòng tắm",
+      "query": "dập tắt quạt phòng tắm",
       "language": "vi",
       "expected_intent": "HassTurnOff",
       "expected_canonical": "tắt quạt phòng tắm",
@@ -738,17 +742,17 @@
       }
     },
     {
-      "query": "cho robot hút bụi quay về sạc",
+      "query": "đưa robot hút bụi về trạm sạc",
       "language": "vi",
       "expected_intent": "HassVacuumReturnToBase",
-      "expected_canonical": "robot hút bụi về sạc",
+      "expected_canonical": "robot hút bụi trở về trạm sạc",
       "category": "synonym_paraphrase",
       "expected_slots": {
         "name": "robot hút bụi"
       }
     },
     {
-      "query": "cho máy hút bụi dọn dẹp",
+      "query": "yêu cầu máy hút bụi dọn dẹp",
       "language": "vi",
       "expected_intent": "HassVacuumStart",
       "expected_canonical": "máy hút bụi dọn dẹp",
@@ -919,10 +923,10 @@
       }
     },
     {
-      "query": "cho robot hút bụi về dock",
+      "query": "triệu hồi robot hút bụi về dock",
       "language": "vi",
       "expected_intent": "HassVacuumReturnToBase",
-      "expected_canonical": "robot hút bụi về sạc",
+      "expected_canonical": "robot hút bụi về dock",
       "category": "semantic_challenge",
       "expected_slots": {
         "name": "robot hút bụi"
@@ -940,10 +944,10 @@
       }
     },
     {
-      "query": "ngắt bình nóng lạnh",
+      "query": "ngắt điện bình nóng lạnh",
       "language": "vi",
       "expected_intent": "HassTurnOff",
-      "expected_canonical": "tắt bình nóng lạnh",
+      "expected_canonical": "ngắt bình nóng lạnh",
       "category": "semantic_challenge",
       "expected_slots": {
         "name": "bình nóng lạnh"
