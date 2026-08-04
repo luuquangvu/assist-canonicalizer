@@ -10,8 +10,9 @@ from dataclasses import dataclass, field
 from functools import lru_cache, partial
 from heapq import nlargest, nsmallest
 from math import isclose
-from typing import Any, NamedTuple, overload
+from typing import NamedTuple, TypedDict, overload
 
+from homeassistant.util.json import JsonObjectType
 from rapidfuzz import fuzz
 
 from .bm25 import BM25Index
@@ -198,6 +199,33 @@ class RankedCandidate:
     scores: ScoreBreakdown
 
 
+class CandidateEvidence(TypedDict):
+    """Serializable evidence for one ranked candidate."""
+
+    intent_name: str
+    source: str
+    text_sha256: str
+    score: float
+
+
+class ConfidenceGatePayload(TypedDict):
+    """Serializable confidence-gate evidence with stable field types."""
+
+    configured_min_confidence: float
+    configured_base_margin: float
+    top_candidate: CandidateEvidence | None
+    meaningful_competitor: CandidateEvidence | None
+    observed_margin: float | None
+    required_margin: float
+    margin_policy: str
+    relaxation_used: bool
+    opposing_action_competition: bool
+    action_incompatible_competition: bool
+    target_incompatible_competition: bool
+    accepted: bool
+    reason: str | None
+
+
 @dataclass(frozen=True, slots=True)
 class ConfidenceGateDecision:
     """Complete, serializable evidence for one confidence-gate decision."""
@@ -226,12 +254,12 @@ class ConfidenceGateDecision:
         yield self.accepted_candidate
         yield self.rejection_reason
 
-    def as_dict(self) -> dict[str, Any]:
+    def as_dict(self) -> ConfidenceGatePayload:
         """Return bounded evidence without delegated or registry text."""
 
         def candidate_evidence(
             ranked_candidate: RankedCandidate | None,
-        ) -> dict[str, Any] | None:
+        ) -> CandidateEvidence | None:
             if ranked_candidate is None:
                 return None
             candidate = ranked_candidate.candidate
@@ -256,6 +284,47 @@ class ConfidenceGateDecision:
             "target_incompatible_competition": self.target_incompatible_competition,
             "accepted": self.accepted,
             "reason": self.rejection_reason.value if self.rejection_reason else None,
+        }
+
+    def as_json_dict(self) -> JsonObjectType:
+        """Return confidence evidence as Home Assistant's recursive JSON type."""
+        d = self.as_dict()
+        top = d["top_candidate"]
+        comp = d["meaningful_competitor"]
+        top_dict: JsonObjectType | None = (
+            {
+                "intent_name": top["intent_name"],
+                "source": top["source"],
+                "text_sha256": top["text_sha256"],
+                "score": top["score"],
+            }
+            if top is not None
+            else None
+        )
+        comp_dict: JsonObjectType | None = (
+            {
+                "intent_name": comp["intent_name"],
+                "source": comp["source"],
+                "text_sha256": comp["text_sha256"],
+                "score": comp["score"],
+            }
+            if comp is not None
+            else None
+        )
+        return {
+            "configured_min_confidence": d["configured_min_confidence"],
+            "configured_base_margin": d["configured_base_margin"],
+            "top_candidate": top_dict,
+            "meaningful_competitor": comp_dict,
+            "observed_margin": d["observed_margin"],
+            "required_margin": d["required_margin"],
+            "margin_policy": d["margin_policy"],
+            "relaxation_used": d["relaxation_used"],
+            "opposing_action_competition": d["opposing_action_competition"],
+            "action_incompatible_competition": d["action_incompatible_competition"],
+            "target_incompatible_competition": d["target_incompatible_competition"],
+            "accepted": d["accepted"],
+            "reason": d["reason"],
         }
 
 
@@ -1078,8 +1147,8 @@ def _exact_lookup_ranked(
     query: str,
     query_normalized: str,
     max_candidates: int,
-    exact_normalized_lookup: dict[str, list[Candidate]] | None,
-    exact_no_diacritics_lookup: dict[str, list[Candidate]] | None,
+    exact_normalized_lookup: Mapping[str, Sequence[Candidate]] | None,
+    exact_no_diacritics_lookup: Mapping[str, Sequence[Candidate]] | None,
     language: str | None,
 ) -> tuple[RankedCandidate, ...] | None:
     """Return exact-match ranked candidates or None when fuzzy ranking is required."""
@@ -1533,7 +1602,7 @@ def _context_key_aliases(slot_name: str) -> frozenset[str]:
 
 
 def _slot_value_has_query_anchor(
-    slot_value: Any,
+    slot_value: object,
     query_tokens: tuple[str, ...],
     short_fuzzy_query_tokens: frozenset[str] = frozenset(),
     anchor_memo: dict[str, bool] | None = None,
@@ -1609,7 +1678,7 @@ def _explicit_context_keys_from_query(
 
 
 def _context_slot_adjustment(
-    slots: Mapping[str, Any],
+    slots: Mapping[str, object],
     context_slot_names: frozenset[str],
     normalized_context: NormalizedIntentContext,
     explicit_context_keys: frozenset[str],
@@ -1687,7 +1756,7 @@ def _has_numeric_query_token(query_tokens: frozenset[str]) -> bool:
     return any(any(char.isdigit() for char in token) for token in query_tokens)
 
 
-def _is_numeric_slot_value(value: Any) -> bool:
+def _is_numeric_slot_value(value: object) -> bool:
     """Return whether a slot value is numeric-like."""
     if isinstance(value, bool):
         return False
@@ -1706,7 +1775,7 @@ def _is_numeric_slot_value(value: Any) -> bool:
 
 
 def _has_unanchored_numeric_slot(
-    slots: Mapping[str, Any],
+    slots: Mapping[str, object],
     static_slots: frozenset[str],
     *,
     query_has_number: bool,
@@ -1739,7 +1808,7 @@ def _query_numeric_values(query_tokens: frozenset[str]) -> set[float]:
 
 def _has_numeric_slot_mismatch(
     candidate: Candidate,
-    slots_dict: Mapping[str, Any],
+    slots_dict: Mapping[str, object],
     query_numbers: set[float],
     static_slots: frozenset[str],
 ) -> bool:
@@ -1794,7 +1863,7 @@ def _has_unconsumed_query_number(
 
 def _has_unanchored_semantic_slot(
     candidate: Candidate,
-    slots: Mapping[str, Any],
+    slots: Mapping[str, object],
     static_slots: frozenset[str],
     query_tokens: tuple[str, ...],
     short_fuzzy_query_tokens: frozenset[str] = frozenset(),
@@ -1836,7 +1905,7 @@ def _has_unanchored_semantic_slot(
 
 
 def _has_unanchored_entity_slot(
-    slots: Mapping[str, Any],
+    slots: Mapping[str, object],
     static_slots: frozenset[str],
     query_tokens_tuple: tuple[str, ...],
     short_fuzzy_query_tokens: frozenset[str] = frozenset(),
@@ -1900,7 +1969,7 @@ def _has_entity_only_uncovered_query_tokens(
     query_tokens: frozenset[str],
     candidate_tokens: frozenset[str],
     candidate: Candidate,
-    slots: Mapping[str, Any],
+    slots: Mapping[str, object],
     static_slots: frozenset[str],
 ) -> bool:
     """Return whether an action-implicit target candidate leaves query words unexplained.
@@ -1922,7 +1991,7 @@ def _has_entity_only_uncovered_query_tokens(
 def _has_static_entity_uncovered_query_tokens(
     query_tokens_tuple: tuple[str, ...],
     candidate_tokens: frozenset[str],
-    slots: Mapping[str, Any],
+    slots: Mapping[str, object],
     static_slots: frozenset[str],
     slot_fuzzy_memo: dict[str, tuple[set[str], set[str]]] | None = None,
 ) -> bool:
@@ -1956,7 +2025,7 @@ def _has_static_entity_uncovered_query_tokens(
 def _has_static_slot_query_conflict(
     query_slot_tokens: frozenset[str],
     candidate_tokens: frozenset[str],
-    slots: Mapping[str, Any],
+    slots: Mapping[str, object],
     static_slots: frozenset[str],
     slot_fuzzy_memo: dict[str, tuple[set[str], set[str]]] | None = None,
 ) -> bool:
@@ -2301,7 +2370,7 @@ def _apply_candidate_slot_penalties(
 
 def _apply_numeric_slot_penalties(
     candidate: Candidate,
-    slots: Mapping[str, Any],
+    slots: Mapping[str, object],
     static_slots: frozenset[str],
     context: _ScoringContext,
     score: float,
@@ -2325,7 +2394,7 @@ def _apply_numeric_slot_penalties(
 
 def _apply_slot_anchor_penalties(
     candidate: Candidate,
-    slots: Mapping[str, Any],
+    slots: Mapping[str, object],
     static_slots: frozenset[str],
     context: _ScoringContext,
     score: float,
@@ -2354,7 +2423,7 @@ def _apply_slot_anchor_penalties(
 def _apply_slot_coverage_penalties(
     candidate: Candidate,
     candidate_tokens: frozenset[str],
-    slots: Mapping[str, Any],
+    slots: Mapping[str, object],
     static_slots: frozenset[str],
     context: _ScoringContext,
     score: float,
@@ -3127,7 +3196,7 @@ def _build_rank_scoring_context(
     positional_literal_tokens: frozenset[str] | None,
     candidate_slot_tokens: tuple[frozenset[str], ...] | None,
     reference_slot_token_index: SlotTokenIndex | None,
-    intent_context: Mapping[str, Any] | None,
+    intent_context: Mapping[str, object] | None,
     min_confidence: float,
     rehydrated_cache: dict[int, tuple[str, dict[str, str]]],
 ) -> _ScoringContext:
@@ -3213,7 +3282,7 @@ def rank_candidates(
     slot_token_index: SlotTokenIndex | None = None,
     reference_slot_token_index: SlotTokenIndex | None = None,
     slot_preferences: set[tuple[str, str]] | None = None,
-    intent_context: Mapping[str, Any] | None = None,
+    intent_context: Mapping[str, object] | None = None,
     min_confidence: float = DEFAULT_MIN_CONFIDENCE,
 ) -> tuple[RankedCandidate, ...]:
     """Rank candidates for a query using lexical scoring.

@@ -6,16 +6,18 @@ import asyncio
 import functools
 import logging
 import time
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Iterable, Mapping, Sequence
 from functools import partial
-from typing import Any
+from typing import TypedDict
 
 import voluptuous as vol
 from homeassistant.components.conversation.agent_manager import async_get_agent
 from homeassistant.components.conversation.const import HOME_ASSISTANT_AGENT
-from homeassistant.core import ServiceCall, SupportsResponse
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.util.json import JsonObjectType, JsonValueType
 
 from .builtin_intents import language_variant_for
 from .candidate import Candidate
@@ -46,7 +48,7 @@ from .const import (
 )
 from .indexer import CanonicalIndex
 from .normalization import normalize_text
-from .ranking import RankedCandidate, evaluate_confidence_gates
+from .ranking import ConfidenceGatePayload, RankedCandidate, evaluate_confidence_gates
 from .rehydration import get_wildcard_rehydration
 from .runtime import CanonicalizerRuntime
 from .utils import elapsed_ms, normalize_language, resolve_entry_thresholds
@@ -57,7 +59,123 @@ ATTR_REBUILD = "rebuild"
 _CANDIDATE_SAMPLE_LIMIT = 50
 
 
-def validate_supported_language(value: Any) -> str:
+class ScorePayload(TypedDict):
+    """Serialized lexical scores for one ranked candidate."""
+
+    rapidfuzz: float
+    char_ngram: float
+    bm25: float
+    intent: float
+    penalty: float
+    final: float
+
+
+class RankedCandidatePayload(TypedDict):
+    """Serialized ranked candidate returned by the test-match service."""
+
+    text: str
+    intent_name: str
+    source: str
+    normalized_text: str
+    slots: JsonObjectType
+    wildcard_replacements: dict[str, str]
+    scores: ScorePayload
+
+
+class EvaluationPayload(TypedDict):
+    """Scope metadata for a lexical-only service evaluation."""
+
+    scope: str
+    candidate_metadata_authoritative: bool
+    live_recognition: str
+    production_decision_path: str
+
+
+class TestMatchPayload(TypedDict):
+    """Response from the lexical test-match service."""
+
+    language: str
+    normalized_text: str
+    candidate_count: int
+    dynamic_candidate_count: int
+    evaluation: EvaluationPayload
+    confidence_gate: ConfidenceGatePayload
+    accepted: bool
+    selected_candidate: RankedCandidatePayload | None
+    top_candidates: list[RankedCandidatePayload]
+
+
+class RebuildPayload(TypedDict):
+    """Response from the index-rebuild service."""
+
+    language: str
+    candidate_count: int
+    rebuild_latency_ms: float
+
+
+class ClearIndexPayload(TypedDict):
+    """Response from the index-clear service."""
+
+    language: str | None
+    scope: str
+    cleared_cached_languages: list[str]
+    cleared_candidate_count: int
+    remaining_candidate_count: int
+    remaining_cached_languages: list[str]
+
+
+class CandidateMetadataPayload(TypedDict):
+    """Serialized candidate metadata without scores."""
+
+    text: str
+    intent_name: str
+    source: str
+    normalized_text: str
+    slots: JsonObjectType
+    wildcard_slots: list[str]
+    sentence_template: str | None
+
+
+class CandidateSamplePayload(TypedDict):
+    """Bounded candidate sample in a dump response."""
+
+    truncated: bool
+    candidates: list[CandidateMetadataPayload]
+
+
+class DumpCandidatesPayload(TypedDict):
+    """Response from the candidate-dump service."""
+
+    language: str
+    candidate_count: int
+    index_status: str
+    rebuild_latency_ms: float | None
+    intent_source_counts: dict[str, int]
+    candidate_source_counts: dict[str, int]
+    intent_counts: dict[str, int]
+    registry_slot_counts: dict[str, int]
+    candidate_sample: CandidateSamplePayload
+
+
+def _json_int_mapping(values: Mapping[str, int]) -> JsonObjectType:
+    """Return integer metrics in a JSON-object-compatible mapping."""
+    result: JsonObjectType = dict(values.items())
+    return result
+
+
+def _json_object_list(values: Sequence[JsonObjectType]) -> list[JsonValueType]:
+    """Return JSON objects in a recursively typed JSON list."""
+    return [*values]
+
+
+def _json_string_list(values: Iterable[str]) -> list[JsonValueType]:
+    """Return strings in a recursively typed JSON list."""
+    result: list[JsonValueType] = []
+    result.extend(values)
+    return result
+
+
+def validate_supported_language(value: object) -> str:
     """Validate that the language is supported by Home Assistant.
 
     Resolve the language through the shared Home Assistant language-pack matcher.
@@ -99,40 +217,82 @@ SET_FALLBACK_AGENT_SCHEMA = vol.Schema(
 )
 
 
-def async_setup_services(hass: Any) -> None:
+def _json_value(value: object) -> tuple[bool, JsonValueType]:
+    """Convert an arbitrary value into a supported JsonValueType."""
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return True, value
+    if isinstance(value, Mapping):
+        return True, _json_object_dict(value)
+    if isinstance(value, (list, tuple)):
+        items: list[JsonValueType] = []
+        for item in value:
+            valid, converted_item = _json_value(item)
+            if valid:
+                items.append(converted_item)
+        return True, items
+    return False, None
+
+
+def _json_object_dict[K](values: Mapping[K, object]) -> JsonObjectType:
+    """Return a dictionary formatted for Home Assistant service responses."""
+    result: JsonObjectType = {}
+    for key, value in values.items():
+        if not isinstance(key, str):
+            continue
+        valid, converted = _json_value(value)
+        if valid:
+            result[key] = converted
+    return result
+
+
+def _registered_service_handler[R: Mapping[str, object]](
+    hass: HomeAssistant,
+    handler: Callable[[HomeAssistant, ServiceCall], Coroutine[object, object, R]],
+) -> Callable[[ServiceCall], Coroutine[object, object, JsonObjectType]]:
+    """Adapt a precisely typed response to Home Assistant's service boundary."""
+
+    async def registered(call: ServiceCall) -> JsonObjectType:
+        """Execute the service handler and return service response payload."""
+        response = await handler(hass, call)
+        return _json_object_dict(response)
+
+    return registered
+
+
+def async_setup_services(hass: HomeAssistant) -> None:
     """Register Assist Canonicalizer services."""
     hass.services.async_register(
         DOMAIN,
         SERVICE_SET_FALLBACK_AGENT,
-        partial(_handle_set_fallback_agent, hass),
+        _registered_service_handler(hass, _handle_set_fallback_agent),
         schema=SET_FALLBACK_AGENT_SCHEMA,
         supports_response=SupportsResponse.OPTIONAL,
     )
     hass.services.async_register(
         DOMAIN,
         SERVICE_TEST_MATCH,
-        partial(_handle_test_match, hass),
+        _registered_service_handler(hass, _handle_test_match),
         schema=TEST_MATCH_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN,
         SERVICE_REBUILD_INDEX,
-        partial(_handle_rebuild_index, hass),
+        _registered_service_handler(hass, _handle_rebuild_index),
         schema=REBUILD_INDEX_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN,
         SERVICE_CLEAR_INDEX,
-        partial(_handle_clear_index, hass),
+        _registered_service_handler(hass, _handle_clear_index),
         schema=CLEAR_INDEX_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN,
         SERVICE_DIAGNOSTICS,
-        partial(_handle_diagnostics, hass),
+        _registered_service_handler(hass, _handle_diagnostics),
         schema=DIAGNOSTICS_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
@@ -140,13 +300,13 @@ def async_setup_services(hass: Any) -> None:
     hass.services.async_register(
         DOMAIN,
         SERVICE_DUMP_CANDIDATES,
-        partial(_handle_dump_candidates, hass),
+        _registered_service_handler(hass, _handle_dump_candidates),
         schema=DUMP_CANDIDATES_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
 
 
-def async_unload_services(hass: Any) -> None:
+def async_unload_services(hass: HomeAssistant) -> None:
     """Remove Assist Canonicalizer services."""
     hass.services.async_remove(DOMAIN, SERVICE_SET_FALLBACK_AGENT)
     hass.services.async_remove(DOMAIN, SERVICE_TEST_MATCH)
@@ -156,21 +316,24 @@ def async_unload_services(hass: Any) -> None:
     hass.services.async_remove(DOMAIN, SERVICE_DUMP_CANDIDATES)
 
 
-def _wrap_service_errors(
+def _wrap_service_errors[R](
     action_name: str,
-) -> Callable[[Callable[..., Coroutine[Any, Any, Any]]], Callable[..., Coroutine[Any, Any, Any]]]:
+) -> Callable[
+    [Callable[[HomeAssistant, ServiceCall], Coroutine[object, object, R]]],
+    Callable[[HomeAssistant, ServiceCall], Coroutine[object, object, R]],
+]:
     """Wrap service exceptions into a sanitized user-facing HomeAssistantError."""
 
     def decorator(
-        func: Callable[..., Coroutine[Any, Any, Any]],
-    ) -> Callable[..., Coroutine[Any, Any, Any]]:
+        func: Callable[[HomeAssistant, ServiceCall], Coroutine[object, object, R]],
+    ) -> Callable[[HomeAssistant, ServiceCall], Coroutine[object, object, R]]:
         """Decorate the service handler."""
 
         @functools.wraps(func)
-        async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        async def wrapper(hass: HomeAssistant, call: ServiceCall) -> R:
             """Wrap execution and catch specific error types."""
             try:
-                return await func(*args, **kwargs)
+                return await func(hass, call)
             except HomeAssistantError:
                 raise
             except asyncio.CancelledError:
@@ -190,7 +353,7 @@ def _wrap_service_errors(
 
 
 @_wrap_service_errors("Fallback agent update")
-async def _handle_set_fallback_agent(hass: Any, call: ServiceCall) -> dict[str, Any]:
+async def _handle_set_fallback_agent(hass: HomeAssistant, call: ServiceCall) -> JsonObjectType:
     """Persist a new fallback conversation agent without reloading the entry."""
     _runtime, entry = _runtime_entry_from_hass(hass)
     if entry is None:
@@ -221,7 +384,7 @@ async def _handle_set_fallback_agent(hass: Any, call: ServiceCall) -> dict[str, 
 
 
 @_wrap_service_errors("Matching test")
-async def _handle_test_match(hass: Any, call: ServiceCall) -> dict[str, Any]:
+async def _handle_test_match(hass: HomeAssistant, call: ServiceCall) -> TestMatchPayload:
     """Return ranked candidates for a text input with lexical scoring and custom thresholds."""
     runtime, entry = _runtime_entry_from_hass(hass)
     language = _service_language(hass, call)
@@ -272,7 +435,7 @@ async def _handle_test_match(hass: Any, call: ServiceCall) -> dict[str, Any]:
 
 
 @_wrap_service_errors("Index rebuild")
-async def _handle_rebuild_index(hass: Any, call: ServiceCall) -> dict[str, Any]:
+async def _handle_rebuild_index(hass: HomeAssistant, call: ServiceCall) -> RebuildPayload:
     """Rebuild one language index from automatic candidate sources."""
     runtime = _runtime_from_hass(hass)
     language = _service_language(hass, call)
@@ -288,7 +451,7 @@ async def _handle_rebuild_index(hass: Any, call: ServiceCall) -> dict[str, Any]:
 
 
 @_wrap_service_errors("Clear index")
-async def _handle_clear_index(hass: Any, call: ServiceCall) -> dict[str, Any]:
+async def _handle_clear_index(hass: HomeAssistant, call: ServiceCall) -> ClearIndexPayload:
     """Clear one language index or all indexes."""
     runtime = _runtime_from_hass(hass)
     requested_language = call.data.get(ATTR_LANGUAGE)
@@ -307,42 +470,44 @@ async def _handle_clear_index(hass: Any, call: ServiceCall) -> dict[str, Any]:
 
 
 @_wrap_service_errors("Diagnostics")
-async def _handle_diagnostics(hass: Any, call: ServiceCall) -> dict[str, Any]:
+async def _handle_diagnostics(hass: HomeAssistant, call: ServiceCall) -> JsonObjectType:
     """Return runtime diagnostics."""
     runtime = _runtime_from_hass(hass)
     diagnostics = runtime.diagnostics.as_dict()
     diagnostics.pop(ATTR_CANDIDATE_COUNT, None)
     diagnostics.pop("index_version", None)
-    cached_indexes = {
-        language: {
+    cached_indexes: JsonObjectType = {}
+    for language, index in sorted(runtime.indexes.items()):
+        index_summary: JsonObjectType = {
             ATTR_CANDIDATE_COUNT: index.candidate_count,
             "version": index.version,
         }
-        for language, index in sorted(runtime.indexes.items())
+        cached_indexes[language] = index_summary
+    dynamic_generation: JsonObjectType = {
+        "enabled": True,
+        "max_slot_values_per_slot": DEFAULT_MAX_DYNAMIC_SLOT_VALUES,
+        "max_candidates_per_query": DEFAULT_MAX_DYNAMIC_CANDIDATES,
+        "max_registry_values_nominated_per_slot": DEFAULT_MAX_REGISTRY_VALUES_NOMINATED,
+        "max_registry_values_scored_per_query": DEFAULT_MAX_REGISTRY_VALUES_SCORED_PER_QUERY,
     }
+    pending_languages: list[JsonValueType] = [*sorted(runtime.rebuild_tasks)]
     diagnostics.update(
         {
             "total_cached_candidate_count": runtime.total_candidate_count(),
             "cached_indexes": cached_indexes,
-            "pending_rebuild_languages": sorted(runtime.rebuild_tasks),
-            "registry_slot_counts": _registry_slot_counts(runtime),
-            "dynamic_candidate_generation": {
-                "enabled": True,
-                "max_slot_values_per_slot": DEFAULT_MAX_DYNAMIC_SLOT_VALUES,
-                "max_candidates_per_query": DEFAULT_MAX_DYNAMIC_CANDIDATES,
-                "max_registry_values_nominated_per_slot": (DEFAULT_MAX_REGISTRY_VALUES_NOMINATED),
-                "max_registry_values_scored_per_query": (
-                    DEFAULT_MAX_REGISTRY_VALUES_SCORED_PER_QUERY
-                ),
-            },
-            "subscribed_intent_source_counts": runtime.subscribed_source_counts(),
+            "pending_rebuild_languages": pending_languages,
+            "registry_slot_counts": _json_int_mapping(_registry_slot_counts(runtime)),
+            "dynamic_candidate_generation": dynamic_generation,
+            "subscribed_intent_source_counts": _json_int_mapping(
+                runtime.subscribed_source_counts()
+            ),
         }
     )
     return diagnostics
 
 
 @_wrap_service_errors("Dump candidates")
-async def _handle_dump_candidates(hass: Any, call: ServiceCall) -> dict[str, Any]:
+async def _handle_dump_candidates(hass: HomeAssistant, call: ServiceCall) -> DumpCandidatesPayload:
     """Return candidate pool details for a language."""
     runtime = _runtime_from_hass(hass)
     language = _service_language(hass, call)
@@ -361,6 +526,10 @@ async def _handle_dump_candidates(hass: Any, call: ServiceCall) -> dict[str, Any
 
     intent_source_counts = await hass.async_add_executor_job(runtime.source_counts, language)
     if index is None:
+        empty_sample: CandidateSamplePayload = {
+            "truncated": False,
+            "candidates": [],
+        }
         return {
             ATTR_LANGUAGE: language,
             ATTR_CANDIDATE_COUNT: 0,
@@ -370,10 +539,7 @@ async def _handle_dump_candidates(hass: Any, call: ServiceCall) -> dict[str, Any
             "candidate_source_counts": {},
             "intent_counts": {},
             "registry_slot_counts": _registry_slot_counts(runtime),
-            "candidate_sample": {
-                "truncated": False,
-                "candidates": [],
-            },
+            "candidate_sample": empty_sample,
         }
 
     source_counts, intent_counts = await hass.async_add_executor_job(
@@ -383,6 +549,10 @@ async def _handle_dump_candidates(hass: Any, call: ServiceCall) -> dict[str, Any
         _ranked_candidate_candidate_response(candidate)
         for candidate in index.candidates[:_CANDIDATE_SAMPLE_LIMIT]
     ]
+    candidate_sample: CandidateSamplePayload = {
+        "truncated": index.candidate_count > len(sample_candidates),
+        "candidates": sample_candidates,
+    }
     return {
         ATTR_LANGUAGE: language,
         ATTR_CANDIDATE_COUNT: index.candidate_count,
@@ -392,15 +562,12 @@ async def _handle_dump_candidates(hass: Any, call: ServiceCall) -> dict[str, Any
         "candidate_source_counts": source_counts,
         "intent_counts": dict(sorted(intent_counts.items())),
         "registry_slot_counts": _registry_slot_counts(runtime),
-        "candidate_sample": {
-            "truncated": index.candidate_count > len(sample_candidates),
-            "candidates": sample_candidates,
-        },
+        "candidate_sample": candidate_sample,
     }
 
 
 async def _index_for_language(
-    hass: Any,
+    hass: HomeAssistant,
     runtime: CanonicalizerRuntime,
     language: str,
     *,
@@ -414,7 +581,7 @@ async def _index_for_language(
 
 
 async def _rebuild_index(
-    hass: Any,
+    hass: HomeAssistant,
     runtime: CanonicalizerRuntime,
     language: str,
 ) -> CanonicalIndex | None:
@@ -434,23 +601,26 @@ def _count_candidate_sources_and_intents(
     return source_counts, intent_counts
 
 
-def _runtime_from_hass(hass: Any) -> CanonicalizerRuntime:
+def _runtime_from_hass(hass: HomeAssistant) -> CanonicalizerRuntime:
     """Return the active runtime object."""
     runtime, _entry = _runtime_entry_from_hass(hass)
     return runtime
 
 
-def _runtime_entry_from_hass(hass: Any) -> tuple[CanonicalizerRuntime, Any]:
+def _runtime_entry_from_hass(
+    hass: HomeAssistant,
+) -> tuple[CanonicalizerRuntime, ConfigEntry | None]:
     """Return the active runtime object and its config entry."""
     domain_data = hass.data.get(DOMAIN, {})
     for entry_data in domain_data.values():
         runtime = entry_data.get(DATA_RUNTIME)
         if isinstance(runtime, CanonicalizerRuntime):
-            return runtime, entry_data.get("entry")
+            entry = entry_data.get("entry")
+            return runtime, entry if entry is not None else None
     raise HomeAssistantError("Assist Canonicalizer is not loaded")
 
 
-def _agent_belongs_to_entry(agent: Any, entry_id: str) -> bool:
+def _agent_belongs_to_entry(agent: object, entry_id: str) -> bool:
     """Return whether a conversation agent belongs to the canonicalizer entry."""
     registry_entry = getattr(agent, "registry_entry", None)
     return getattr(agent, "unique_id", None) == f"{entry_id}-conversation" or (
@@ -458,7 +628,7 @@ def _agent_belongs_to_entry(agent: Any, entry_id: str) -> bool:
     )
 
 
-def _configured_fallback_agent_id(entry: Any) -> str:
+def _configured_fallback_agent_id(entry: ConfigEntry) -> str:
     """Return the effective fallback agent configured before a service update."""
     options = getattr(entry, "options", {}) or {}
     data = getattr(entry, "data", {}) or {}
@@ -468,7 +638,7 @@ def _configured_fallback_agent_id(entry: Any) -> str:
     return configured
 
 
-def _service_language(hass: Any, call: ServiceCall) -> str:
+def _service_language(hass: HomeAssistant, call: ServiceCall) -> str:
     """Return the service language, falling back to Home Assistant config."""
     language = call.data.get(ATTR_LANGUAGE) or hass.config.language
     return normalize_language(str(language))
@@ -481,22 +651,23 @@ def _registry_slot_counts(runtime: CanonicalizerRuntime) -> dict[str, int]:
     }
 
 
-def _ranked_candidate_candidate_response(candidate: Candidate) -> dict[str, Any]:
+def _ranked_candidate_candidate_response(candidate: Candidate) -> CandidateMetadataPayload:
     """Return serializable candidate metadata without scores."""
+    wildcard_slots = sorted({wildcard_name for _index, wildcard_name in candidate.wildcard_infos})
     return {
         ATTR_TEXT: candidate.text,
         ATTR_INTENT_NAME: candidate.intent_name,
         ATTR_SOURCE: candidate.source.value,
         ATTR_NORMALIZED_TEXT: candidate.normalized_text,
         "slots": candidate.parsed_slots,
-        "wildcard_slots": sorted(
-            {wildcard_name for _index, wildcard_name in candidate.wildcard_infos}
-        ),
+        "wildcard_slots": wildcard_slots,
         "sentence_template": candidate.metadata.get("sentence_template"),
     }
 
 
-def _ranked_candidate_response(ranked: RankedCandidate, query: str | None = None) -> dict[str, Any]:
+def _ranked_candidate_response(
+    ranked: RankedCandidate, query: str | None = None
+) -> RankedCandidatePayload:
     """Return a serializable ranked candidate response."""
     candidate = ranked.candidate
     text = candidate.text
@@ -505,6 +676,14 @@ def _ranked_candidate_response(ranked: RankedCandidate, query: str | None = None
     if query is not None:
         text, replacements = get_wildcard_rehydration(candidate, query)
         normalized_text = normalize_text(text)
+    scores: ScorePayload = {
+        "rapidfuzz": ranked.scores.rapidfuzz_score,
+        "char_ngram": ranked.scores.char_ngram_score,
+        "bm25": ranked.scores.bm25_score,
+        "intent": ranked.scores.intent_score,
+        "penalty": ranked.scores.penalty,
+        "final": ranked.scores.final_score,
+    }
     return {
         ATTR_TEXT: text,
         ATTR_INTENT_NAME: candidate.intent_name,
@@ -512,12 +691,5 @@ def _ranked_candidate_response(ranked: RankedCandidate, query: str | None = None
         ATTR_NORMALIZED_TEXT: normalized_text,
         "slots": candidate.parsed_slots,
         "wildcard_replacements": replacements,
-        "scores": {
-            "rapidfuzz": ranked.scores.rapidfuzz_score,
-            "char_ngram": ranked.scores.char_ngram_score,
-            "bm25": ranked.scores.bm25_score,
-            "intent": ranked.scores.intent_score,
-            "penalty": ranked.scores.penalty,
-            "final": ranked.scores.final_score,
-        },
+        "scores": scores,
     }

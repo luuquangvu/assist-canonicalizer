@@ -4,6 +4,9 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
+from homeassistant.core import State
+from homeassistant.helpers.entity_registry import RegistryEntry
+
 import custom_components.assist_canonicalizer.registry as registry
 from custom_components.assist_canonicalizer.registry import (
     _area_names,
@@ -72,26 +75,38 @@ def test_entity_names_extraction() -> None:
         registry.entity_registry, "async_get_entity_aliases", create=True
     ) as mock_get_aliases:
         mock_get_aliases.return_value = [" Alias1 ", "Alias2"]
-        names = list(_entity_names(hass, entry, state))
+        names = list(_entity_names(hass, cast(RegistryEntry, entry), cast(State, state)))
         assert "Alias1" in names
         assert " Alias1 " not in names
         assert "My Device" in names
 
         mock_get_aliases.side_effect = AttributeError
-        names = list(_entity_names(hass, entry, state))
+        names = list(_entity_names(hass, cast(RegistryEntry, entry), cast(State, state)))
         assert "My Device" in names
 
-        names = list(_entity_names(hass, None, state))
+        names = list(_entity_names(hass, None, cast(State, state)))
         assert "State Device" in names
 
         mock_get_aliases.side_effect = None
         mock_get_aliases.return_value = []
         entry_without_names = SimpleNamespace(name=None, original_name=None)
-        names = list(_entity_names(hass, entry_without_names, state))
+        names = list(
+            _entity_names(
+                hass,
+                cast(RegistryEntry, entry_without_names),
+                cast(State, state),
+            )
+        )
         assert names == ["State Device"]
 
         entry_with_blank_name = SimpleNamespace(name="   ", original_name=" Orig Device ")
-        names = list(_entity_names(hass, entry_with_blank_name, state))
+        names = list(
+            _entity_names(
+                hass,
+                cast(RegistryEntry, entry_with_blank_name),
+                cast(State, state),
+            )
+        )
         assert names == ["Orig Device"]
 
 

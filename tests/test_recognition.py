@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import inspect
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from homeassistant.components.conversation.const import HOME_ASSISTANT_AGENT
 from homeassistant.components.conversation.models import ConversationInput
-from homeassistant.core import Context
+from homeassistant.core import Context, HomeAssistant
 
 from custom_components.assist_canonicalizer.const import (
     CONVERSATION_INPUT_AGENT_ID_FIELD,
@@ -81,7 +81,7 @@ async def test_recognition_forwards_context_and_observes_intent_without_executio
         return_value=default_agent,
     ):
         observation = await async_observe_delegated_text(
-            object(), user_input, "turn on Living Room Lamp"
+            cast(HomeAssistant, object()), user_input, "turn on Living Room Lamp"
         )
 
     assert observation.kind is RecognitionKind.INTENT
@@ -139,7 +139,7 @@ async def test_recognition_sorts_duplicate_slots_without_comparing_values() -> N
         return_value=default_agent,
     ):
         observation = await async_observe_delegated_text(
-            object(), _conversation_input(), "add milk to my list"
+            cast(HomeAssistant, object()), _conversation_input(), "add milk to my list"
         )
 
     assert observation.slots == (("domain", "todo"), ("item", 3), ("item", "milk"))
@@ -161,7 +161,7 @@ async def test_sentence_trigger_is_detected_without_invoking_callback() -> None:
         return_value=default_agent,
     ):
         observation = await async_observe_delegated_text(
-            object(), _conversation_input(), "start bedtime"
+            cast(HomeAssistant, object()), _conversation_input(), "start bedtime"
         )
 
     assert observation.kind is RecognitionKind.SENTENCE_TRIGGER
@@ -192,7 +192,7 @@ async def test_unmatched_target_is_non_executable_and_deterministic() -> None:
         return_value=default_agent,
     ):
         observation = await async_observe_delegated_text(
-            object(), _conversation_input(), "turn on unknown light"
+            cast(HomeAssistant, object()), _conversation_input(), "turn on unknown light"
         )
 
     assert observation.kind is RecognitionKind.UNMATCHED_TARGET
@@ -223,7 +223,7 @@ async def test_recognition_api_failures_fail_closed(agent: Any, category: str) -
         return_value=agent,
     ):
         observation = await async_observe_delegated_text(
-            object(), _conversation_input(), "turn on lamp"
+            cast(HomeAssistant, object()), _conversation_input(), "turn on lamp"
         )
 
     assert observation.kind is RecognitionKind.ERROR

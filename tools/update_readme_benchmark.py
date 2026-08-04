@@ -6,8 +6,9 @@ import argparse
 import re
 import sys
 import traceback
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Final
+from typing import Final, TypeGuard
 
 import orjson
 
@@ -15,6 +16,11 @@ try:
     from .benchmark import BENCHMARK_SCHEMA_VERSION
 except ImportError:
     from benchmark import BENCHMARK_SCHEMA_VERSION
+
+
+def _is_str_mapping(val: object) -> TypeGuard[Mapping[str, object]]:
+    return isinstance(val, Mapping)
+
 
 REPO_ROOT: Final[Path] = Path(__file__).resolve().parent.parent
 REPORT_JSON_PATH: Final[Path] = REPO_ROOT / "scratch" / "benchmark" / "managed_live_report.json"
@@ -96,7 +102,7 @@ def _render_md_table(
     return "\n".join([hdr, sep, *data])
 
 
-def _load_report(report_path: Path) -> dict[str, Any]:
+def _load_report(report_path: Path) -> dict[str, object]:
     """Load and parse the JSON benchmark performance report.
 
     Args:
@@ -136,48 +142,23 @@ def _load_report(report_path: Path) -> dict[str, Any]:
     return data
 
 
-def _get_metric_pct(stats: dict[str, Any], key: str) -> float:
-    """Extract a percentage metric value from stats dict.
-
-    Args:
-        stats: Dictionary containing stats values.
-        key: The key to look up.
-
-    Returns:
-        The float percentage value.
-
-    Raises:
-        KeyError: If the key is not present in stats.
-        TypeError: If the value for the key is not numeric.
-    """
-    if key not in stats:
-        raise KeyError(f"Missing metric '{key}' in stats; available keys: {list(stats.keys())}")
-
-    val = stats[key]
-    if not isinstance(val, (int, float)):
+def _get_metric_pct(stats: Mapping[str, object], key: str) -> float:
+    """Extract a percentage metric value from stats dict."""
+    val = stats.get(key)
+    if val is None:
+        raise KeyError(f"Missing metric '{key}' in stats")
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
         raise TypeError(f"Metric '{key}' must be numeric, got {type(val).__name__}: {val!r}")
-
     return float(val)
 
 
-def _get_languages(report: dict[str, Any]) -> list[str]:
-    """Derive the list of languages from the report structure dynamically.
-
-    Returns the languages sorted with EN first, and all other languages
-    sorted alphabetically.
-
-    Args:
-        report: Parsed JSON report dict.
-
-    Returns:
-        Sorted list of language codes.
-
-    Raises:
-        KeyError: If the 'languages' section is missing or empty.
-    """
+def _get_languages(report: Mapping[str, object]) -> list[str]:
+    """Derive the list of languages from the report structure dynamically."""
     breakdowns = report.get("breakdowns")
-    languages_section = breakdowns.get("languages") if isinstance(breakdowns, dict) else None
-    if not isinstance(languages_section, dict) or not languages_section:
+    if not _is_str_mapping(breakdowns):
+        raise KeyError("Missing or empty 'breakdowns' section in report")
+    languages_section = breakdowns.get("languages")
+    if not _is_str_mapping(languages_section) or not languages_section:
         raise KeyError("Missing or empty 'languages' section in report")
 
     if keys := [k for k in languages_section if isinstance(k, str)]:
@@ -188,13 +169,13 @@ def _get_languages(report: dict[str, Any]) -> list[str]:
     raise KeyError("No valid string language keys found in 'languages' section")
 
 
-def _get_dependency_versions(report: dict[str, Any]) -> dict[str, str]:
+def _get_dependency_versions(report: Mapping[str, object]) -> dict[str, str]:
     """Return benchmark dependency versions from the report metadata."""
     environment = report.get("environment")
-    if not isinstance(environment, dict):
+    if not _is_str_mapping(environment):
         raise KeyError("Managed-live report environment is missing")
     raw_dependencies = environment.get("dependencies")
-    dependencies = raw_dependencies if isinstance(raw_dependencies, dict) else {}
+    dependencies = raw_dependencies if _is_str_mapping(raw_dependencies) else {}
     result: dict[str, str] = {}
     for package_name in BENCHMARK_DEPENDENCIES:
         if package_name == "homeassistant":
@@ -203,12 +184,12 @@ def _get_dependency_versions(report: dict[str, Any]) -> dict[str, str]:
             value = environment.get("python_version")
         else:
             package = dependencies.get(package_name)
-            value = package.get("version") if isinstance(package, dict) else None
+            value = package.get("version") if _is_str_mapping(package) else None
         result[package_name] = value if isinstance(value, str) and value.strip() else "not recorded"
     return result
 
 
-def _generate_versions_note(report: dict[str, Any], is_vi: bool) -> str:
+def _generate_versions_note(report: Mapping[str, object], is_vi: bool) -> str:
     """Generate a localized dependency-version note for benchmark results."""
     versions = _get_dependency_versions(report)
     ha_version = versions["homeassistant"]
@@ -230,25 +211,10 @@ def _generate_versions_note(report: dict[str, Any], is_vi: bool) -> str:
     )
 
 
-def _generate_overall_section(report: dict[str, Any], is_vi: bool) -> str:
-    """Generate the shortcut-aware overall benchmark table.
-
-    Accuracy, mismatch, and fallback use the same HassIL-first outcome partition, so
-    their unrounded rates total 100 percent. The user-facing table also pairs them with
-    ``shortcut_protected_case_count`` so a HassIL success that shields a weaker direct
-    result is presented as protection, never as regression. Explicitly named
-    ``direct_canonicalizer_*`` fields retain the unprotected diagnostics in the raw
-    report.
-
-    Args:
-        report: Parsed JSON report dict.
-        is_vi: True if generating in Vietnamese.
-
-    Returns:
-        The formatted markdown snippet for the overall results.
-    """
+def _generate_overall_section(report: Mapping[str, object], is_vi: bool) -> str:
+    """Generate the shortcut-aware overall benchmark table."""
     summary = report.get("summary")
-    if not isinstance(summary, dict):
+    if not _is_str_mapping(summary):
         raise KeyError("Managed-live report summary is missing")
     accuracy = _get_metric_pct(summary, "canonicalizer_accuracy_pct")
     hassil_accuracy = _get_metric_pct(summary, "hassil_baseline_accuracy_pct")
@@ -256,7 +222,7 @@ def _generate_overall_section(report: dict[str, Any], is_vi: bool) -> str:
     mismatch = _get_metric_pct(summary, "mismatch_rate_pct")
     fallback = _get_metric_pct(summary, "fallback_rate_pct")
     latency = summary.get("latency_ms")
-    if not isinstance(latency, dict):
+    if not _is_str_mapping(latency):
         raise KeyError("Managed-live latency summary is missing")
     p50 = _get_metric_pct(latency, "median")
     p95 = _get_metric_pct(latency, "p95")
@@ -267,8 +233,8 @@ def _generate_overall_section(report: dict[str, Any], is_vi: bool) -> str:
             f"**{accuracy:.1f}%**",
             f"{hassil_accuracy:.1f}%",
             f"{uplift:+.1f}",
-            str(summary["recovered_case_count"]),
-            str(summary["shortcut_protected_case_count"]),
+            str(summary.get("recovered_case_count", 0)),
+            str(summary.get("shortcut_protected_case_count", 0)),
             f"{mismatch:.1f}%",
             f"{fallback:.1f}%",
             f"{p50:.1f}",
@@ -308,21 +274,8 @@ def _generate_overall_section(report: dict[str, Any], is_vi: bool) -> str:
     return f"\n\n{versions_note}\n\n{table}\n\n"
 
 
-def _generate_langs_section(report: dict[str, Any], is_vi: bool) -> str:
-    """Generate shortcut-aware per-language benchmark rows.
-
-    Language aggregates use the same mutually exclusive HassIL-first accuracy,
-    mismatch, and fallback outcomes as the overall summary. Direct canonicalizer
-    diagnostics remain available in the raw report but are intentionally omitted from
-    the compact README table.
-
-    Args:
-        report: Parsed JSON report dict.
-        is_vi: True if generating in Vietnamese.
-
-    Returns:
-        The formatted markdown snippet for the per-language breakdown.
-    """
+def _generate_langs_section(report: Mapping[str, object], is_vi: bool) -> str:
+    """Generate shortcut-aware per-language benchmark rows."""
     if is_vi:
         headers = (
             "Ngôn ngữ",
@@ -354,17 +307,26 @@ def _generate_langs_section(report: dict[str, Any], is_vi: bool) -> str:
 
     languages = _get_languages(report)
     for lang in languages:
-        breakdowns = report["breakdowns"]
-        lang_data = breakdowns["languages"][lang]
-        latency = lang_data["latency_ms"]
+        breakdowns = report.get("breakdowns")
+        if not _is_str_mapping(breakdowns):
+            continue
+        languages_map = breakdowns.get("languages")
+        if not _is_str_mapping(languages_map):
+            continue
+        lang_data = languages_map.get(lang)
+        if not _is_str_mapping(lang_data):
+            continue
+        latency = lang_data.get("latency_ms")
+        if not _is_str_mapping(latency):
+            continue
         data_rows.append(
             (
                 lang.upper(),
                 f"**{_get_metric_pct(lang_data, 'canonicalizer_accuracy_pct'):.1f}%**",
                 f"{_get_metric_pct(lang_data, 'hassil_baseline_accuracy_pct'):.1f}%",
                 f"{_get_metric_pct(lang_data, 'accuracy_uplift_pp'):+.1f}",
-                str(lang_data["recovered_case_count"]),
-                str(lang_data["shortcut_protected_case_count"]),
+                str(lang_data.get("recovered_case_count", 0)),
+                str(lang_data.get("shortcut_protected_case_count", 0)),
                 f"{_get_metric_pct(lang_data, 'mismatch_rate_pct'):.1f}%",
                 f"{_get_metric_pct(lang_data, 'fallback_rate_pct'):.1f}%",
                 f"{_get_metric_pct(latency, 'median'):.1f}",
@@ -435,7 +397,7 @@ def main() -> None:
 
 
 def _update_readme_benchmark(
-    report: dict[str, Any],
+    report: Mapping[str, object],
     is_vi: bool,
     file_path: Path,
 ) -> None:

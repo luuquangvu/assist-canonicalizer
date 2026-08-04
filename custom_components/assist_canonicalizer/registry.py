@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Iterable, Mapping
-from typing import Any
 
 from homeassistant.components.homeassistant.exposed_entities import async_should_expose
+from homeassistant.core import HomeAssistant, State
 from homeassistant.helpers import area_registry, entity_registry, floor_registry
 
 from .const import (
@@ -17,7 +17,7 @@ from .const import (
 )
 
 
-def async_registry_slot_values(hass: Any) -> dict[str, tuple[str, ...]]:
+def async_registry_slot_values(hass: HomeAssistant) -> dict[str, tuple[str, ...]]:
     """Return candidate slot values from exposed HA metadata."""
     entities_by_domain = _exposed_entity_names_by_domain(hass)
     entities = (name for domain_names in entities_by_domain.values() for name in domain_names)
@@ -79,7 +79,7 @@ def _domain_slot_names(slot_names: Iterable[str], domain: str) -> tuple[str, ...
     return tuple(f"{slot_name}:{normalized_domain}" for slot_name in slot_names)
 
 
-def _exposed_entity_names_by_domain(hass: Any) -> dict[str, tuple[str, ...]]:
+def _exposed_entity_names_by_domain(hass: HomeAssistant) -> dict[str, tuple[str, ...]]:
     """Return names and aliases for entities exposed to Assist grouped by domain."""
     try:
         reg = entity_registry.async_get(hass)
@@ -103,7 +103,11 @@ def _exposed_entity_names_by_domain(hass: Any) -> dict[str, tuple[str, ...]]:
     return {domain: tuple(_deduplicate_texts(names)) for domain, names in names_by_domain.items()}
 
 
-def _entity_names(hass: Any, entry: Any, state: Any) -> Iterable[str]:
+def _entity_names(
+    hass: HomeAssistant,
+    entry: entity_registry.RegistryEntry | None,
+    state: State,
+) -> Iterable[str]:
     """Yield spoken entity names from registry aliases or state names."""
     has_yielded = False
     if entry is not None:
@@ -124,7 +128,7 @@ def _entity_names(hass: Any, entry: Any, state: Any) -> Iterable[str]:
             yield state_name
 
 
-def _area_names(hass: Any) -> tuple[str, ...]:
+def _area_names(hass: HomeAssistant) -> tuple[str, ...]:
     """Return area names and aliases."""
     try:
         areas = area_registry.async_get(hass).async_list_areas()
@@ -133,7 +137,7 @@ def _area_names(hass: Any) -> tuple[str, ...]:
     return tuple(_deduplicate_texts(_entry_names_and_aliases(areas)))
 
 
-def _stripped_or_none(value: Any) -> str | None:
+def _stripped_or_none(value: object) -> str | None:
     """Return stripped text when non-empty, otherwise None."""
     if not isinstance(value, str):
         return None
@@ -141,7 +145,7 @@ def _stripped_or_none(value: Any) -> str | None:
     return stripped or None
 
 
-def _floor_names(hass: Any) -> tuple[str, ...]:
+def _floor_names(hass: HomeAssistant) -> tuple[str, ...]:
     """Return floor names and aliases."""
     try:
         floors = floor_registry.async_get(hass).async_list_floors()
@@ -150,7 +154,9 @@ def _floor_names(hass: Any) -> tuple[str, ...]:
     return tuple(_deduplicate_texts(_entry_names_and_aliases(floors)))
 
 
-def _entry_names_and_aliases(entries: Iterable[Any]) -> Iterable[str]:
+def _entry_names_and_aliases(
+    entries: Iterable[object],
+) -> Iterable[str]:
     """Yield spoken names and aliases from area or floor registry entries."""
     for entry in entries:
         name = getattr(entry, "name", None)

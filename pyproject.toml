@@ -100,6 +100,9 @@ addopts = [
 
 [tool.pyright]
 typeCheckingMode = "standard"
+reportUnreachable = "warning"           # Keep until ty implements this feature
+reportUnnecessaryComparison = "warning" # Keep until ty implements this feature
+reportUnnecessaryContains = "warning"   # Keep until ty implements this feature
 
 [tool.interrogate]
 fail-under = 100

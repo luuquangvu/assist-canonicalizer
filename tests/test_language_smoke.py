@@ -51,6 +51,7 @@ def test_fixture_sentence_sample_skips_missing_grammar_references(error: Excepti
 
             @staticmethod
             def list_references(_expansion_rules: object) -> tuple[object, ...]:
+                """Return referenced slot lists for expression."""
                 raise error
 
         expression = Expression()

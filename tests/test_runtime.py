@@ -11,13 +11,14 @@ import threading
 from collections.abc import Mapping
 from enum import Enum
 from types import ModuleType
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 from unittest.mock import patch
 
 import homeassistant.helpers.event
 import homeassistant.helpers.storage
 import orjson
 import pytest
+from homeassistant.core import HomeAssistant
 
 import custom_components.assist_canonicalizer as integration
 from custom_components.assist_canonicalizer import (
@@ -54,6 +55,11 @@ from custom_components.assist_canonicalizer.runtime import (
     _valid_store_metadata,
 )
 from custom_components.assist_canonicalizer.utils import normalize_language
+
+
+def _as_hass(value: object) -> HomeAssistant:
+    """Type a deliberately minimal test double as Home Assistant."""
+    return cast(HomeAssistant, value)
 
 
 class FakeHass:
@@ -102,9 +108,9 @@ async def _run_coalesced_rebuild_scenario(
 ) -> tuple[CanonicalIndex | None, CanonicalIndex | None]:
     """Start overlapping rebuild requests for the same language."""
     hass = FakeHass()
-    first_task = asyncio.create_task(runtime.async_rebuild_index(hass, "en"))
+    first_task = asyncio.create_task(runtime.async_rebuild_index(_as_hass(hass), "en"))
     await hass.job_started.wait()
-    second_task = asyncio.create_task(runtime.async_rebuild_index(hass, "en-US"))
+    second_task = asyncio.create_task(runtime.async_rebuild_index(_as_hass(hass), "en-US"))
     await asyncio.sleep(0)
     hass.release_job.set()
     return await asyncio.gather(first_task, second_task)
@@ -337,7 +343,7 @@ async def test_async_rebuild_index_replaces_stale_task_with_current_generation(
     await stale_task
     runtime.rebuild_tasks["en"] = (stale_generation, stale_task)
 
-    index = await runtime.async_rebuild_index(hass, "en")
+    index = await runtime.async_rebuild_index(_as_hass(hass), "en")
 
     assert index is not None
     assert build_counter.calls == 1
@@ -1050,10 +1056,10 @@ def test_runtime_intent_updates_merge_partial_sources_and_isolate_snapshots() ->
     )
 
     assert set(runtime.intent_sources) == {"config", "trigger"}
-    assert runtime.intent_sources["config"]["intents"]["ConfigIntent"]["data"][0]["sentences"] == [
-        "config"
-    ]
-    assert "UpdatedTrigger" in runtime.intent_sources["trigger"]["intents"]
+    cfg_src = cast(dict[str, Any], runtime.intent_sources["config"])
+    trig_src = cast(dict[str, Any], runtime.intent_sources["trigger"])
+    assert cfg_src["intents"]["ConfigIntent"]["data"][0]["sentences"] == ["config"]
+    assert "UpdatedTrigger" in trig_src["intents"]
 
     runtime.update_intent_sources({"trigger": {}})
 
@@ -1173,7 +1179,7 @@ async def test_persistent_store_save_and_load(monkeypatch: Any) -> None:
         snapshot = _create_build_snapshot_and_register_wildcards(
             "vi", *runtime._capture_build_inputs()
         )
-        await runtime.async_save_index_to_store(hass, index, snapshot.fingerprint)
+        await runtime.async_save_index_to_store(_as_hass(hass), index, snapshot.fingerprint)
 
         stored_index = MockStore.stored_data["assist_canonicalizer.index_vi"]
         assert stored_index["fingerprint"] == snapshot.fingerprint
@@ -1187,7 +1193,7 @@ async def test_persistent_store_save_and_load(monkeypatch: Any) -> None:
         assert stored_candidates[0]["slot_values"] == ["đèn"]
 
         clean_runtime = CanonicalizerRuntime()
-        loaded_index = await clean_runtime.async_load_index_from_store(hass, "vi")
+        loaded_index = await clean_runtime.async_load_index_from_store(_as_hass(hass), "vi")
         assert loaded_index is not None
         assert loaded_index.language == "vi"
         assert loaded_index.candidate_count == 1
@@ -1220,12 +1226,12 @@ async def test_persistent_store_rejects_old_build_version(monkeypatch: Any) -> N
         "en",
         [Candidate(text="turn on light", intent_name="HassTurnOn", language="en")],
     )
-    await runtime.async_save_index_to_store(hass, index, snapshot.fingerprint)
+    await runtime.async_save_index_to_store(_as_hass(hass), index, snapshot.fingerprint)
     MockStore.stored_data["assist_canonicalizer.index_en"]["build_version"] = (
         _INDEX_BUILD_VERSION - 1
     )
 
-    loaded = await CanonicalizerRuntime().async_load_index_from_store(hass, "en")
+    loaded = await CanonicalizerRuntime().async_load_index_from_store(_as_hass(hass), "en")
 
     assert loaded is None
     assert "assist_canonicalizer.index_en" not in MockStore.stored_data
@@ -1241,11 +1247,11 @@ async def test_persistent_store_rejects_stale_fingerprint(monkeypatch: Any) -> N
     runtime.update_registry_slot_values({"name": ("old lamp",)})
     snapshot = _create_build_snapshot_and_register_wildcards("en", *runtime._capture_build_inputs())
     index = build_index("en", [Candidate(text="turn on old lamp", intent_name="HassTurnOn")])
-    await runtime.async_save_index_to_store(hass, index, snapshot.fingerprint)
+    await runtime.async_save_index_to_store(_as_hass(hass), index, snapshot.fingerprint)
 
     clean_runtime = CanonicalizerRuntime()
     clean_runtime.update_registry_slot_values({"name": ("new lamp",)})
-    loaded = await clean_runtime.async_load_index_from_store(hass, "en")
+    loaded = await clean_runtime.async_load_index_from_store(_as_hass(hass), "en")
 
     assert loaded is None
     assert "assist_canonicalizer.index_en" not in MockStore.stored_data
@@ -1260,10 +1266,10 @@ async def test_persistent_store_rejects_malformed_candidate(monkeypatch: Any) ->
     runtime = CanonicalizerRuntime()
     snapshot = _create_build_snapshot_and_register_wildcards("en", *runtime._capture_build_inputs())
     index = build_index("en", [Candidate(text="turn on light", intent_name="HassTurnOn")])
-    await runtime.async_save_index_to_store(hass, index, snapshot.fingerprint)
+    await runtime.async_save_index_to_store(_as_hass(hass), index, snapshot.fingerprint)
     MockStore.stored_data["assist_canonicalizer.index_en"]["candidates"][0].pop("normalized_text")
 
-    loaded = await CanonicalizerRuntime().async_load_index_from_store(hass, "en")
+    loaded = await CanonicalizerRuntime().async_load_index_from_store(_as_hass(hass), "en")
 
     assert loaded is None
     assert "assist_canonicalizer.index_en" not in MockStore.stored_data
@@ -1284,9 +1290,9 @@ async def test_async_clear_index_removes_specific_and_all_stores(monkeypatch: An
             [Candidate(text=f"sample {language}", intent_name="Sample", language=language)],
         )
         runtime.set_index(index)
-        await runtime.async_save_index_to_store(hass, index, snapshot.fingerprint)
+        await runtime.async_save_index_to_store(_as_hass(hass), index, snapshot.fingerprint)
 
-    clear_en_result = await runtime.async_clear_index(hass, "en-US")
+    clear_en_result = await runtime.async_clear_index(_as_hass(hass), "en-US")
     assert clear_en_result == IndexClearResult(
         cleared_cached_languages=("en",),
         cleared_candidate_count=1,
@@ -1300,7 +1306,7 @@ async def test_async_clear_index_removes_specific_and_all_stores(monkeypatch: An
     old_epoch = manifest["cache_epoch"]
     assert manifest["languages"] == ["vi"]
 
-    clear_all_result = await runtime.async_clear_index(hass)
+    clear_all_result = await runtime.async_clear_index(_as_hass(hass))
     assert clear_all_result == IndexClearResult(
         cleared_cached_languages=("vi",),
         cleared_candidate_count=1,
@@ -1325,7 +1331,7 @@ async def test_async_rebuild_retries_after_source_generation_changes(monkeypatch
 
     monkeypatch.setattr(runtime_module, "_build_index_from_snapshot", build_counter)
 
-    index = await runtime.async_rebuild_index(hass, "en")
+    index = await runtime.async_rebuild_index(_as_hass(hass), "en")
 
     assert build_counter.calls == 2
     assert index is not None
@@ -1348,7 +1354,7 @@ async def test_async_rebuild_stops_after_repeated_source_generation_changes(
 
     monkeypatch.setattr(runtime_module, "_build_index_from_snapshot", build_counter)
 
-    index = await runtime.async_rebuild_index(hass, "en")
+    index = await runtime.async_rebuild_index(_as_hass(hass), "en")
 
     assert build_counter.calls == runtime_module._MAX_REBUILD_ATTEMPTS
     assert index is None
@@ -1366,7 +1372,7 @@ async def test_async_rebuild_does_not_publish_after_index_clear(monkeypatch: Any
 
     monkeypatch.setattr(runtime_module, "_build_index_from_snapshot", build_counter)
 
-    index = await runtime.async_rebuild_index(hass, "en")
+    index = await runtime.async_rebuild_index(_as_hass(hass), "en")
 
     assert build_counter.calls == 1
     assert index is None
@@ -1386,7 +1392,7 @@ async def test_language_clear_does_not_invalidate_other_language_rebuild(
     build_counter = _SnapshotBuildCounter()
     monkeypatch.setattr(runtime_module, "_build_index_from_snapshot", build_counter)
 
-    rebuild_task = asyncio.create_task(runtime.async_rebuild_index(hass, "vi"))
+    rebuild_task = asyncio.create_task(runtime.async_rebuild_index(_as_hass(hass), "vi"))
     await hass.job_started.wait()
     runtime.clear_index("en")
     hass.release_job.set()
@@ -1462,7 +1468,7 @@ async def test_async_shutdown_prevents_blocked_rebuild_publication(monkeypatch: 
     monkeypatch.setattr(CanonicalizerRuntime, "set_index", record_set_index)
     hass = ThreadedBuildHass()
 
-    rebuild_task = asyncio.create_task(runtime.async_rebuild_index(hass, "en"))
+    rebuild_task = asyncio.create_task(runtime.async_rebuild_index(_as_hass(hass), "en"))
     assert await asyncio.to_thread(build_started.wait, 5)
     shutdown_task = asyncio.create_task(runtime.async_shutdown())
     await asyncio.sleep(0)
@@ -1504,7 +1510,9 @@ async def test_async_shutdown_waits_for_active_store_operation(monkeypatch: Any)
     hass = HashableFakeHass()
     index = build_index("en", [Candidate(text="turn on light", intent_name="HassTurnOn")])
 
-    save_task = asyncio.create_task(runtime.async_save_index_to_store(hass, index, "fingerprint"))
+    save_task = asyncio.create_task(
+        runtime.async_save_index_to_store(_as_hass(hass), index, "fingerprint")
+    )
     await save_started.wait()
     shutdown_task = asyncio.create_task(runtime.async_shutdown())
     await asyncio.sleep(0)
@@ -1546,7 +1554,7 @@ async def test_async_shutdown_drains_cancelled_rebuild_store_writer(monkeypatch:
     runtime = CanonicalizerRuntime()
     hass = HashableFakeHass(async_create_task=lambda coro: asyncio.create_task(coro))
 
-    rebuild_task = asyncio.create_task(runtime.async_rebuild_index(hass, "en"))
+    rebuild_task = asyncio.create_task(runtime.async_rebuild_index(_as_hass(hass), "en"))
     assert await asyncio.to_thread(save_started.wait, 30)
     shutdown_task = asyncio.create_task(runtime.async_shutdown())
     await asyncio.sleep(0.05)
@@ -1578,7 +1586,7 @@ async def test_async_shutdown_drains_direct_store_load_build(monkeypatch: Any) -
         [Candidate(text="turn on light", intent_name="HassTurnOn", language="en")],
     )
     assert await source_runtime.async_save_index_to_store(
-        hass,
+        _as_hass(hass),
         stored_index,
         snapshot.fingerprint,
     )
@@ -1606,7 +1614,9 @@ async def test_async_shutdown_drains_direct_store_load_build(monkeypatch: Any) -
 
     monkeypatch.setattr(runtime_module, "build_index", blocking_build)
     runtime = CanonicalizerRuntime()
-    load_task = asyncio.create_task(runtime.async_load_index_from_store(ThreadedLoadHass(), "en"))
+    load_task = asyncio.create_task(
+        runtime.async_load_index_from_store(_as_hass(ThreadedLoadHass()), "en")
+    )
     assert await asyncio.to_thread(build_started.wait, 5)
     shutdown_task = asyncio.create_task(runtime.async_shutdown())
     await asyncio.sleep(0.05)
@@ -1701,7 +1711,7 @@ async def test_async_rebuild_index_returns_none_after_shutdown() -> None:
     await runtime.async_shutdown()
     hass = HashableFakeHass(async_create_task=lambda coro: pytest.fail("no task expected"))
 
-    result = await runtime.async_rebuild_index(hass, "en")
+    result = await runtime.async_rebuild_index(_as_hass(hass), "en")
 
     assert result is None
     assert runtime.rebuild_tasks == {}
@@ -1783,7 +1793,7 @@ async def test_debounced_rebuild_coalesces_events(monkeypatch: Any) -> None:
         async_rebuild_index_mock,
     )
 
-    _subscribe_registry_updates(hass, runtime)
+    _subscribe_registry_updates(_as_hass(hass), runtime)
 
     # Trigger entity registry update
     listeners[0]({})
@@ -1998,7 +2008,7 @@ def test_rebuild_index_synchronous() -> None:
             }
         }
     }
-    runtime.update_intent_sources(intent_sources)
+    runtime.update_intent_sources(cast(Mapping[object, Mapping[str, Any]], intent_sources))
     runtime.update_registry_slot_values({"name": ("đèn",)})
 
     with patch(
@@ -2035,7 +2045,7 @@ async def test_async_rebuild_index_real_flow(monkeypatch: Any) -> None:
             }
         }
     }
-    runtime.update_intent_sources(intent_sources)
+    runtime.update_intent_sources(cast(Mapping[object, Mapping[str, Any]], intent_sources))
     runtime.update_registry_slot_values({"name": ("đèn",)})
 
     class DummyHass:
@@ -2054,7 +2064,7 @@ async def test_async_rebuild_index_real_flow(monkeypatch: Any) -> None:
         "custom_components.assist_canonicalizer.runtime.load_language_intent_sources",
         return_value={},
     ):
-        index = await runtime.async_rebuild_index(hass, "vi")
+        index = await runtime.async_rebuild_index(_as_hass(hass), "vi")
 
     assert index is not None
     assert index.language == "vi"
@@ -2132,7 +2142,7 @@ async def test_async_clear_index_specific_language() -> None:
         return_value=DummyStore(),
     )
     with store_patch, manifest_patch:
-        await runtime.async_clear_index(hass, "en")
+        await runtime.async_clear_index(_as_hass(hass), "en")
     assert "en" not in runtime.indexes
     assert "vi" in runtime.indexes
 

@@ -162,7 +162,7 @@ class DatasetContext:
     """Reusable HassIL context for one real-world dataset."""
 
     language: str
-    cases: tuple[dict[str, Any], ...]
+    cases: tuple[Mapping[str, Any], ...]
     sources: dict[str, Mapping[str, Any]]
     slots: dict[str, tuple[str, ...]]
     registry_slot_index: RegistrySlotIndex
@@ -1160,7 +1160,7 @@ def test_benchmark_validate_test_cases_accepts_context() -> None:
 
     validated = benchmark._validate_test_cases(cases, "en", "test.json")
 
-    assert validated[0]["context"] == {"area": "kitchen", "floor": 1, "enabled": True}
+    assert validated[0].get("context") == {"area": "kitchen", "floor": 1, "enabled": True}
 
 
 def test_benchmark_validate_test_cases_accepts_expected_fallback() -> None:
