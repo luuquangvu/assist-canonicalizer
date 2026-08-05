@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+
+from homeassistant.util.json import JsonObjectType, JsonValueType
 
 from .const import FallbackReason
 
@@ -22,7 +23,7 @@ class CanonicalizerDiagnostics:
     last_request_id: str | None = None
     selected_delegated_text_hash: str | None = None
     selected_candidate_source: str | None = None
-    confidence_gate: Mapping[str, Any] | None = None
+    confidence_gate: Mapping[str, JsonValueType] | None = None
     execution_result: str | None = None
     recognition_kind: str | None = None
     recognition_intent: str | None = None
@@ -44,7 +45,7 @@ class CanonicalizerDiagnostics:
     registry_retrieval_latency_ms: float | None = None
     selected_from_fuzzy_registry: bool = False
 
-    def as_dict(self) -> dict[str, Any]:
+    def as_dict(self) -> JsonObjectType:
         """Return diagnostics as a dictionary."""
         return {
             "candidate_count": self.candidate_count,

@@ -12,7 +12,7 @@ from functools import lru_cache
 from heapq import nlargest
 from itertools import permutations, product
 from threading import Lock
-from typing import Any, NamedTuple
+from typing import NamedTuple
 
 import orjson
 
@@ -48,6 +48,19 @@ from .utils import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _string_keyed_mapping(value: object) -> dict[str, object] | None:
+    """Return a mapping copy only when every key is a string."""
+    if not isinstance(value, Mapping):
+        return None
+    result: dict[str, object] = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            return None
+        result[key] = item
+    return result
+
 
 _TEMPLATE_MARKERS = frozenset("{}[]<>|();")
 _CLEAN_ANCHOR_STRIP_CHARS = "[](){}<>|:,.?!;\"'"
@@ -185,7 +198,7 @@ class _DataItemCandidateState:
     intent_name: str
     expansion_rules: Mapping[str, str]
     base_slot_values: Mapping[str, tuple[str, ...]]
-    output_value_maps: Mapping[str, Mapping[str, Any]]
+    output_value_maps: Mapping[str, Mapping[str, object]]
     wildcard_slots: frozenset[str]
     context_slots: frozenset[str]
     static_slots: dict[str, str]
@@ -210,7 +223,7 @@ class _TemplateCompilationState:
     source_key: str
     expansion_rules: Mapping[str, str]
     base_data_slot_values: Mapping[str, tuple[str, ...]]
-    slot_output_value_maps: Mapping[str, Mapping[str, Any]]
+    slot_output_value_maps: Mapping[str, Mapping[str, object]]
     wildcard_slots: frozenset[str]
     static_slots: Mapping[str, str]
     context_slots: frozenset[str]
@@ -408,7 +421,7 @@ class DynamicRegistryTemplate:
     slot_references: tuple[TemplateSlotReference, ...]
     sentence_slots: frozenset[str]
     wildcard_slots: frozenset[str]
-    slot_output_values: Mapping[str, Mapping[str, Any]]
+    slot_output_values: Mapping[str, Mapping[str, object]]
     entity_slots: tuple[str, ...]
     query_slots: tuple[str, ...]
     domains: tuple[str, ...]
@@ -438,7 +451,7 @@ class DynamicRegistryIntent:
 
 def build_candidates_from_intent_sources(
     language: str,
-    intent_sources: Mapping[str, Mapping[str, Any]],
+    intent_sources: Mapping[str, Mapping[str, object]],
     registry_slot_values: Mapping[str, tuple[str, ...]] | None = None,
     *,
     max_candidates: int | None = DEFAULT_MAX_TOTAL_CANDIDATES_PER_LANGUAGE,
@@ -468,6 +481,9 @@ def build_candidates_from_intent_sources(
         for intent_name, intent_config in intents.items():
             if not isinstance(intent_name, str) or not isinstance(intent_config, Mapping):
                 continue
+            typed_intent_config = _string_keyed_mapping(intent_config)
+            if typed_intent_config is None:
+                continue
             remaining = (
                 DEFAULT_MAX_CANDIDATES_PER_INTENT
                 if max_candidates is None
@@ -483,7 +499,7 @@ def build_candidates_from_intent_sources(
                     source_config,
                     candidate_source,
                     intent_name,
-                    intent_config,
+                    typed_intent_config,
                     registry_slot_values or {},
                     max_candidates=intent_cap,
                 )
@@ -515,7 +531,7 @@ def build_registry_slot_index(
                 for position, value in enumerate(values)
                 if (normalized := normalize_text(value))
                 and (tokens := tuple(dict.fromkeys(normalized.split())))
-                and (normalized_no_diac := _cached_normalize_no_diac(value, language)) is not None
+                and (normalized_no_diac := _cached_normalize_no_diac(value, language))
             )
             shared[values] = records
         data[slot_name] = records
@@ -785,9 +801,9 @@ def _compile_template_from_sentence(
 
 def _compile_templates_from_data_item(
     source_key: str,
-    source_config: Mapping[str, Any],
-    intent_config: Mapping[str, Any],
-    data_item: Mapping[str, Any],
+    source_config: Mapping[str, object],
+    intent_config: Mapping[str, object],
+    data_item: Mapping[str, object],
     language: str | None,
     *,
     include_literal_only_templates: bool,
@@ -836,7 +852,7 @@ def _compile_templates_from_data_item(
 
 
 def compile_dynamic_registry_intents(
-    intent_sources: Mapping[str, Mapping[str, Any]],
+    intent_sources: Mapping[str, Mapping[str, object]],
     language: str | None = None,
     *,
     include_literal_only_templates: bool = True,
@@ -854,19 +870,25 @@ def compile_dynamic_registry_intents(
         for intent_name, intent_config in intents.items():
             if not isinstance(intent_name, str) or not isinstance(intent_config, Mapping):
                 continue
-            data_items = intent_config.get("data", [])
+            typed_intent_config = _string_keyed_mapping(intent_config)
+            if typed_intent_config is None:
+                continue
+            data_items = typed_intent_config.get("data", [])
             if not isinstance(data_items, list):
                 continue
             templates: list[DynamicRegistryTemplate] = []
             for data_item in data_items:
                 if not isinstance(data_item, Mapping):
                     continue
+                typed_data_item = _string_keyed_mapping(data_item)
+                if typed_data_item is None:
+                    continue
                 templates.extend(
                     _compile_templates_from_data_item(
                         source_key,
                         source_config,
-                        intent_config,
-                        data_item,
+                        typed_intent_config,
+                        typed_data_item,
                         language,
                         include_literal_only_templates=include_literal_only_templates,
                         include_area_only_templates=include_area_only_templates,
@@ -885,7 +907,7 @@ def compile_dynamic_registry_intents(
 
 def build_query_registry_candidates(
     language: str,
-    intent_sources: Mapping[str, Mapping[str, Any]],
+    intent_sources: Mapping[str, Mapping[str, object]],
     registry_slot_values: Mapping[str, tuple[str, ...]],
     query: str,
     *,
@@ -1182,7 +1204,7 @@ def _build_candidate(
     source: CandidateSource,
     language: str,
     base_metadata: Mapping[str, str],
-    slot_output_values: Mapping[str, Mapping[str, Any]] | None = None,
+    slot_output_values: Mapping[str, Mapping[str, object]] | None = None,
     static_slots_dict: dict[str, str] | None = None,
     literal_variants: tuple[frozenset[str], ...] | None = None,
     normalized_expanded_sentence: str | None = None,
@@ -1231,11 +1253,11 @@ def _expanded_text_length_key(text: str) -> tuple[int, int]:
 def _data_item_candidate_state(
     language: str,
     source_key: str,
-    source_config: Mapping[str, Any],
+    source_config: Mapping[str, object],
     source: CandidateSource,
     intent_name: str,
-    intent_config: Mapping[str, Any],
-    data_item: Mapping[str, Any],
+    intent_config: Mapping[str, object],
+    data_item: Mapping[str, object],
 ) -> _DataItemCandidateState:
     """Build data-item state shared by all of its sentence templates."""
     return _DataItemCandidateState(
@@ -1254,7 +1276,7 @@ def _data_item_candidate_state(
 
 def _resolve_candidate_sentence_slots(
     sentence: str,
-    data_item: Mapping[str, Any],
+    data_item: Mapping[str, object],
     state: _DataItemCandidateState,
     registry_slot_values: Mapping[str, tuple[str, ...]],
 ) -> (
@@ -1307,7 +1329,7 @@ def _candidate_sentence_metadata(
 
 def _prepare_candidate_sentence(
     sentence: str,
-    data_item: Mapping[str, Any],
+    data_item: Mapping[str, object],
     state: _DataItemCandidateState,
     registry_slot_values: Mapping[str, tuple[str, ...]],
 ) -> _PreparedCandidateSentence | None:
@@ -1366,11 +1388,11 @@ def _prepared_sentence_candidates(
 def _data_item_candidates_generator(
     language: str,
     source_key: str,
-    source_config: Mapping[str, Any],
+    source_config: Mapping[str, object],
     source: CandidateSource,
     intent_name: str,
-    intent_config: Mapping[str, Any],
-    data_item: Mapping[str, Any],
+    intent_config: Mapping[str, object],
+    data_item: Mapping[str, object],
     registry_slot_values: Mapping[str, tuple[str, ...]],
 ) -> Iterable[Candidate]:
     """Generate candidates for a single data item, sorting each sentence's candidates by length."""
@@ -1404,10 +1426,10 @@ def _data_item_candidates_generator(
 def _candidates_from_intent_config(
     language: str,
     source_key: str,
-    source_config: Mapping[str, Any],
+    source_config: Mapping[str, object],
     source: CandidateSource,
     intent_name: str,
-    intent_config: Mapping[str, Any],
+    intent_config: Mapping[str, object],
     registry_slot_values: Mapping[str, tuple[str, ...]],
     *,
     max_candidates: int = DEFAULT_MAX_CANDIDATES_PER_INTENT,
@@ -1423,19 +1445,22 @@ def _candidates_from_intent_config(
     data_items = intent_config.get("data", [])
     if not isinstance(data_items, list):
         return ()
-    _name_data_items: list[Mapping[str, Any]] = []
-    _other_data_items: list[Mapping[str, Any]] = []
+    _name_data_items: list[Mapping[str, object]] = []
+    _other_data_items: list[Mapping[str, object]] = []
     for di in data_items:
         if not isinstance(di, Mapping):
             continue
-        sentences = di.get("sentences", [])
+        typed_data_item = _string_keyed_mapping(di)
+        if typed_data_item is None:
+            continue
+        sentences = typed_data_item.get("sentences", [])
         if not isinstance(sentences, list):
             continue
         has_name = any(isinstance(s, str) and _uses_entity_slot_alias(s) for s in sentences)
         if has_name:
-            _name_data_items.append(di)
+            _name_data_items.append(typed_data_item)
         else:
-            _other_data_items.append(di)
+            _other_data_items.append(typed_data_item)
     ordered_data_items = _name_data_items + _other_data_items
 
     generators = [
@@ -1773,7 +1798,7 @@ def _process_range_slot_output(
     from_val: float,
     to_val: float,
     values: tuple[str, ...],
-    slot_map: dict[str, Any],
+    slot_map: dict[str, object],
 ) -> None:
     """Process output mappings for a single range slot."""
     for val_str in values:
@@ -1795,7 +1820,7 @@ def _process_range_slot_output(
 def _build_slot_output_values(
     template: DynamicRegistryTemplate,
     slot_values: Mapping[str, tuple[str, ...]],
-) -> Mapping[str, Mapping[str, Any]]:
+) -> Mapping[str, Mapping[str, object]]:
     """Build slot output value mapping by processing range slots and base configurations.
 
     This scales the matched numeric tokens by the slot multiplier to build the final
@@ -3027,8 +3052,8 @@ def _candidate_metadata(
 
 def _slot_binding_output_value(
     binding: _SlotBinding,
-    slot_output_values: Mapping[str, Mapping[str, Any]] | None,
-) -> Any:
+    slot_output_values: Mapping[str, Mapping[str, object]] | None,
+) -> object:
     """Return the resolved output value for one slot binding."""
     if slot_output_values is None:
         return binding.raw_value
@@ -3040,11 +3065,11 @@ def _slot_binding_output_value(
 
 def _slots_from_bindings(
     slot_bindings: Sequence[_SlotBinding],
-    slot_output_values: Mapping[str, Mapping[str, Any]] | None = None,
-) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    slot_output_values: Mapping[str, Mapping[str, object]] | None = None,
+) -> tuple[dict[str, object], dict[str, object]] | None:
     """Return slot mappings, or reject bindings that conflict by output name."""
-    slots: dict[str, Any] = {}
-    raw_slots: dict[str, Any] = {}
+    slots: dict[str, object] = {}
+    raw_slots: dict[str, object] = {}
     for binding in slot_bindings:
         output_value = _slot_binding_output_value(binding, slot_output_values)
         if binding.output_name in slots:
@@ -3171,11 +3196,11 @@ def _binding_tags_are_consistent(
     tagged_text: str,
     bindings_by_tag: Mapping[str, _SlotBinding],
     tag_context: _ExpansionTagContext,
-    slot_output_values: Mapping[str, Mapping[str, Any]] | None,
+    slot_output_values: Mapping[str, Mapping[str, object]] | None,
     repeated_output_names: frozenset[str],
 ) -> bool:
     """Return whether repeated output slots select the same values."""
-    output_values_by_output: dict[str, Any] = {}
+    output_values_by_output: dict[str, object] = {}
     raw_values_by_output: dict[str, str] = {}
     for match in tag_context.binding_pattern.finditer(tagged_text):
         tag = match.group(0)
@@ -3200,7 +3225,7 @@ def _binding_tags_are_consistent(
 def _binding_consistency_filter(
     bindings_by_tag: Mapping[str, _SlotBinding],
     tag_context: _ExpansionTagContext,
-    slot_output_values: Mapping[str, Mapping[str, Any]] | None,
+    slot_output_values: Mapping[str, Mapping[str, object]] | None,
     repeated_output_names: frozenset[str],
 ) -> Callable[[str], bool] | None:
     """Return a tagged-expansion filter for repeated output slots."""
@@ -3228,7 +3253,7 @@ def _expand_candidate_template(
     *,
     max_expansions: int,
     fair: bool = False,
-    slot_output_values: Mapping[str, Mapping[str, Any]] | None = None,
+    slot_output_values: Mapping[str, Mapping[str, object]] | None = None,
 ) -> tuple[_CandidateExpansion, ...]:
     """Expand a template while preserving exact slot bindings."""
     if is_fixed_sentence(sentence):
@@ -3285,7 +3310,7 @@ def _candidate_expansions(
     slot_references: Sequence[TemplateSlotReference],
     wildcard_slots: frozenset[str],
     *,
-    slot_output_values: Mapping[str, Mapping[str, Any]] | None = None,
+    slot_output_values: Mapping[str, Mapping[str, object]] | None = None,
 ) -> tuple[_CandidateExpansion, ...]:
     """Return bounded candidate expansions for a sentence template.
 
@@ -3314,7 +3339,7 @@ def _query_candidate_expansions(
     query_normalized: str,
     query_tokens: frozenset[str],
     *,
-    slot_output_values: Mapping[str, Mapping[str, Any]] | None = None,
+    slot_output_values: Mapping[str, Mapping[str, object]] | None = None,
 ) -> tuple[tuple[_CandidateExpansion, str], ...]:
     """Return query-relevant candidate expansions for a dynamic template."""
     expanded = _expand_candidate_template(
@@ -3363,7 +3388,7 @@ def _registry_slot_values_for_slots(
 
 
 def _registry_slot_values_for_template(
-    data_item: Mapping[str, Any],
+    data_item: Mapping[str, object],
     *,
     sentence_slots: frozenset[str],
     base_data_slot_values: Mapping[str, tuple[str, ...]],
@@ -4477,7 +4502,7 @@ def _slot_reference(raw: str) -> TemplateSlotReference:
     )
 
 
-def _context_domains(data_item: Mapping[str, Any]) -> tuple[str, ...]:
+def _context_domains(data_item: Mapping[str, object]) -> tuple[str, ...]:
     """Return required entity domains for one HassIL data item."""
     domains: list[str] = []
     for key in ("requires_context", "slots"):
@@ -4488,7 +4513,7 @@ def _context_domains(data_item: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(_deduplicate_texts(domains, len(domains) or 1))
 
 
-def _context_slot_names(data_item: Mapping[str, Any]) -> frozenset[str]:
+def _context_slot_names(data_item: Mapping[str, object]) -> frozenset[str]:
     """Return context keys that HassIL injects as slots."""
     requires_context = data_item.get("requires_context", {})
     if not isinstance(requires_context, Mapping):
@@ -4502,7 +4527,7 @@ def _context_slot_names(data_item: Mapping[str, Any]) -> frozenset[str]:
     )
 
 
-def _domain_values(value: Any) -> Iterable[str]:
+def _domain_values(value: object) -> Iterable[str]:
     """Yield domain names from HassIL context values."""
     if isinstance(value, str) and value.strip():
         yield value.strip()
@@ -4528,16 +4553,16 @@ def _scoped_slot_values(
 
 
 def _effective_list_configs(
-    source_config: Mapping[str, Any],
-    intent_config: Mapping[str, Any],
-    data_item: Mapping[str, Any],
-) -> dict[str, Any]:
+    source_config: Mapping[str, object],
+    intent_config: Mapping[str, object],
+    data_item: Mapping[str, object],
+) -> dict[str, object]:
     """Return HassIL-effective list configs by list name.
 
     HassIL combines root/external lists with data-item lists by dictionary
     override, so a later same-named list replaces the whole earlier list.
     """
-    list_configs: dict[str, Any] = {}
+    list_configs: dict[str, object] = {}
     for config in (source_config, intent_config, data_item):
         lists = config.get("lists", {})
         if not isinstance(lists, Mapping):
@@ -4549,9 +4574,9 @@ def _effective_list_configs(
 
 
 def _wildcard_slots(
-    source_config: Mapping[str, Any],
-    intent_config: Mapping[str, Any],
-    data_item: Mapping[str, Any],
+    source_config: Mapping[str, object],
+    intent_config: Mapping[str, object],
+    data_item: Mapping[str, object],
 ) -> frozenset[str]:
     """Return list names configured as wildcards in the effective grammar."""
     return frozenset(
@@ -4566,22 +4591,31 @@ def _wildcard_slots(
 
 
 def _range_boundaries(
-    range_data: Mapping[str, Any],
+    range_data: Mapping[str, object],
 ) -> tuple[float, float, tuple[float, float]] | None:
     """Return original and ordered range boundaries when both are valid."""
     if "from" not in range_data or "to" not in range_data:
         return None
-    try:
-        from_value = float(range_data["from"])
-        to_value = float(range_data["to"])
-    except (ValueError, TypeError):
+    from_value = _config_float(range_data["from"])
+    to_value = _config_float(range_data["to"])
+    if from_value is None or to_value is None:
         return None
     lower, upper = sorted((from_value, to_value))
     return from_value, to_value, (lower, upper)
 
 
+def _config_float(value: object) -> float | None:
+    """Return a finite-shape numeric configuration value as a float."""
+    if isinstance(value, bool) or not isinstance(value, str | int | float):
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
 def _optional_range_number(
-    range_data: Mapping[str, Any],
+    range_data: Mapping[str, object],
     key: str,
     *,
     positive: bool = False,
@@ -4589,14 +4623,13 @@ def _optional_range_number(
     """Return an optional numeric range setting when it is valid."""
     if key not in range_data:
         return None
-    try:
-        value = float(range_data[key])
-    except (ValueError, TypeError):
+    value = _config_float(range_data[key])
+    if value is None:
         return None
     return value if not positive or value > 0 else None
 
 
-def _range_fraction_type(range_data: Mapping[str, Any], list_name: str) -> str | None:
+def _range_fraction_type(range_data: Mapping[str, object], list_name: str) -> str | None:
     """Return a supported fraction type and log invalid configured strings."""
     fraction_type = range_data.get("fractions")
     if not isinstance(fraction_type, str):
@@ -4612,9 +4645,9 @@ def _range_fraction_type(range_data: Mapping[str, Any], list_name: str) -> str |
 
 
 def _compile_range_data(
-    source_config: Mapping[str, Any],
-    intent_config: Mapping[str, Any],
-    data_item: Mapping[str, Any],
+    source_config: Mapping[str, object],
+    intent_config: Mapping[str, object],
+    data_item: Mapping[str, object],
 ) -> tuple[dict[str, tuple[float, float]], dict[str, RangeStepMultiplier]]:
     """Compile range boundaries and step multipliers in a single pass."""
     ranges: dict[str, tuple[float, float]] = {}
@@ -4630,15 +4663,18 @@ def _compile_range_data(
         range_data = list_config.get("range")
         if not isinstance(range_data, Mapping):
             continue
-        boundaries = _range_boundaries(range_data)
+        typed_range_data = _string_keyed_mapping(range_data)
+        if typed_range_data is None:
+            continue
+        boundaries = _range_boundaries(typed_range_data)
         if boundaries is None:
             continue
         from_val, _to_val, (low, high) = boundaries
         ranges[list_name] = (low, high)
         step_mult[list_name] = RangeStepMultiplier(
-            step=_optional_range_number(range_data, "step", positive=True),
-            multiplier=_optional_range_number(range_data, "multiplier"),
-            fraction_type=_range_fraction_type(range_data, list_name),
+            step=_optional_range_number(typed_range_data, "step", positive=True),
+            multiplier=_optional_range_number(typed_range_data, "multiplier"),
+            fraction_type=_range_fraction_type(typed_range_data, list_name),
             original_from=from_val,
         )
 
@@ -4646,9 +4682,9 @@ def _compile_range_data(
 
 
 def _slot_values(
-    source_config: Mapping[str, Any],
-    intent_config: Mapping[str, Any],
-    data_item: Mapping[str, Any],
+    source_config: Mapping[str, object],
+    intent_config: Mapping[str, object],
+    data_item: Mapping[str, object],
 ) -> dict[str, tuple[str, ...]]:
     """Return available slot input values for template expansion."""
     values: dict[str, tuple[str, ...]] = {}
@@ -4672,16 +4708,16 @@ def _slot_values(
 
 
 def _slot_output_value_maps(
-    source_config: Mapping[str, Any],
-    intent_config: Mapping[str, Any],
-    data_item: Mapping[str, Any],
-) -> dict[str, dict[str, Any]]:
+    source_config: Mapping[str, object],
+    intent_config: Mapping[str, object],
+    data_item: Mapping[str, object],
+) -> dict[str, dict[str, object]]:
     """Return spoken-input to output-value maps for text slot lists.
 
     When a list appears in multiple config layers, later layers replace the
     whole list, matching HassIL's effective slot-list precedence.
     """
-    maps: dict[str, dict[str, Any]] = {}
+    maps: dict[str, dict[str, object]] = {}
     for list_name, list_config in _effective_list_configs(
         source_config,
         intent_config,
@@ -4692,7 +4728,7 @@ def _slot_output_value_maps(
     return maps
 
 
-def _static_slot_values(data_item: Mapping[str, Any]) -> dict[str, str]:
+def _static_slot_values(data_item: Mapping[str, object]) -> dict[str, str]:
     """Return static slots declared on a HassIL data item.
 
     HassIL permits numeric and boolean static slots; they are kept as their
@@ -4713,9 +4749,9 @@ def _static_slot_values(data_item: Mapping[str, Any]) -> dict[str, str]:
 
 
 def _expansion_rules(
-    source_config: Mapping[str, Any],
-    intent_config: Mapping[str, Any],
-    data_item: Mapping[str, Any],
+    source_config: Mapping[str, object],
+    intent_config: Mapping[str, object],
+    data_item: Mapping[str, object],
 ) -> dict[str, str]:
     """Return expansion rule templates by name."""
     rules: dict[str, str] = {}
@@ -4729,15 +4765,14 @@ def _expansion_rules(
     return rules
 
 
-def _list_range_endpoints(range_data: Any) -> tuple[Any, Any]:
+def _list_range_endpoints(range_data: object) -> tuple[object, object]:
     """Return configured range endpoints or safe fallback values."""
-    try:
+    if isinstance(range_data, Mapping):
         return range_data.get("from", 0), range_data.get("to", 100)
-    except (AttributeError, ValueError, TypeError):
-        return 0, 100
+    return 0, 100
 
 
-def _range_endpoint_output(value: Any, multiplier: float | None) -> Any:
+def _range_endpoint_output(value: object, multiplier: float | None) -> object:
     """Return an endpoint output scaled consistently with interior range values."""
     if multiplier is None:
         return value
@@ -4745,7 +4780,7 @@ def _range_endpoint_output(value: Any, multiplier: float | None) -> Any:
     return value if parsed is None else to_output_value(parsed * multiplier)
 
 
-def _values_from_list_config(list_config: Any, list_name: str | None = None) -> Iterable[str]:
+def _values_from_list_config(list_config: object, list_name: str | None = None) -> Iterable[str]:
     """Yield spoken values from a HassIL list config."""
     if isinstance(list_config, Mapping):
         if "values" in list_config:
@@ -4757,7 +4792,7 @@ def _values_from_list_config(list_config: Any, list_name: str | None = None) -> 
             return
 
         if "range" in list_config:
-            from_val, to_val = _list_range_endpoints(list_config["range"])
+            from_val, to_val = _list_range_endpoints(list_config.get("range"))
             yield str(from_val)
             if from_val != to_val:
                 yield str(to_val)
@@ -4774,9 +4809,9 @@ def _values_from_list_config(list_config: Any, list_name: str | None = None) -> 
 
 
 def _value_outputs_from_list_config(
-    list_config: Any,
+    list_config: object,
     list_name: str | None = None,
-) -> Iterable[tuple[str, Any]]:
+) -> Iterable[tuple[str, object]]:
     """Yield spoken input to output value pairs from a HassIL list config."""
     if isinstance(list_config, Mapping):
         if "values" in list_config:
@@ -4787,11 +4822,11 @@ def _value_outputs_from_list_config(
             return
 
         if "range" in list_config:
-            range_data = list_config["range"]
+            range_data = list_config.get("range")
             from_val, to_val = _list_range_endpoints(range_data)
             multiplier = (
-                _optional_range_number(range_data, "multiplier")
-                if isinstance(range_data, Mapping)
+                _optional_range_number(typed_range_data, "multiplier")
+                if (typed_range_data := _string_keyed_mapping(range_data)) is not None
                 else None
             )
             for value in (from_val, to_val):
@@ -4809,7 +4844,7 @@ def _value_outputs_from_list_config(
             yield from _value_item_input_outputs(value)
 
 
-def _value_item_input_outputs(value: Any) -> Iterable[tuple[str, Any]]:
+def _value_item_input_outputs(value: object) -> Iterable[tuple[str, object]]:
     """Yield expanded spoken inputs paired with one output value."""
     if isinstance(value, str):
         for input_value in _expand_list_input_value(value):
@@ -4839,7 +4874,7 @@ def _expand_list_input_value(value: str) -> Iterable[str]:
     )
 
 
-def _string_values(value: Any) -> Iterable[str]:
+def _string_values(value: object) -> Iterable[str]:
     """Yield non-empty string values from strings or lists."""
     if isinstance(value, str) and value.strip():
         yield value

@@ -9,7 +9,6 @@ import time
 from collections import Counter
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, cast
 
 import orjson
 import voluptuous as vol
@@ -34,6 +33,7 @@ from homeassistant.helpers import area_registry, entity_registry, floor_registry
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.discovery import async_load_platform
 from homeassistant.helpers.typing import ConfigType
+from homeassistant.util.json import JsonObjectType, JsonValueType
 
 DOMAIN = "assist_canonicalizer_benchmark"
 SERVICE_REAPPLY = "reapply"
@@ -107,14 +107,14 @@ _BENCHMARK_PLATFORMS = (
 
 
 @callback
-def _handle_timer_event(_event: Any, _timer: Any) -> None:
+def _handle_timer_event(_event: object, _timer: object) -> None:
     """Acknowledge benchmark timer events without external device I/O."""
 
 
 def _initialize_domain_data(
     hass: HomeAssistant,
-    manifest: dict[str, Any],
-) -> dict[str, Any]:
+    manifest: JsonObjectType,
+) -> dict[str, object]:
     """Initialize benchmark domain data and timer handling."""
     domain_data = hass.data.setdefault(DOMAIN, {})
     domain_data["lock"] = asyncio.Lock()
@@ -144,7 +144,7 @@ async def _handle_clear_conversation_traces(_call: ServiceCall) -> None:
 
 async def _handle_get_conversation_traces(
     _call: ServiceCall,
-) -> dict[str, Any]:
+) -> JsonObjectType:
     """Return passive traces emitted by the production conversation request."""
     return {"traces": [trace.as_dict() for trace in async_get_traces()]}
 
@@ -152,7 +152,7 @@ async def _handle_get_conversation_traces(
 async def _recognize_canonical(
     hass: HomeAssistant,
     call: ServiceCall,
-) -> dict[str, Any]:
+) -> JsonObjectType:
     """Recognize a canonical control without handling it."""
     default_agent = async_get_agent(hass, HOME_ASSISTANT_AGENT)
     recognize = getattr(default_agent, "async_recognize_intent", None)
@@ -200,10 +200,10 @@ async def _prepare_media_case(
 
 def _prepare_timer_case(
     hass: HomeAssistant,
-    domain_data: Mapping[str, Any],
+    domain_data: Mapping[str, object],
     intent_name: str,
     language: str,
-    slots: dict[str, Any],
+    slots: Mapping[str, object],
 ) -> None:
     """Reset timers and create an existing timer when required."""
     if intent_name not in _TIMER_INTENTS:
@@ -231,9 +231,9 @@ def _prepare_timer_case(
 
 
 def _prepare_list_case(
-    domain_data: Mapping[str, Any],
+    domain_data: Mapping[str, object],
     intent_name: str,
-    slots: dict[str, Any],
+    slots: Mapping[str, object],
 ) -> None:
     """Reset the benchmark to-do list when required."""
     if intent_name not in _LIST_INTENTS:
@@ -249,7 +249,7 @@ def _prepare_list_case(
 async def _prepare_shopping_list_case(
     hass: HomeAssistant,
     intent_name: str,
-    slots: dict[str, Any],
+    slots: Mapping[str, object],
 ) -> None:
     """Reset the benchmark shopping list when required."""
     if intent_name not in _SHOPPING_LIST_INTENTS:
@@ -277,13 +277,15 @@ async def _prepare_shopping_list_case(
 
 async def _prepare_case(
     hass: HomeAssistant,
-    domain_data: Mapping[str, Any],
+    domain_data: Mapping[str, object],
     call: ServiceCall,
 ) -> None:
     """Reset stateful live-intent prerequisites for one request."""
     intent_name = call.data["intent"]
     language = call.data["language"]
-    slots = cast(dict[str, Any], call.data["slots"])
+    slots = call.data["slots"]
+    if not isinstance(slots, dict):
+        raise ValueError("Benchmark slots must be an object")
     await _prepare_media_case(hass, intent_name)
     _prepare_timer_case(hass, domain_data, intent_name, language, slots)
     _prepare_list_case(domain_data, intent_name, slots)
@@ -292,8 +294,8 @@ async def _prepare_case(
 
 def _register_benchmark_services(
     hass: HomeAssistant,
-    manifest: dict[str, Any],
-    domain_data: Mapping[str, Any],
+    manifest: JsonObjectType,
+    domain_data: Mapping[str, object],
 ) -> None:
     """Register benchmark control, trace, and preparation services."""
 
@@ -301,7 +303,7 @@ def _register_benchmark_services(
         """Reapply the benchmark fixture manifest."""
         await _async_provision_safely(hass, manifest)
 
-    async def handle_recognize(call: ServiceCall) -> dict[str, Any]:
+    async def handle_recognize(call: ServiceCall) -> JsonObjectType:
         """Recognize canonical text for one service request."""
         return await _recognize_canonical(hass, call)
 
@@ -338,7 +340,7 @@ def _register_benchmark_services(
 
 def _schedule_fixture_provisioning(
     hass: HomeAssistant,
-    manifest: dict[str, Any],
+    manifest: JsonObjectType,
 ) -> None:
     """Provision now or after Home Assistant has started."""
 
@@ -367,7 +369,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     return True
 
 
-def _load_manifest() -> dict[str, Any]:
+def _load_manifest() -> JsonObjectType:
     """Load the tracked benchmark fixture manifest."""
     loaded = orjson.loads(_FIXTURE_PATH.read_bytes())
     if not isinstance(loaded, dict):
@@ -375,7 +377,7 @@ def _load_manifest() -> dict[str, Any]:
     return loaded
 
 
-def _validate_manifest(manifest: dict[str, Any]) -> None:
+def _validate_manifest(manifest: JsonObjectType) -> None:
     """Validate fixture counts, keys, and references before changing HA state."""
     if manifest.get("schema_version") != 1:
         raise ValueError("Unsupported benchmark fixture schema")
@@ -448,15 +450,15 @@ def _validate_manifest(manifest: dict[str, Any]) -> None:
         )
 
 
-def _object_list(mapping: dict[str, Any], key: str) -> list[dict[str, Any]]:
+def _object_list(mapping: JsonObjectType, key: str) -> list[JsonObjectType]:
     """Return a required list of objects from a manifest mapping."""
     value = mapping.get(key)
     if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
         raise ValueError(f"Benchmark fixture {key} must be a list of objects")
-    return value
+    return [item for item in value if isinstance(item, dict)]
 
 
-def _unique_string_values(items: list[dict[str, Any]], key: str, description: str) -> set[str]:
+def _unique_string_values(items: list[JsonObjectType], key: str, description: str) -> set[str]:
     """Return unique required string values for a manifest object list."""
     values = [_required_string(item, key) for item in items]
     if len(values) != len(set(values)):
@@ -464,7 +466,7 @@ def _unique_string_values(items: list[dict[str, Any]], key: str, description: st
     return set(values)
 
 
-def _required_string(mapping: dict[str, Any], key: str) -> str:
+def _required_string(mapping: Mapping[str, object], key: str) -> str:
     """Return one non-empty required manifest string."""
     value = mapping.get(key)
     if not isinstance(value, str) or not value.strip():
@@ -472,17 +474,17 @@ def _required_string(mapping: dict[str, Any], key: str) -> str:
     return value
 
 
-def _string_list(mapping: dict[str, Any], key: str) -> list[str]:
+def _string_list(mapping: Mapping[str, object], key: str) -> list[str]:
     """Return one manifest list containing only non-empty strings."""
     value = mapping.get(key)
     if not isinstance(value, list) or not all(
         isinstance(item, str) and item.strip() for item in value
     ):
         raise ValueError(f"Benchmark fixture {key} must be a list of non-empty strings")
-    return value
+    return [item for item in value if isinstance(item, str)]
 
 
-def _optional_int_slot(slots: dict[str, Any], key: str) -> int | None:
+def _optional_int_slot(slots: Mapping[str, object], key: str) -> int | None:
     """Return an optional integer-valued live oracle slot."""
     value = slots.get(key)
     if value is None:
@@ -492,7 +494,7 @@ def _optional_int_slot(slots: dict[str, Any], key: str) -> int | None:
     return int(float(value))
 
 
-def _optional_string_slot(slots: dict[str, Any], key: str) -> str | None:
+def _optional_string_slot(slots: Mapping[str, object], key: str) -> str | None:
     """Return an optional non-empty string-valued live oracle slot."""
     value = slots.get(key)
     if value is None:
@@ -505,7 +507,9 @@ def _optional_string_slot(slots: dict[str, Any], key: str) -> str | None:
 def _register_timer_device(hass: HomeAssistant, device_id: str) -> None:
     """Register one fixture device as a local intent-timer endpoint."""
     domain_data = hass.data[DOMAIN]
-    handlers = cast(dict[str, Any], domain_data["timer_handlers"])
+    handlers = domain_data["timer_handlers"]
+    if not isinstance(handlers, dict):
+        raise RuntimeError("Benchmark timer handler registry is invalid")
     if device_id in handlers:
         return
     handlers[device_id] = async_register_timer_handler(
@@ -515,7 +519,7 @@ def _register_timer_device(hass: HomeAssistant, device_id: str) -> None:
     )
 
 
-async def _async_provision_safely(hass: HomeAssistant, manifest: dict[str, Any]) -> None:
+async def _async_provision_safely(hass: HomeAssistant, manifest: JsonObjectType) -> None:
     """Provision the fixture and expose a stable error state on failure."""
     lock: asyncio.Lock = hass.data[DOMAIN]["lock"]
     async with lock:
@@ -539,7 +543,7 @@ async def _async_provision_safely(hass: HomeAssistant, manifest: dict[str, Any])
         )
 
 
-async def _async_provision(hass: HomeAssistant, manifest: dict[str, Any]) -> dict[str, Any]:
+async def _async_provision(hass: HomeAssistant, manifest: JsonObjectType) -> JsonObjectType:
     """Apply the tracked benchmark model and return its verified summary."""
     entities = _object_list(manifest, "entities")
     resolved_entities = await _async_resolve_entities(hass, entities)
@@ -552,11 +556,15 @@ async def _async_provision(hass: HomeAssistant, manifest: dict[str, Any]) -> dic
 
 
 def _apply_timer_device(
-    hass: HomeAssistant, manifest: dict[str, Any], resolved_entities: dict[str, str]
+    hass: HomeAssistant, manifest: JsonObjectType, resolved_entities: dict[str, str]
 ) -> None:
     """Use the designated timer anchor device as the live timer endpoint."""
     timer_anchor_entity = next(
-        (entity for entity in manifest.get("entities", []) if entity.get("timer_anchor") is True),
+        (
+            entity
+            for entity in _object_list(manifest, "entities")
+            if entity.get("timer_anchor") is True
+        ),
         None,
     )
 
@@ -581,7 +589,7 @@ def _apply_timer_device(
 
 
 async def _async_resolve_entities(
-    hass: HomeAssistant, entities: list[dict[str, Any]]
+    hass: HomeAssistant, entities: list[JsonObjectType]
 ) -> dict[str, str]:
     """Wait for every required demo entity and return identity-to-entity mappings."""
     registry = entity_registry.async_get(hass)
@@ -606,7 +614,7 @@ async def _async_resolve_entities(
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
 
-def _apply_floors(hass: HomeAssistant, floors: list[dict[str, Any]]) -> dict[str, str]:
+def _apply_floors(hass: HomeAssistant, floors: list[JsonObjectType]) -> dict[str, str]:
     """Create or normalize the exact fixture floors."""
     registry = floor_registry.async_get(hass)
     floor_ids: dict[str, str] = {}
@@ -619,15 +627,22 @@ def _apply_floors(hass: HomeAssistant, floors: list[dict[str, Any]]) -> dict[str
         entry = registry.async_get_floor_by_name(name)
         if entry is None:
             entry = registry.async_create(name, aliases=aliases, level=level)
+            floor_id = entry.floor_id
         else:
             # The WebSocket API accepts null to clear a floor level, while the
             # registry method's annotation currently omits that supported value.
-            entry = registry.async_update(
+            update_floor = getattr(registry, "async_update", None)
+            if not callable(update_floor):
+                raise RuntimeError("Home Assistant floor update API is unavailable")
+            updated_entry = update_floor(
                 entry.floor_id,
                 aliases=aliases,
-                level=cast(Any, level),
+                level=level,
             )
-        floor_ids[_required_string(floor, "key")] = entry.floor_id
+            floor_id = getattr(updated_entry, "floor_id", None)
+            if not isinstance(floor_id, str):
+                raise RuntimeError("Home Assistant floor update returned an invalid entry")
+        floor_ids[_required_string(floor, "key")] = floor_id
     actual_names = {entry.name for entry in registry.async_list_floors()}
     expected_names = {_required_string(floor, "name") for floor in floors}
     if actual_names != expected_names:
@@ -640,7 +655,7 @@ def _apply_floors(hass: HomeAssistant, floors: list[dict[str, Any]]) -> dict[str
 
 def _apply_areas(
     hass: HomeAssistant,
-    areas: list[dict[str, Any]],
+    areas: list[JsonObjectType],
     floor_ids: dict[str, str],
 ) -> dict[str, str]:
     """Create or normalize the exact fixture areas and floor assignments."""
@@ -672,7 +687,7 @@ def _apply_areas(
 
 def _apply_entities(
     hass: HomeAssistant,
-    entities: list[dict[str, Any]],
+    entities: list[JsonObjectType],
     resolved_entities: dict[str, str],
     area_ids: dict[str, str],
 ) -> None:
@@ -727,7 +742,7 @@ def _verify_exposure(
 
 def _verify_entity_registry_entry(
     registry: entity_registry.EntityRegistry,
-    entity: dict[str, Any],
+    entity: JsonObjectType,
     entity_id: str,
     area_ids: Mapping[str, str],
 ) -> None:
@@ -754,7 +769,7 @@ def _verify_entity_registry_entry(
 
 def _verify_entity_registry(
     hass: HomeAssistant,
-    entities: list[dict[str, Any]],
+    entities: list[JsonObjectType],
     resolved_entities: Mapping[str, str],
     area_ids: Mapping[str, str],
 ) -> None:
@@ -767,7 +782,7 @@ def _verify_entity_registry(
 
 def _verify_floor_registry(
     hass: HomeAssistant,
-    floors: list[dict[str, Any]],
+    floors: list[JsonObjectType],
     floor_ids: Mapping[str, str],
 ) -> None:
     """Verify every fixture floor's registry state."""
@@ -784,7 +799,7 @@ def _verify_floor_registry(
 
 def _verify_area_registry(
     hass: HomeAssistant,
-    areas: list[dict[str, Any]],
+    areas: list[JsonObjectType],
     area_ids: Mapping[str, str],
     floor_ids: Mapping[str, str],
 ) -> None:
@@ -802,30 +817,33 @@ def _verify_area_registry(
 
 def _fixture_summary(
     hass: HomeAssistant,
-    manifest: Mapping[str, Any],
-    entities: list[dict[str, Any]],
+    manifest: Mapping[str, JsonValueType],
+    entities: list[JsonObjectType],
     floor_ids: Mapping[str, str],
     area_ids: Mapping[str, str],
     exposed_entity_ids: set[str],
-) -> dict[str, Any]:
+) -> JsonObjectType:
     """Build the stable summary for a verified fixture."""
+    domain_counts: JsonObjectType = dict(
+        sorted(Counter(_required_string(entity, "domain") for entity in entities).items())
+    )
     return {
         "fingerprint": fixture_fingerprint(manifest),
         "floor_count": len(floor_ids),
         "area_count": len(area_ids),
         "exposed_entity_count": len(exposed_entity_ids),
         "runtime_state_count": len(hass.states.async_entity_ids()),
-        "domain_counts": dict(sorted(Counter(entity["domain"] for entity in entities).items())),
+        "domain_counts": domain_counts,
     }
 
 
 def _verified_summary(
     hass: HomeAssistant,
-    manifest: dict[str, Any],
+    manifest: JsonObjectType,
     resolved_entities: dict[str, str],
     floor_ids: dict[str, str],
     area_ids: dict[str, str],
-) -> dict[str, Any]:
+) -> JsonObjectType:
     """Verify the applied fixture and return its stable fingerprint summary."""
     entities = _object_list(manifest, "entities")
     expected_exposed = set(resolved_entities.values())
@@ -848,7 +866,7 @@ def _verified_summary(
     )
 
 
-def fixture_fingerprint(manifest: Mapping[str, Any]) -> str:
+def fixture_fingerprint(manifest: Mapping[str, JsonValueType]) -> str:
     """Return the fixture component's canonical user-model fingerprint."""
     keys = (
         "schema_version",
@@ -867,13 +885,13 @@ def fixture_fingerprint(manifest: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _entity_identity(entity: dict[str, Any]) -> str:
+def _entity_identity(entity: JsonObjectType) -> str:
     """Return one stable manifest identity for a fixture entity."""
     return ":".join(_required_string(entity, key) for key in ("domain", "platform", "unique_id"))
 
 
 def _vacuum_options(
-    entity: dict[str, Any], area_ids: Mapping[str, str]
+    entity: JsonObjectType, area_ids: Mapping[str, str]
 ) -> dict[str, dict[str, list[str]]]:
     """Return the deterministic all-area segment mapping for one vacuum."""
     segment = _required_string(entity, "vacuum_area_segment")
@@ -883,8 +901,8 @@ def _vacuum_options(
 def _set_status(
     hass: HomeAssistant,
     state: str,
-    manifest: dict[str, Any],
-    **attributes: Any,
+    manifest: JsonObjectType,
+    **attributes: JsonValueType,
 ) -> None:
     """Publish benchmark fixture readiness without adding an exposed entity."""
     hass.states.async_set(

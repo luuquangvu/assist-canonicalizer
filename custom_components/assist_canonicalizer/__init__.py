@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
+from datetime import datetime
 from functools import partial
-from typing import Any, cast
 
 from homeassistant.components.conversation import agent_manager
 from homeassistant.components.homeassistant import exposed_entities
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import callback
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import area_registry, entity_registry, floor_registry
 from homeassistant.helpers import event as ha_event
 
@@ -25,27 +26,27 @@ from .runtime import CanonicalizerRuntime
 from .services import async_setup_services, async_unload_services
 from .utils import normalize_language
 
-_UNINITIALIZED = object()
-async_get_pipelines: Any = _UNINITIALIZED
+type PipelineGetter = Callable[[HomeAssistant], Sequence[object]]
 
-type AssistCanonicalizerConfigEntry = Any
-type HomeAssistantInstance = Any
+
+class _UninitializedPipelineGetter:
+    """Sentinel for a pipeline helper that has not been imported yet."""
+
+
+_UNINITIALIZED = _UninitializedPipelineGetter()
+async_get_pipelines: PipelineGetter | _UninitializedPipelineGetter | None = _UNINITIALIZED
 
 PLATFORMS = [Platform.CONVERSATION]
 
 _LOGGER = logging.getLogger(__name__)
 
 
-def _runtime_from_entry(
-    hass: HomeAssistantInstance, entry: AssistCanonicalizerConfigEntry
-) -> CanonicalizerRuntime:
+def _runtime_from_entry(hass: HomeAssistant, entry: ConfigEntry) -> CanonicalizerRuntime:
     """Return runtime state for an entry."""
     return hass.data[DOMAIN][entry.entry_id][DATA_RUNTIME]
 
 
-async def async_setup_entry(
-    hass: HomeAssistantInstance, entry: AssistCanonicalizerConfigEntry
-) -> bool:
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Assist Canonicalizer from a config entry."""
     runtime = CanonicalizerRuntime()
     runtime.configure_config_path(hass.config.path)
@@ -73,7 +74,7 @@ async def async_setup_entry(
 
 
 def _subscribe_intent_updates(
-    hass: HomeAssistantInstance,
+    hass: HomeAssistant,
     runtime: CanonicalizerRuntime,
 ) -> None:
     """Subscribe when the installed Home Assistant exposes dynamic intent updates."""
@@ -87,28 +88,28 @@ def _subscribe_intent_updates(
     unsubscribe = subscribe_intents(partial(_handle_intent_updates, hass, runtime))
     if not callable(unsubscribe):
         raise TypeError("subscribe_intents returned a non-callable unsubscribe callback")
-    runtime.add_cleanup_callback(cast(Callable[[], None], unsubscribe))
+
+    def cleanup() -> None:
+        unsubscribe()
+
+    runtime.add_cleanup_callback(cleanup)
 
 
-async def async_unload_entry(
-    hass: HomeAssistantInstance, entry: AssistCanonicalizerConfigEntry
-) -> bool:
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload Assist Canonicalizer from a config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if not unload_ok:
         return False
     await _runtime_from_entry(hass, entry).async_shutdown()
     async_unload_services(hass)
-    domain_data: dict[str, Any] = hass.data.get(DOMAIN, {})
+    domain_data = hass.data.get(DOMAIN, {})
     domain_data.pop(entry.entry_id, None)
     if not domain_data:
         hass.data.pop(DOMAIN, None)
     return True
 
 
-def _refresh_registry_slot_values(
-    hass: HomeAssistantInstance, runtime: CanonicalizerRuntime
-) -> bool:
+def _refresh_registry_slot_values(hass: HomeAssistant, runtime: CanonicalizerRuntime) -> bool:
     """Refresh registry-derived slot values used for template expansion.
 
     Returns whether the cached values actually changed.
@@ -116,7 +117,7 @@ def _refresh_registry_slot_values(
     return runtime.update_registry_slot_values(async_registry_slot_values(hass))
 
 
-def _subscribe_registry_updates(hass: HomeAssistantInstance, runtime: CanonicalizerRuntime) -> None:
+def _subscribe_registry_updates(hass: HomeAssistant, runtime: CanonicalizerRuntime) -> None:
     """Subscribe to Home Assistant registry metadata changes."""
     debounced_rebuild = partial(_debounced_registry_rebuild, hass, runtime)
     refresh_from_event = partial(
@@ -143,9 +144,9 @@ def _subscribe_registry_updates(hass: HomeAssistantInstance, runtime: Canonicali
 
 
 def _handle_intent_updates(
-    hass: HomeAssistantInstance,
+    hass: HomeAssistant,
     runtime: CanonicalizerRuntime,
-    intents_update: Any,
+    intents_update: Mapping[object, Mapping[str, object]],
 ) -> None:
     """Update intent sources and trigger background rebuilds for active languages."""
     if runtime.closed:
@@ -159,9 +160,9 @@ def _handle_intent_updates(
 
 @callback
 def _debounced_registry_rebuild(
-    hass: HomeAssistantInstance,
+    hass: HomeAssistant,
     runtime: CanonicalizerRuntime,
-    now: Any = None,
+    now: datetime | None = None,
 ) -> None:
     """Refresh registry slot values and rebuild active indexes."""
     if runtime.closed:
@@ -176,10 +177,10 @@ def _debounced_registry_rebuild(
 
 @callback
 def _schedule_registry_refresh(
-    hass: HomeAssistantInstance,
+    hass: HomeAssistant,
     runtime: CanonicalizerRuntime,
-    debounced_rebuild: Any,
-    event: Any = None,
+    debounced_rebuild: Callable[[datetime], None],
+    event: object = None,
 ) -> None:
     """Schedule a debounced refresh after a registry update."""
     if runtime.closed:
@@ -194,25 +195,26 @@ def _schedule_registry_refresh(
     )
 
 
-def _discover_pipeline_languages(hass: HomeAssistantInstance) -> set[str]:
+def _discover_pipeline_languages(hass: HomeAssistant) -> set[str]:
     """Return unique language codes from all configured Assist pipelines."""
     global async_get_pipelines
     languages: set[str] = set()
-    if async_get_pipelines is _UNINITIALIZED:
+    if isinstance(async_get_pipelines, _UninitializedPipelineGetter):
         try:
             from homeassistant.components.assist_pipeline import (
-                async_get_pipelines as _async_get_pipelines,
+                async_get_pipelines as imported_get_pipelines,
             )
-
-            async_get_pipelines = _async_get_pipelines
         except (ImportError, RuntimeError) as err:
             _LOGGER.debug("Assist pipeline import failed: %s", err)
             async_get_pipelines = None
-    if async_get_pipelines is None:
+        else:
+            async_get_pipelines = imported_get_pipelines
+    pipeline_getter = async_get_pipelines
+    if pipeline_getter is None or isinstance(pipeline_getter, _UninitializedPipelineGetter):
         return languages
 
     try:
-        pipelines = async_get_pipelines(hass)
+        pipelines = pipeline_getter(hass)
     except Exception:
         return languages
 
@@ -225,7 +227,7 @@ def _discover_pipeline_languages(hass: HomeAssistantInstance) -> set[str]:
 
 
 async def _warmup_single_language(
-    hass: HomeAssistantInstance,
+    hass: HomeAssistant,
     runtime: CanonicalizerRuntime,
     language: str,
 ) -> None:
@@ -249,7 +251,7 @@ async def _warmup_single_language(
 
 
 async def _async_warmup_pipeline_languages(
-    hass: HomeAssistantInstance,
+    hass: HomeAssistant,
     runtime: CanonicalizerRuntime,
 ) -> None:
     """Discover configured pipeline languages and warm every index in the background."""

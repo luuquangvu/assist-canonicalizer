@@ -6,19 +6,29 @@ from collections.abc import Callable, Mapping
 from copy import deepcopy
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Protocol
 
 import orjson
 import yaml
 from hassil.util import merge_dict
 from homeassistant.util import language as language_module
 
+type IntentSource = Mapping[str, object]
+
+
+class TextReader(Protocol):
+    """Readable text stream accepted by the intents JSON loader."""
+
+    def read(self) -> str | bytes:
+        """Read the remaining text."""
+        ...
+
 
 def load_language_intent_sources(
     language: str,
     *,
     config_path: Callable[..., str] | None = None,
-) -> dict[str, Mapping[str, Any]]:
+) -> dict[str, IntentSource]:
     """Load built-in and custom sentence sources for a language."""
     language_variant = language_variant_for(language)
     if language_variant is None:
@@ -27,7 +37,7 @@ def load_language_intent_sources(
     built_in = _load_built_in_intents(language_variant)
     custom = _load_custom_sentences(language_variant, config_path)
 
-    sources: dict[str, Mapping[str, Any]] = {}
+    sources: dict[str, IntentSource] = {}
     if built_in and custom:
         effective = deepcopy(dict(built_in))
         merge_dict(effective, custom)
@@ -64,7 +74,7 @@ def language_variant_for(language: str) -> str | None:
 
 
 @lru_cache(maxsize=128)
-def _load_built_in_intents(language_variant: str) -> Mapping[str, Any]:
+def _load_built_in_intents(language_variant: str) -> dict[str, object]:
     """Load built-in Home Assistant intents for a language variant."""
     try:
         import home_assistant_intents
@@ -76,7 +86,7 @@ def _load_built_in_intents(language_variant: str) -> Mapping[str, Any]:
         intents = get_intents(language_variant, json_load=_json_load)
     except TypeError:
         intents = get_intents(language_variant)
-    return intents if isinstance(intents, Mapping) else {}
+    return dict(intents) if isinstance(intents, Mapping) else {}
 
 
 def clear_builtin_intents_caches() -> None:
@@ -88,7 +98,7 @@ def clear_builtin_intents_caches() -> None:
 def _load_custom_sentences(
     language_variant: str,
     config_path: Callable[..., str] | None,
-) -> Mapping[str, Any]:
+) -> dict[str, object]:
     """Load custom sentence YAML files for a language variant."""
     if config_path is None:
         return {}
@@ -97,7 +107,7 @@ def _load_custom_sentences(
     if not custom_dir.is_dir():
         return {}
 
-    merged: dict[str, Any] = {}
+    merged: dict[str, object] = {}
     for sentence_file in sorted(custom_dir.rglob("*.yaml")):
         with sentence_file.open(encoding="utf-8") as file_handle:
             loaded = yaml.safe_load(file_handle)
@@ -106,16 +116,18 @@ def _load_custom_sentences(
     return merged
 
 
-def _json_load(file_handle: Any) -> dict[str, Any]:
+def _json_load(file_handle: TextReader) -> dict[str, object]:
     """Load a JSON object from a file handle."""
     loaded = orjson.loads(file_handle.read())
-    return loaded if isinstance(loaded, dict) else {}
+    if not isinstance(loaded, dict):
+        return {}
+    return {key: value for key, value in loaded.items() if isinstance(key, str)}
 
 
 def _project_intent_source(
-    effective: Mapping[str, Any],
-    source: Mapping[str, Any],
-) -> dict[str, Any]:
+    effective: Mapping[str, object],
+    source: Mapping[str, object],
+) -> dict[str, object]:
     """Return effective grammar context with only one source's intent data."""
     projected = deepcopy(dict(effective))
     effective_intents = effective.get("intents", {})
@@ -124,15 +136,17 @@ def _project_intent_source(
         projected["intents"] = deepcopy(source_intents)
         return projected
 
-    projected_intents: dict[str, Any] = {}
+    projected_intents: dict[str, object] = {}
     for intent_name, source_intent in source_intents.items():
+        if not isinstance(intent_name, str):
+            continue
         effective_intent = effective_intents.get(intent_name, source_intent)
         if not isinstance(source_intent, Mapping) or not isinstance(effective_intent, Mapping):
             projected_intents[intent_name] = deepcopy(source_intent)
             continue
         projected_intent = deepcopy(dict(effective_intent))
         if "data" in source_intent:
-            projected_intent["data"] = deepcopy(source_intent["data"])
+            projected_intent["data"] = deepcopy(source_intent.get("data"))
         else:
             projected_intent.pop("data", None)
         projected_intents[intent_name] = projected_intent

@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
 
 from .bm25 import BM25Index
 from .candidate import Candidate, deduplicate_candidates
@@ -178,7 +177,7 @@ class CanonicalIndex:
         max_candidates: int = DEFAULT_MAX_CANDIDATES,
         *,
         slot_preferences: set[tuple[str, str]] | None = None,
-        intent_context: Mapping[str, Any] | None = None,
+        intent_context: Mapping[str, object] | None = None,
         min_confidence: float = DEFAULT_MIN_CONFIDENCE,
     ) -> tuple[RankedCandidate, ...]:
         """Rank indexed candidates for a query.

@@ -4544,7 +4544,9 @@ def test_evaluate_confidence_gates_empty_and_success_states() -> None:
     assert decision.rejection_reason is None
     assert decision.margin_policy == "no_competitor"
     assert decision.required_margin == 0.0
-    assert decision.as_dict()["top_candidate"]["text_sha256"]
+    top_candidate_payload = decision.as_dict()["top_candidate"]
+    assert top_candidate_payload is not None
+    assert top_candidate_payload["text_sha256"]
 
 
 @pytest.mark.parametrize(

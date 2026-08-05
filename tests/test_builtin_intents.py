@@ -5,7 +5,7 @@ import sys
 import tempfile
 from collections.abc import Iterator
 from functools import partial
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import orjson
@@ -24,6 +24,11 @@ from custom_components.assist_canonicalizer.grammar_loader import (
     build_candidates_from_intent_sources,
 )
 from custom_components.assist_canonicalizer.runtime import CanonicalizerRuntime
+
+
+def _as_dict(obj: object) -> dict[str, Any]:
+    """Cast a dynamic test object to a dictionary for subscript assertions."""
+    return cast(dict[str, Any], obj)
 
 
 @pytest.fixture(autouse=True)
@@ -59,7 +64,8 @@ def test_runtime_merges_language_sources_with_subscribed_sources() -> None:
         }
     )
     sources = runtime._all_intent_sources("zz")
-    assert sources["config"]["intents"]["CustomIntent"]["data"][0]["sentences"] == [
+    config_source = _as_dict(_as_dict(sources)["config"])
+    assert config_source["intents"]["CustomIntent"]["data"][0]["sentences"] == [
         "activate movie mode"
     ]
 
@@ -136,7 +142,8 @@ def test_load_custom_sentences_with_yaml() -> None:
 
         res = _load_custom_sentences("vi", partial(_config_path_in_tmpdir, tmpdir))
         assert "intents" in res
-        assert res["intents"]["HassTurnOn"]["data"][0]["sentences"] == ["bật {name}"]
+        res_intents = _as_dict(res["intents"])
+        assert res_intents["HassTurnOn"]["data"][0]["sentences"] == ["bật {name}"]
 
 
 def test_language_variant_for_import_error() -> None:
@@ -206,13 +213,16 @@ def test_load_custom_sentences_yaml_types_and_recursive_merge() -> None:
             f.write(yaml_content_3)
 
         res = _load_custom_sentences("vi", partial(_config_path_in_tmpdir, tmpdir))
+        res_dict = _as_dict(res)
+        res_intents = _as_dict(res_dict["intents"])
+        res_lists = _as_dict(res_dict["lists"])
         assert "intents" in res
-        assert [item["sentences"] for item in res["intents"]["HassTurnOn"]["data"]] == [
+        assert [item["sentences"] for item in res_intents["HassTurnOn"]["data"]] == [
             ["bật {name}"],
             ["mở {name}"],
         ]
-        assert res["lists"]["modes"]["values"] == ["day", "night"]
-        assert res["intents"]["HassTurnOn"]["other_data"] == 123
+        assert res_lists["modes"]["values"] == ["day", "night"]
+        assert res_intents["HassTurnOn"]["other_data"] == 123
 
 
 def test_load_language_sources_inherit_effective_grammar_without_mixing_provenance() -> None:
@@ -248,10 +258,10 @@ def test_load_language_sources_inherit_effective_grammar_without_mixing_provenan
     ):
         sources = load_language_intent_sources("en")
 
-    assert sources["built_in"]["intents"]["Demo"]["data"] == built_in["intents"]["Demo"]["data"]
-    assert (
-        sources["custom_sentence"]["intents"]["Demo"]["data"] == custom["intents"]["Demo"]["data"]
-    )
+    built_in_src = _as_dict(sources["built_in"])
+    custom_src = _as_dict(sources["custom_sentence"])
+    assert built_in_src["intents"]["Demo"]["data"] == built_in["intents"]["Demo"]["data"]
+    assert custom_src["intents"]["Demo"]["data"] == custom["intents"]["Demo"]["data"]
     candidates = build_candidates_from_intent_sources("en", sources)
     custom_texts = {
         candidate.text for candidate in candidates if candidate.source.value == "custom_sentence"
@@ -303,8 +313,10 @@ def test_load_language_sources_isolate_missing_data_and_preserve_top_level_conte
         assert source["integration_context"] == expected_context
         assert source["custom_top_level_key"] == {"enabled": True}
 
-    assert "data" not in sources["built_in"]["intents"]["CustomData"]
-    assert "data" not in sources["custom_sentence"]["intents"]["BuiltInData"]
+    built_in_intents = _as_dict(_as_dict(sources["built_in"])["intents"])
+    custom_intents = _as_dict(_as_dict(sources["custom_sentence"])["intents"])
+    assert "data" not in built_in_intents["CustomData"]
+    assert "data" not in custom_intents["BuiltInData"]
 
     candidates = build_candidates_from_intent_sources("en", sources)
     assert {(candidate.text, candidate.source) for candidate in candidates} == {

@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import contextlib
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from functools import lru_cache
 from math import isclose
 from string import whitespace
 from threading import Lock
 from time import monotonic
 from types import MappingProxyType
-from typing import Any
+
+from homeassistant.config_entries import ConfigEntry
 
 from .builtin_intents import language_variant_for
 from .const import (
@@ -54,7 +55,7 @@ def elapsed_ms(started_at: float) -> float:
     return round((monotonic() - started_at) * 1000, 3)
 
 
-def resolve_entry_thresholds(entry: Any) -> tuple[float, float]:
+def resolve_entry_thresholds(entry: ConfigEntry | None) -> tuple[float, float]:
     """Return (min_confidence, min_margin) from entry options with data fallback."""
     options = (getattr(entry, "options", {}) or {}) if entry is not None else {}
     data = (getattr(entry, "data", {}) or {}) if entry is not None else {}
@@ -70,7 +71,7 @@ def resolve_entry_thresholds(entry: Any) -> tuple[float, float]:
 
 
 @lru_cache(maxsize=128)
-def normalize_language(language: str) -> str:
+def normalize_language(language: object) -> str:
     """Return the Home Assistant language variant as a canonical cache key."""
     if not isinstance(language, str):
         raise ValueError("Language must be a non-empty string")
@@ -83,7 +84,7 @@ def normalize_language(language: str) -> str:
     return requested.replace("_", "-").lower()
 
 
-def _wildcard_language_key(language: str) -> str:
+def _wildcard_language_key(language: object) -> str:
     """Return a memory-only wildcard registry key with unknown-language fallback."""
     if not isinstance(language, str):
         raise ValueError("Language must be a non-empty string")
@@ -99,7 +100,7 @@ def intent_context_from_area_name(area_name: str | None) -> dict[str, dict[str, 
     return {"area": {"value": area_name, "text": area_name}}
 
 
-def normalized_slot_value_tokens(value: Any) -> frozenset[str]:
+def normalized_slot_value_tokens(value: object) -> frozenset[str]:
     """Return normalized tokens for a scalar slot or context value."""
     if value is None:
         return frozenset()
@@ -120,7 +121,7 @@ def _normalized_value_tokens_cached(value_text: str) -> frozenset[str]:
 
 
 def normalize_intent_context(
-    intent_context: Mapping[str, Any] | None,
+    intent_context: Mapping[str, object] | None,
 ) -> NormalizedIntentContext:
     """Return normalized HassIL intent context tokens keyed by slot name."""
     if not intent_context:
@@ -129,7 +130,7 @@ def normalize_intent_context(
     for key, raw_value in intent_context.items():
         if not isinstance(key, str) or not key:
             continue
-        values: list[Any] = []
+        values: list[object] = []
         if isinstance(raw_value, Mapping):
             values.extend(raw_value.get(field) for field in ("value", "text"))
         else:
@@ -142,7 +143,7 @@ def normalize_intent_context(
 
 
 def register_custom_wildcards_from_sources(
-    language: str | None, intent_sources: Mapping[str, Mapping[str, Any]]
+    language: str | None, intent_sources: Mapping[str, Mapping[str, object]]
 ) -> None:
     """Replace one language's in-memory wildcard names from loaded intent sources."""
     wildcards: set[str] = set()
@@ -150,7 +151,11 @@ def register_custom_wildcards_from_sources(
         lists = source_config.get("lists", {})
         if isinstance(lists, Mapping):
             for name, list_config in lists.items():
-                if isinstance(list_config, Mapping) and list_config.get("wildcard"):
+                if (
+                    isinstance(name, str)
+                    and isinstance(list_config, Mapping)
+                    and list_config.get("wildcard")
+                ):
                     wildcards.add(name)
     try:
         canonical_language = normalize_language(language) if language else ""
@@ -214,7 +219,7 @@ def _wildcard_slot_names(language: str | None = None) -> frozenset[str]:
 class _WildcardSlotNamesWrapper:
     """Wrapper for wildcard_slot_names to support scoped registry clearing."""
 
-    def __init__(self, func: Any) -> None:
+    def __init__(self, func: Callable[[str | None], frozenset[str]]) -> None:
         """Initialize the wrapper with the registry accessor function."""
         self._func = func
 
@@ -254,7 +259,7 @@ def wildcard_slot_names_sorted(language: str | None = None) -> tuple[str, ...]:
 
 
 @lru_cache(maxsize=1024)
-def parse_float(val_str: str) -> float | None:
+def parse_float(val_str: object) -> float | None:
     """Parse a string to float with a fast character check to avoid exceptions.
 
     This function aligns with the placeholder-based normalization in `normalization.py`.

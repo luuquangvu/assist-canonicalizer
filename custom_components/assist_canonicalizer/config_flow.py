@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Mapping
 
 import voluptuous as vol
 from homeassistant import config_entries
@@ -10,6 +10,7 @@ from homeassistant.components.conversation.agent_manager import get_agent_manage
 from homeassistant.components.conversation.const import DATA_COMPONENT, HOME_ASSISTANT_AGENT
 from homeassistant.components.conversation.entity import ConversationEntity
 from homeassistant.config_entries import ConfigFlowResult
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.selector import (
     NumberSelector,
     NumberSelectorConfig,
@@ -35,7 +36,9 @@ class AssistCanonicalizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
-    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+    async def async_step_user(
+        self, user_input: dict[str, object] | None = None
+    ) -> ConfigFlowResult:
         """Create a single Assist Canonicalizer config entry."""
         if self._async_current_entries():
             return self.async_abort(reason="single_instance_allowed")
@@ -58,7 +61,9 @@ class AssistCanonicalizerOptionsFlow(config_entries.OptionsFlow):
         """Initialize options flow."""
         self._config_entry = config_entry
 
-    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+    async def async_step_init(
+        self, user_input: dict[str, object] | None = None
+    ) -> ConfigFlowResult:
         """Manage Assist Canonicalizer options."""
         current = {**self._config_entry.data, **self._config_entry.options}
         if user_input is None:
@@ -74,8 +79,8 @@ class AssistCanonicalizerOptionsFlow(config_entries.OptionsFlow):
 
 
 def _config_schema(
-    hass: Any,
-    defaults: dict[str, Any] | None = None,
+    hass: HomeAssistant,
+    defaults: Mapping[str, object] | None = None,
     *,
     exclude_agent_id: str | None = None,
 ) -> vol.Schema:
@@ -127,7 +132,7 @@ def _config_schema(
 
 
 def _fallback_agent_choices(
-    hass: Any,
+    hass: HomeAssistant,
     current_agent_id: str,
     exclude_agent_id: str | None,
 ) -> dict[str, str]:
@@ -143,7 +148,7 @@ def _fallback_agent_choices(
     return choices
 
 
-def _entity_is_excluded(entity: Any, agent_id: str, exclude_agent_id: str | None) -> bool:
+def _entity_is_excluded(entity: object, agent_id: str, exclude_agent_id: str | None) -> bool:
     """Return whether a conversation entity belongs to the canonicalizer entry."""
     registry_entry = getattr(entity, "registry_entry", None)
     return exclude_agent_id is not None and (
@@ -157,12 +162,15 @@ def _entity_is_excluded(entity: Any, agent_id: str, exclude_agent_id: str | None
 
 
 def _conversation_entity_agents(
-    hass: Any,
+    hass: HomeAssistant,
     exclude_agent_id: str | None,
 ) -> dict[str, str]:
     """Return eligible conversation entity IDs and display labels."""
     agents: dict[str, str] = {}
-    entity_component = hass.data.get(DATA_COMPONENT)
+    hass_data = getattr(hass, "data", {})
+    if not isinstance(hass_data, Mapping):
+        return agents
+    entity_component = hass_data.get(DATA_COMPONENT)
     if entity_component is None:
         return agents
     for entity in entity_component.entities:
@@ -173,13 +181,15 @@ def _conversation_entity_agents(
             or _entity_is_excluded(entity, agent_id, exclude_agent_id)
         ):
             continue
-        state = hass.states.get(agent_id) if hasattr(hass, "states") else None
+        states = getattr(hass, "states", None)
+        get_state = getattr(states, "get", None)
+        state = get_state(agent_id) if callable(get_state) else None
         agent_name = getattr(state, "name", None) or getattr(entity, "name", None)
         agents[agent_id] = str(agent_name) if agent_name else agent_id
     return agents
 
 
-def _managed_fallback_agents(hass: Any, exclude_agent_id: str | None) -> dict[str, str]:
+def _managed_fallback_agents(hass: HomeAssistant, exclude_agent_id: str | None) -> dict[str, str]:
     """Return eligible non-entity agents registered with the agent manager."""
     agents: dict[str, str] = {}
     manager = get_agent_manager(hass)
@@ -196,7 +206,7 @@ def _managed_fallback_agents(hass: Any, exclude_agent_id: str | None) -> dict[st
     return agents
 
 
-def _available_fallback_agents(hass: Any, exclude_agent_id: str | None) -> dict[str, str]:
+def _available_fallback_agents(hass: HomeAssistant, exclude_agent_id: str | None) -> dict[str, str]:
     """Return fallback agent IDs and labels sorted by display name."""
     agents = _conversation_entity_agents(hass, exclude_agent_id)
     agents.update(_managed_fallback_agents(hass, exclude_agent_id))

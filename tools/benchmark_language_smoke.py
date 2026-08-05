@@ -6,23 +6,60 @@ request; correctness is decided exclusively by the managed Home Assistant proces
 
 from __future__ import annotations
 
-import contextlib
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from itertools import islice
-from typing import Any
+from typing import Protocol, runtime_checkable
 
 import home_assistant_intents
 from hassil.errors import MissingListError, MissingRuleError
-from hassil.intents import Intents, TextSlotList
+from hassil.expression import Sentence
+from hassil.intents import Intent, Intents, SlotList, TextSlotList
 
-_sample_sentence = None
 
-with contextlib.suppress(ImportError):
-    from hassil.sample import sample_sentence as _sample_sentence
+class SampleSentence(Protocol):
+    """Callable interface shared by supported Hassil sample helpers."""
 
-sample_sentence: Any = _sample_sentence
-HAS_SAMPLE_SENTENCE = sample_sentence is not None
+    def __call__(
+        self,
+        sentence: Sentence,
+        slot_lists: dict[str, SlotList] | None = None,
+        expansion_rules: dict[str, Sentence] | None = None,
+        language: str | None = None,
+        expand_lists: bool = True,
+        expand_ranges: bool = True,
+        skip_optionals: bool = False,
+    ) -> Iterable[str]:
+        """Generate sentence samples for one parsed expression."""
+        ...
+
+
+class ListReference(Protocol):
+    """List-reference fields consumed by fixture sampling."""
+
+    list_name: str
+    slot_name: str
+
+
+@runtime_checkable
+class HasListReferences(Protocol):
+    """Expression interface used by supported Hassil releases."""
+
+    def list_references(self, expansion_rules: Mapping[str, Sentence]) -> Iterable[ListReference]:
+        """Return list references reachable from this expression."""
+        ...
+
+
+_sample_sentence: SampleSentence | None = None
+
+try:
+    from hassil.sample import sample_sentence as imported_sample_sentence
+except ImportError:
+    pass
+else:
+    _sample_sentence = imported_sample_sentence
+
+HAS_SAMPLE_SENTENCE = _sample_sentence is not None
 
 ACCURACY_GATED_LANGUAGES = frozenset({"de", "en", "fr", "nl", "vi"})
 FIXTURE_ENTITY_NAME = "Living Room Lamp"
@@ -79,15 +116,20 @@ def build_language_smoke_commands() -> tuple[LanguageSmokeCommand, ...]:
     return tuple(commands)
 
 
-def _intent_data_supports_domain(intent_data: Any, target_domain: str) -> bool:
+def _intent_data_supports_domain(intent_data: object, target_domain: str) -> bool:
     """Return whether intent data permits the fixture target domain."""
-    fixed_domain = intent_data.slots.get("domain")
-    required_valid, required_domains = _normalized_domain_values(
-        intent_data.requires_context.get("domain")
-    )
-    excluded_valid, excluded_domains = _normalized_domain_values(
-        intent_data.excludes_context.get("domain")
-    )
+    slots = getattr(intent_data, "slots", None)
+    requires_context = getattr(intent_data, "requires_context", None)
+    excludes_context = getattr(intent_data, "excludes_context", None)
+    if (
+        not isinstance(slots, Mapping)
+        or not isinstance(requires_context, Mapping)
+        or not isinstance(excludes_context, Mapping)
+    ):
+        return False
+    fixed_domain = slots.get("domain")
+    required_valid, required_domains = _normalized_domain_values(requires_context.get("domain"))
+    excluded_valid, excluded_domains = _normalized_domain_values(excludes_context.get("domain"))
     if not (required_valid and excluded_valid):
         return False
     if fixed_domain not in (None, target_domain):
@@ -97,7 +139,10 @@ def _intent_data_supports_domain(intent_data: Any, target_domain: str) -> bool:
     return excluded_domains is None or target_domain not in excluded_domains
 
 
-def _normalized_domain_values(value: Any) -> tuple[bool, tuple[Any, ...] | None]:
+type DomainValue = str | bool | int | float
+
+
+def _normalized_domain_values(value: object) -> tuple[bool, tuple[DomainValue, ...] | None]:
     """Return supported directive values, with None representing no fixed value."""
     if isinstance(value, Mapping):
         value = value.get("value")
@@ -108,20 +153,23 @@ def _normalized_domain_values(value: Any) -> tuple[bool, tuple[Any, ...] | None]
     if isinstance(value, (list, tuple, set, frozenset)) and all(
         isinstance(item, str | bool | int | float) for item in value
     ):
-        return True, tuple(value)
+        return True, tuple(item for item in value if isinstance(item, str | bool | int | float))
     return False, None
 
 
 def _fixture_sentence_sample(
-    sentence: Any,
-    slot_lists: Mapping[str, Any],
-    expansion_rules: Mapping[str, Any],
+    sentence: object,
+    slot_lists: dict[str, SlotList],
+    expansion_rules: dict[str, Sentence],
     fixture_values: Mapping[str, str],
     language: str,
 ) -> tuple[str, frozenset[str], str] | None:
     """Return the preferred fixture slot and sampled sentence."""
     try:
-        list_references = tuple(sentence.expression.list_references(expansion_rules))
+        expression = getattr(sentence, "expression", None)
+        if not isinstance(expression, HasListReferences):
+            return None
+        list_references = tuple(expression.list_references(expansion_rules))
         fixture_references = tuple(
             list_reference
             for list_reference in list_references
@@ -137,7 +185,11 @@ def _fixture_sentence_sample(
         )
         if not referenced_fixture_slots:
             return None
-        samples = sample_sentence(
+        if not isinstance(sentence, Sentence):
+            return None
+        if _sample_sentence is None:
+            return None
+        samples = _sample_sentence(
             sentence,
             slot_lists,
             expansion_rules,
@@ -180,8 +232,8 @@ def _fixture_sentence_sample(
 
 def _turn_on_sample_candidates(
     intents: Intents,
-    intent: Any,
-    slot_lists: Mapping[str, Any],
+    intent: Intent,
+    slot_lists: dict[str, SlotList],
     fixture_values: Mapping[str, str],
     target_domain: str,
     language: str,
@@ -238,7 +290,7 @@ def _sample_turn_on_command(
     language: str, entity_name: str, target_domain: str
 ) -> tuple[str, tuple[tuple[str, str], ...]]:
     """Sample a fixture-bound command without evaluating it in-process."""
-    if sample_sentence is None:
+    if _sample_sentence is None:
         raise RuntimeError("sample_sentence is not available in the installed version of hassil")
     intent_dict = home_assistant_intents.get_intents(language)
     if intent_dict is None:

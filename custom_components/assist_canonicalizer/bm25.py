@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import lru_cache
 from math import log
-from typing import Any
+from typing import Protocol
 
 from .normalization import tokenize_normalized, tokenize_text
 
@@ -18,6 +18,15 @@ class BM25Document:
 
     text: str
     tokens: tuple[str, ...]
+
+
+class BM25DocumentLike(Protocol):
+    """Document interface required by custom BM25 scoring."""
+
+    @property
+    def normalized_text(self) -> str:
+        """Return normalized document text."""
+        ...
 
 
 @lru_cache(maxsize=8192)
@@ -151,7 +160,7 @@ class BM25Index:
 
     def _build_temp_postings(
         self,
-        documents: Sequence[str | Any],
+        documents: Sequence[str | BM25DocumentLike],
         k1: float,
         b: float,
     ) -> tuple[list[Counter[str]], dict[str, list[tuple[int, float]]]]:
@@ -219,7 +228,7 @@ class BM25Index:
     def score_custom_documents(
         self,
         query: str,
-        documents: Sequence[str | Any],
+        documents: Sequence[str | BM25DocumentLike],
         k1: float | None = None,
         b: float | None = None,
     ) -> tuple[float, ...]:
@@ -233,7 +242,7 @@ class BM25Index:
     def score_custom_documents_tokens(
         self,
         query_tokens: tuple[str, ...],
-        documents: Sequence[str | Any],
+        documents: Sequence[str | BM25DocumentLike],
         k1: float | None = None,
         b: float | None = None,
     ) -> tuple[float, ...]:

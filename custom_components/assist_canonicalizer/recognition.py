@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import inspect
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from copy import copy
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, cast
 
 from homeassistant.components.conversation.agent_manager import async_get_agent
 from homeassistant.components.conversation.const import HOME_ASSISTANT_AGENT
 from homeassistant.components.conversation.models import ConversationInput
+from homeassistant.core import HomeAssistant
+from homeassistant.util.json import JsonObjectType
 
 from .const import (
     CONVERSATION_INPUT_AREA_CONTEXT_FIELD,
@@ -23,6 +25,7 @@ from .normalization import normalize_text
 from .utils import elapsed_ms
 
 _MAX_OBSERVED_VALUE_LENGTH = 128
+type ObservedSlotValue = bool | int | float | str | None
 
 
 class RecognitionKind(StrEnum):
@@ -41,7 +44,7 @@ class RecognitionObservation:
 
     kind: RecognitionKind
     intent_name: str | None = None
-    slots: tuple[tuple[str, Any], ...] = ()
+    slots: tuple[tuple[str, ObservedSlotValue], ...] = ()
     unmatched_entities: tuple[str, ...] = ()
     required_context: tuple[str, ...] = ()
     excluded_context: tuple[str, ...] = ()
@@ -54,7 +57,7 @@ class RecognitionObservation:
         """Return whether the delegated text can safely advance to execution."""
         return self.kind is RecognitionKind.INTENT
 
-    def as_dict(self, *, include_slot_values: bool = True) -> dict[str, Any]:
+    def as_dict(self, *, include_slot_values: bool = True) -> JsonObjectType:
         """Return a deterministic serializable representation."""
         return {
             "kind": self.kind.value,
@@ -73,7 +76,7 @@ class RecognitionObservation:
 
 
 async def async_observe_delegated_text(
-    hass: Any,
+    hass: HomeAssistant,
     user_input: ConversationInput,
     delegated_text: str,
 ) -> RecognitionObservation:
@@ -111,11 +114,11 @@ async def async_observe_delegated_text(
 
 
 def _recognition_calls_or_error(
-    hass: Any,
+    hass: HomeAssistant,
 ) -> (
     tuple[
-        Callable[[ConversationInput], Awaitable[Any]],
-        Callable[[ConversationInput], Awaitable[Any]],
+        Callable[[ConversationInput], Awaitable[object]],
+        Callable[[ConversationInput], Awaitable[object]],
     ]
     | str
 ):
@@ -131,14 +134,26 @@ def _recognition_calls_or_error(
     recognize_intent = getattr(default_agent, "async_recognize_intent", None)
     if not callable(recognize_trigger) or not callable(recognize_intent):
         return "recognition_api_unavailable"
-    return (
-        cast(Callable[[ConversationInput], Awaitable[Any]], recognize_trigger),
-        cast(Callable[[ConversationInput], Awaitable[Any]], recognize_intent),
-    )
+
+    async def call_recognize_trigger(user_input: ConversationInput) -> object:
+        """Call the dynamically discovered sentence-trigger recognizer."""
+        result = recognize_trigger(user_input)
+        if not inspect.isawaitable(result):
+            raise TypeError("async_recognize_sentence_trigger returned a non-awaitable result")
+        return await result
+
+    async def call_recognize_intent(user_input: ConversationInput) -> object:
+        """Call the dynamically discovered intent recognizer."""
+        result = recognize_intent(user_input)
+        if not inspect.isawaitable(result):
+            raise TypeError("async_recognize_intent returned a non-awaitable result")
+        return await result
+
+    return call_recognize_trigger, call_recognize_intent
 
 
 def _observation_from_result(
-    result: Any,
+    result: object,
     started_at: float,
     forwarded_context: tuple[str, ...],
 ) -> RecognitionObservation:
@@ -159,7 +174,7 @@ def _observation_from_result(
     intent_name = getattr(intent_result, "name", None)
     if not isinstance(intent_name, str) or not intent_name:
         return _error_observation(started_at, forwarded_context, "invalid_result")
-    slot_items: list[tuple[str, Any]] = []
+    slot_items: list[tuple[str, ObservedSlotValue]] = []
     for entity in getattr(result, "entities_list", ()):
         name = getattr(entity, "name", None)
         if isinstance(name, str) and name:
@@ -179,7 +194,7 @@ def _observation_from_result(
 
 def metadata_matches_observation(
     intent_name: str,
-    slots: Mapping[str, Any],
+    slots: Mapping[str, object],
     observation: RecognitionObservation,
 ) -> tuple[bool, bool]:
     """Compare non-authoritative candidate metadata with a live observation."""
@@ -212,14 +227,14 @@ def _forwarded_context_fields(user_input: ConversationInput) -> tuple[str, ...]:
     return tuple(fields)
 
 
-def _context_constraint_names(value: Any) -> tuple[str, ...]:
+def _context_constraint_names(value: object) -> tuple[str, ...]:
     """Return deterministic constraint keys without retaining values."""
     if not isinstance(value, Mapping):
         return ()
     return tuple(sorted(key for key in value if isinstance(key, str) and key))
 
 
-def _bounded_serializable_value(value: Any) -> Any:
+def _bounded_serializable_value(value: object) -> ObservedSlotValue:
     """Return a bounded JSON-compatible scalar for handler-visible slots."""
     if value is None or isinstance(value, bool | int | float):
         return value
@@ -228,7 +243,7 @@ def _bounded_serializable_value(value: Any) -> Any:
     return str(value)[:_MAX_OBSERVED_VALUE_LENGTH]
 
 
-def _normalized_observed_value(value: Any) -> str:
+def _normalized_observed_value(value: object) -> str:
     """Return a stable comparison value for diagnostic metadata divergence."""
     if value is None:
         return ""

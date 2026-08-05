@@ -13,14 +13,19 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence, Set
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import Any
 from uuid import uuid4
 
 import orjson
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers import storage
+from homeassistant.util.json import JsonObjectType, JsonValueType
 
 from .bm25 import clear_bm25_caches
-from .builtin_intents import clear_builtin_intents_caches, load_language_intent_sources
+from .builtin_intents import (
+    IntentSource,
+    clear_builtin_intents_caches,
+    load_language_intent_sources,
+)
 from .candidate import Candidate, CandidateSource
 from .const import (
     DEFAULT_MAX_CANDIDATES,
@@ -89,7 +94,7 @@ class IndexBuildSnapshot:
     """Immutable inputs and fingerprint for one candidate index build."""
 
     language: str
-    intent_sources: dict[str, Mapping[str, Any]]
+    intent_sources: dict[str, IntentSource]
     registry_slot_values: dict[str, tuple[str, ...]]
     dynamic_registry_intents: tuple[DynamicRegistryIntent, ...]
     fingerprint: str
@@ -170,8 +175,8 @@ class CanonicalizerRuntime:
     # Query ranking runs in executor threads while the event loop invalidates
     # these caches, so both halves of each logical entry must change atomically.
     _source_cache_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
-    intent_sources: dict[str, Mapping[str, Any]] = field(default_factory=dict)
-    language_intent_sources: dict[str, dict[str, Mapping[str, Any]]] = field(default_factory=dict)
+    intent_sources: dict[str, IntentSource] = field(default_factory=dict)
+    language_intent_sources: dict[str, dict[str, IntentSource]] = field(default_factory=dict)
     config_path: Callable[..., str] | None = None
     registry_slot_values: dict[str, tuple[str, ...]] = field(default_factory=dict)
     registry_slot_index: RegistrySlotIndex = field(default_factory=lambda: RegistrySlotIndex({}))
@@ -192,7 +197,7 @@ class CanonicalizerRuntime:
     rebuild_tasks: dict[str, tuple[IndexGeneration, asyncio.Task[CanonicalIndex | None]]] = field(
         default_factory=dict
     )
-    warmup_tasks: set[asyncio.Task[Any]] = field(default_factory=set, repr=False)
+    warmup_tasks: set[asyncio.Task[object]] = field(default_factory=set, repr=False)
     _logged_rebuilds: dict[tuple[str, IndexGeneration], int] = field(
         default_factory=dict,
         repr=False,
@@ -251,7 +256,7 @@ class CanonicalizerRuntime:
 
     def _start_rebuild_task(
         self,
-        hass: Any,
+        hass: HomeAssistant,
         language: str,
         generation: IndexGeneration,
     ) -> asyncio.Task[CanonicalIndex | None] | None:
@@ -306,7 +311,7 @@ class CanonicalizerRuntime:
 
     async def async_rebuild_index(
         self,
-        hass: Any,
+        hass: HomeAssistant,
         language: str,
         *,
         log_error: bool = True,
@@ -338,7 +343,9 @@ class CanonicalizerRuntime:
         finally:
             self._discard_finished_rebuild_task(language, task)
 
-    async def async_load_index_from_store(self, hass: Any, language: str) -> CanonicalIndex | None:
+    async def async_load_index_from_store(
+        self, hass: HomeAssistant, language: str
+    ) -> CanonicalIndex | None:
         """Load an index only when its persisted source fingerprint is current."""
         if not self._start_index_load():
             return None
@@ -349,7 +356,7 @@ class CanonicalizerRuntime:
 
     async def _async_load_index_from_store(
         self,
-        hass: Any,
+        hass: HomeAssistant,
         language: str,
     ) -> CanonicalIndex | None:
         """Load one persisted index while the public operation tracks its lifetime."""
@@ -393,7 +400,7 @@ class CanonicalizerRuntime:
 
     async def async_save_index_to_store(
         self,
-        hass: Any,
+        hass: HomeAssistant,
         index: CanonicalIndex,
         fingerprint: str,
         *,
@@ -409,12 +416,13 @@ class CanonicalizerRuntime:
             _serialize_candidates,
             index.candidates,
         )
-        data = {
+        serialized_candidates: list[JsonValueType] = [*candidates_data]
+        data: JsonObjectType = {
             "build_version": _INDEX_BUILD_VERSION,
             "language": language,
             "fingerprint": fingerprint,
             "candidate_count": len(candidates_data),
-            "candidates": candidates_data,
+            "candidates": serialized_candidates,
         }
 
         async with self._storage_lock:
@@ -451,7 +459,7 @@ class CanonicalizerRuntime:
 
     async def async_clear_index(
         self,
-        hass: Any,
+        hass: HomeAssistant,
         language: str | None = None,
     ) -> IndexClearResult:
         """Clear indexes and return the cache state captured under the storage lock."""
@@ -513,7 +521,7 @@ class CanonicalizerRuntime:
         max_candidates: int = DEFAULT_MAX_CANDIDATES,
         *,
         slot_preferences: set[tuple[str, str]] | None = None,
-        intent_context: Mapping[str, Any] | None = None,
+        intent_context: Mapping[str, object] | None = None,
         min_confidence: float = DEFAULT_MIN_CONFIDENCE,
         min_margin: float = DEFAULT_MIN_MARGIN,
     ) -> tuple[RankedCandidate, ...]:
@@ -580,7 +588,7 @@ class CanonicalizerRuntime:
         max_candidates: int = DEFAULT_MAX_CANDIDATES,
         *,
         slot_preferences: set[tuple[str, str]] | None = None,
-        intent_context: Mapping[str, Any] | None = None,
+        intent_context: Mapping[str, object] | None = None,
         min_confidence: float = DEFAULT_MIN_CONFIDENCE,
         min_margin: float = DEFAULT_MIN_MARGIN,
     ) -> tuple[tuple[RankedCandidate, ...], ConfidenceGateDecision]:
@@ -669,7 +677,7 @@ class CanonicalizerRuntime:
         )
         return True
 
-    def update_intent_sources(self, intents_update: Mapping[Any, Mapping[str, Any]]) -> bool:
+    def update_intent_sources(self, intents_update: Mapping[object, IntentSource]) -> bool:
         """Merge changed Home Assistant conversation intent sources.
 
         Returns whether the merged sources changed so callers can skip
@@ -706,7 +714,7 @@ class CanonicalizerRuntime:
             counts[source_key] = len(intents) if isinstance(intents, Mapping) else 0
         return counts
 
-    def _intent_sources_for_query(self, language: str) -> dict[str, Mapping[str, Any]]:
+    def _intent_sources_for_query(self, language: str) -> dict[str, IntentSource]:
         """Return cached intent sources for query-time candidate expansion."""
         language = normalize_language(language)
         with self._source_cache_lock:
@@ -786,7 +794,7 @@ class CanonicalizerRuntime:
                 self._registry_slot_index_generations[language] = generation
         return registry_slot_values, built
 
-    def _all_intent_sources(self, language: str) -> dict[str, Mapping[str, Any]]:
+    def _all_intent_sources(self, language: str) -> dict[str, IntentSource]:
         """Return built-in, custom, and subscribed intent sources."""
         language = normalize_language(language)
         with self._source_cache_lock:
@@ -807,7 +815,7 @@ class CanonicalizerRuntime:
         self,
     ) -> tuple[
         Callable[..., str] | None,
-        dict[str, Mapping[str, Any]],
+        dict[str, Mapping[str, object]],
         dict[str, tuple[str, ...]],
     ]:
         """Copy mutable runtime inputs before executor work begins."""
@@ -872,7 +880,7 @@ class CanonicalizerRuntime:
         if self._active_index_loads == 0:
             self._index_loads_drained.set()
 
-    async def _async_load_store_manifest(self, hass: Any) -> tuple[str, set[str]] | None:
+    async def _async_load_store_manifest(self, hass: HomeAssistant) -> tuple[str, set[str]] | None:
         """Load the cache epoch and known persisted language keys."""
         try:
             data = await _async_await_drained(_manifest_store(hass).async_load())
@@ -888,23 +896,23 @@ class CanonicalizerRuntime:
             isinstance(language, str) for language in languages
         ):
             return None
-        return cache_epoch, {normalize_language(language) for language in languages}
+        return cache_epoch, {
+            normalize_language(language) for language in languages if isinstance(language, str)
+        }
 
     async def _async_save_store_manifest(
         self,
-        hass: Any,
+        hass: HomeAssistant,
         cache_epoch: str,
         languages: set[str],
     ) -> None:
         """Persist the cache epoch and known language store keys."""
-        await _async_await_drained(
-            _manifest_store(hass).async_save(
-                {
-                    "cache_epoch": cache_epoch,
-                    "languages": sorted(languages),
-                }
-            )
-        )
+        serialized_languages: list[JsonValueType] = [*sorted(languages)]
+        manifest_data: JsonObjectType = {
+            "cache_epoch": cache_epoch,
+            "languages": serialized_languages,
+        }
+        await _async_await_drained(_manifest_store(hass).async_save(manifest_data))
 
     def add_cleanup_callback(self, callback: Callable[[], None]) -> None:
         """Remember a cleanup callback for unload."""
@@ -913,7 +921,7 @@ class CanonicalizerRuntime:
             return
         self.cleanup_callbacks.append(callback)
 
-    def track_warmup_task(self, task: Any) -> None:
+    def track_warmup_task(self, task: object) -> None:
         """Track a warmup task so shutdown can cancel and drain it."""
         if not isinstance(task, asyncio.Task):
             return
@@ -949,7 +957,7 @@ class CanonicalizerRuntime:
         self._begin_shutdown()
         self._clear_runtime_state_and_caches()
 
-    def _begin_shutdown(self) -> tuple[asyncio.Task[Any], ...]:
+    def _begin_shutdown(self) -> tuple[asyncio.Task[object], ...]:
         """Start shutdown synchronously and return runtime-owned tasks to drain."""
         if not self._closed:
             self._closed = True
@@ -962,7 +970,7 @@ class CanonicalizerRuntime:
         self.cleanup_callbacks.clear()
         for callback in callbacks:
             callback()
-        tasks: set[asyncio.Task[Any]] = set(self.warmup_tasks)
+        tasks: set[asyncio.Task[object]] = set(self.warmup_tasks)
         tasks.update(task for _generation, task in self.rebuild_tasks.values())
         self.warmup_tasks.clear()
         self.rebuild_tasks.clear()
@@ -1010,7 +1018,7 @@ class CanonicalizerRuntime:
         last_request_id: str | None = None,
         selected_delegated_text_hash: str | None = None,
         selected_candidate_source: str | None = None,
-        confidence_gate: Mapping[str, Any] | None = None,
+        confidence_gate: Mapping[str, JsonValueType] | None = None,
         execution_result: str | None = None,
         recognition_kind: str | None = None,
         recognition_intent: str | None = None,
@@ -1043,7 +1051,7 @@ class CanonicalizerRuntime:
                 clear_request_trace=clear_request_trace,
                 clear_recognition_trace=clear_recognition_trace,
             )
-            updates: dict[str, Any] = {
+            updates: dict[str, object] = {
                 key: value
                 for key, value in {
                     "candidate_count": candidate_count,
@@ -1116,7 +1124,7 @@ def _publish_rebuilt_index(
 
 async def _run_rebuild_attempt(
     runtime: CanonicalizerRuntime,
-    hass: Any,
+    hass: HomeAssistant,
     language: str,
     generation: IndexGeneration,
 ) -> tuple[CanonicalIndex | None, bool]:
@@ -1173,7 +1181,7 @@ async def _run_rebuild_attempt(
 
 async def _run_rebuild(
     runtime: CanonicalizerRuntime,
-    hass: Any,
+    hass: HomeAssistant,
     language: str,
     generation: IndexGeneration,
 ) -> CanonicalIndex | None:
@@ -1194,7 +1202,7 @@ async def _run_rebuild(
 def _create_build_snapshot_and_register_wildcards(
     language: str,
     config_path: Callable[..., str] | None,
-    subscribed_sources: dict[str, Mapping[str, Any]],
+    subscribed_sources: dict[str, Mapping[str, object]],
     registry_slot_values: dict[str, tuple[str, ...]],
 ) -> IndexBuildSnapshot:
     """Load sources, register in-memory wildcards, and fingerprint build inputs."""
@@ -1251,8 +1259,8 @@ def _index_load_invalidated(
 
 async def _async_discard_persisted_index(
     runtime: CanonicalizerRuntime,
-    hass: Any,
-    store: Any,
+    hass: HomeAssistant,
+    store: storage.Store[JsonObjectType],
     language: str,
     cache_epoch: str,
     persisted_languages: set[str],
@@ -1272,7 +1280,7 @@ async def _async_discard_persisted_index(
 
 async def _async_load_persisted_candidates(
     runtime: CanonicalizerRuntime,
-    hass: Any,
+    hass: HomeAssistant,
     language: str,
     fingerprint: str,
 ) -> list[Candidate] | None:
@@ -1292,6 +1300,8 @@ async def _async_load_persisted_candidates(
     try:
         data = await _async_await_drained(store.async_load())
     except Exception:
+        return None
+    if data is None:
         return None
 
     if not _valid_store_metadata(
@@ -1352,7 +1362,7 @@ def _literal_rescue_flags(
 def _build_and_filter_dynamic_candidates(
     runtime: CanonicalizerRuntime,
     language: str,
-    intent_sources: dict[str, Mapping[str, Any]],
+    intent_sources: dict[str, IntentSource],
     registry_slot_values: dict[str, tuple[str, ...]],
     registry_slot_index: RegistrySlotIndex,
     query: str,
@@ -1403,7 +1413,7 @@ def _rank_dynamic_candidates(
     language: str,
     max_candidates: int,
     slot_preferences: set[tuple[str, str]] | None,
-    intent_context: Mapping[str, Any] | None,
+    intent_context: Mapping[str, object] | None,
     min_confidence: float,
 ) -> tuple[RankedCandidate, ...]:
     """Rank dynamic candidates via an exact-match shortcut or a char n-gram index."""
@@ -1438,7 +1448,7 @@ def _rank_dynamic_candidates(
     )
 
 
-def _current_task_or_none() -> asyncio.Task[Any] | None:
+def _current_task_or_none() -> asyncio.Task[object] | None:
     """Return the current asyncio task when called inside a running loop."""
     try:
         return asyncio.current_task()
@@ -1446,7 +1456,9 @@ def _current_task_or_none() -> asyncio.Task[Any] | None:
         return None
 
 
-async def _async_add_executor_job_drained(hass: Any, func: Callable[..., Any], *args: Any) -> Any:
+async def _async_add_executor_job_drained[R](
+    hass: HomeAssistant, func: Callable[..., R], *args: object
+) -> R:
     """Run teardown-critical executor work before honoring cancellation.
 
     Use only for runtime-owned work that must finish before shutdown releases a
@@ -1485,7 +1497,7 @@ async def _async_await_drained[T](awaitable: Awaitable[T]) -> T:
         raise
 
 
-def _canonical_fingerprint_value(value: Any) -> Any:
+def _canonical_fingerprint_value(value: object) -> JsonValueType:
     """Return a deterministic, order-preserving representation for hashing."""
     if value is None or isinstance(value, str | int | float | bool):
         return value
@@ -1513,26 +1525,25 @@ def _canonical_fingerprint_value(value: Any) -> Any:
     }
 
 
-def _index_store(hass: Any, language: str) -> Any:
+def _index_store(hass: HomeAssistant, language: str) -> storage.Store[JsonObjectType]:
     """Return the versioned Home Assistant Store for one language index."""
-    kwargs: dict[str, Any] = {}
     if _STORE_HAS_SERIALIZE_IN_EVENT_LOOP:
-        kwargs["serialize_in_event_loop"] = False
-    return storage.Store(
-        hass,
-        _INDEX_STORE_VERSION,
-        f"{_INDEX_STORE_PREFIX}{language}",
-        **kwargs,
-    )
+        return storage.Store(
+            hass,
+            _INDEX_STORE_VERSION,
+            f"{_INDEX_STORE_PREFIX}{language}",
+            serialize_in_event_loop=False,
+        )
+    return storage.Store(hass, _INDEX_STORE_VERSION, f"{_INDEX_STORE_PREFIX}{language}")
 
 
-def _manifest_store(hass: Any) -> Any:
+def _manifest_store(hass: HomeAssistant) -> storage.Store[JsonObjectType]:
     """Return the Store tracking the current cache epoch and language keys."""
     return storage.Store(hass, _INDEX_MANIFEST_VERSION, _INDEX_MANIFEST_KEY)
 
 
 def _valid_store_metadata(
-    data: Any,
+    data: object,
     *,
     language: str,
     fingerprint: str,
@@ -1555,12 +1566,12 @@ def _valid_store_metadata(
     )
 
 
-def _serialize_candidates(candidates: Sequence[Candidate]) -> list[dict[str, Any]]:
+def _serialize_candidates(candidates: Sequence[Candidate]) -> list[JsonObjectType]:
     """Serialize all index candidates in one executor job to spare the event loop."""
     return [_serialize_candidate(candidate) for candidate in candidates]
 
 
-def _serialize_candidate(candidate: Candidate) -> dict[str, Any]:
+def _serialize_candidate(candidate: Candidate) -> JsonObjectType:
     """Return the persisted representation of one candidate.
 
     ``wildcard_infos`` is persisted so store-loaded candidates keep the exact
@@ -1580,7 +1591,7 @@ def _serialize_candidate(candidate: Candidate) -> dict[str, Any]:
     }
 
 
-def _deserialized_wildcard_infos(value: Any) -> tuple[tuple[int, str], ...] | None:
+def _deserialized_wildcard_infos(value: object) -> tuple[tuple[int, str], ...] | None:
     """Validate and convert persisted wildcard infos, or None when invalid."""
     if not isinstance(value, list | tuple):
         return None
@@ -1598,10 +1609,13 @@ def _deserialized_wildcard_infos(value: Any) -> tuple[tuple[int, str], ...] | No
     return tuple(infos)
 
 
-def _deserialize_candidates(data: dict[str, Any]) -> list[Candidate] | None:
+def _deserialize_candidates(data: Mapping[str, object]) -> list[Candidate] | None:
     """Deserialize all candidates, rejecting the whole cache on any invalid record."""
+    serialized_candidates = data.get("candidates")
+    if not isinstance(serialized_candidates, list):
+        return None
     candidates: list[Candidate] = []
-    for candidate_data in data["candidates"]:
+    for candidate_data in serialized_candidates:
         if not isinstance(candidate_data, dict):
             return None
         text = candidate_data.get("text")
@@ -1618,6 +1632,9 @@ def _deserialize_candidates(data: dict[str, Any]) -> list[Candidate] | None:
             or not isinstance(source, str)
             or (language is not None and not isinstance(language, str))
             or not isinstance(metadata, Mapping)
+            or not all(
+                isinstance(key, str) and isinstance(value, str) for key, value in metadata.items()
+            )
             or not isinstance(slot_values, list | tuple)
             or not all(isinstance(value, str) for value in slot_values)
             or not isinstance(normalized_text, str)
@@ -1626,13 +1643,19 @@ def _deserialize_candidates(data: dict[str, Any]) -> list[Candidate] | None:
         ):
             return None
         try:
+            typed_metadata = {
+                key: value
+                for key, value in metadata.items()
+                if isinstance(key, str) and isinstance(value, str)
+            }
+            typed_slot_values = tuple(value for value in slot_values if isinstance(value, str))
             candidate = Candidate(
                 text=text,
                 intent_name=intent_name,
                 source=CandidateSource(source),
                 language=language,
-                metadata=metadata,
-                slot_values=tuple(slot_values),
+                metadata=typed_metadata,
+                slot_values=typed_slot_values,
                 normalized_text=normalized_text,
             )
         except (TypeError, ValueError):
@@ -1727,7 +1750,7 @@ def _updated_optional_text(current: str | None, value: str | None, *, clear: boo
     return current if value is None else value
 
 
-def _source_key(source: Any) -> str:
+def _source_key(source: object) -> str:
     """Return a stable string key for a Home Assistant intent source."""
     name = getattr(source, "name", None)
     return name.lower() if isinstance(name, str) else str(source).lower()

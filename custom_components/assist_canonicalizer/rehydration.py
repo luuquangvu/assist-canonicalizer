@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Mapping
 from functools import lru_cache
 from itertools import pairwise
 from math import ceil
-from typing import Any, NamedTuple
+from typing import NamedTuple
 
+from homeassistant.util.json import JsonObjectType, JsonValueType
 from rapidfuzz import fuzz
 
 from .candidate import Candidate
@@ -336,18 +338,21 @@ def rehydrate_wildcard_text(candidate_text: str, query: str, language: str | Non
 
 
 def rehydrate_wildcard_slots(
-    slots: dict[str, Any], candidate_text: str, query: str, language: str | None = None
-) -> dict[str, Any]:
+    slots: Mapping[str, JsonValueType],
+    candidate_text: str,
+    query: str,
+    language: str | None = None,
+) -> JsonObjectType:
     """Rehydrate wildcard values inside slots dictionary using query."""
     if not slots:
-        return slots
+        return dict(slots)
     wildcards = wildcard_slot_names(language)
     if not wildcards or all(wc not in candidate_text for wc in wildcards):
-        return slots
+        return dict(slots)
     candidate = _get_rehydration_candidate(candidate_text, language)
     _, replacements = get_wildcard_rehydration(candidate, query)
     if not replacements:
-        return slots
+        return dict(slots)
     return {
         k: replacements[k] if isinstance(v, str) and k in replacements and v == k else v
         for k, v in slots.items()

@@ -9,10 +9,10 @@ import hashlib
 import inspect
 import logging
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 from homeassistant.components import conversation
 from homeassistant.components.conversation.const import HOME_ASSISTANT_AGENT
@@ -21,10 +21,13 @@ from homeassistant.components.conversation.models import (
     ConversationInput,
     ConversationResult,
 )
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import MATCH_ALL
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers import intent
 
 if TYPE_CHECKING:
+    from homeassistant.components.conversation.chat_log import ChatLog
     from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from homeassistant.helpers import area_registry, device_registry, entity_registry
@@ -41,6 +44,7 @@ from .const import (
     NAME,
     FallbackReason,
 )
+from .indexer import CanonicalIndex
 from .normalization import normalize_text
 from .ranking import ConfidenceGateDecision, RankedCandidate, evaluate_confidence_gates
 from .recognition import (
@@ -60,6 +64,16 @@ from .utils import (
 _LOGGER = logging.getLogger(__name__)
 
 _ASYNC_CONVERSE_PARAMETERS = frozenset(inspect.signature(conversation.async_converse).parameters)
+type ChatLogDelta = dict[str, object]
+
+
+@runtime_checkable
+class ChatLogDeltaListener(Protocol):
+    """Callback shape used by Home Assistant chat-log delta listeners."""
+
+    def __call__(self, log: object, delta: ChatLogDelta) -> object:
+        """Consume one chat-log delta."""
+        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +108,13 @@ class _PreflightAttempt:
     decision: ConfidenceGateDecision
 
 
+@runtime_checkable
+class _ChatLogWithDeltaListener(Protocol):
+    """Protocol for chat log objects exposing a delta listener."""
+
+    delta_listener: ChatLogDeltaListener | TaskDeltaWrapper | None
+
+
 @dataclass(slots=True)
 class _PreflightState:
     """Mutable state for the bounded preflight search."""
@@ -105,8 +126,8 @@ class _PreflightState:
 
 
 async def async_setup_entry(
-    hass: Any,
-    config_entry: Any,
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up the Assist Canonicalizer conversation entity."""
@@ -120,22 +141,24 @@ async def async_setup_entry(
 class TaskDeltaWrapper:
     """Task-safe wrapper for chat log delta listener."""
 
-    def __init__(self, original_listener: Callable[[Any, dict], None] | None) -> None:
+    def __init__(self, original_listener: ChatLogDeltaListener | None = None) -> None:
         """Initialize the wrapper."""
         self.original_listener = original_listener
-        self._listener_var: contextvars.ContextVar[Callable[[Any, dict], None] | None] = (
+        self._listener_var: contextvars.ContextVar[ChatLogDeltaListener | None] = (
             contextvars.ContextVar("task_listener", default=None)
         )
         self._active_tasks: dict[int, int] = {}
 
-    def __call__(self, log: Any, delta: dict) -> None:
+    def __call__(self, log: object, delta: ChatLogDelta) -> None:
         """Forward callbacks to task-local listener if active, else to original listener."""
         if (listener := self._listener_var.get()) is not None:
             listener(log, delta)
         elif self.original_listener is not None:
             self.original_listener(log, delta)
 
-    def set_listener(self, listener: Callable[[Any, dict], None]) -> contextvars.Token:
+    def set_listener(
+        self, listener: ChatLogDeltaListener
+    ) -> contextvars.Token[ChatLogDeltaListener | None]:
         """Register the task-local listener."""
         with contextlib.suppress(RuntimeError):
             if (task := asyncio.current_task()) is not None:
@@ -143,7 +166,7 @@ class TaskDeltaWrapper:
                 self._active_tasks[task_id] = self._active_tasks.get(task_id, 0) + 1
         return self._listener_var.set(listener)
 
-    def reset_listener(self, token: contextvars.Token) -> None:
+    def reset_listener(self, token: contextvars.Token[ChatLogDeltaListener | None]) -> None:
         """Deregister the task-local listener."""
         with contextlib.suppress(RuntimeError):
             if (task := asyncio.current_task()) is not None:
@@ -169,7 +192,7 @@ class AssistCanonicalizerConversationEntity(
     _attr_name = NAME
     _attr_supported_features = conversation.ConversationEntityFeature.CONTROL
 
-    def __init__(self, entry: Any, runtime: CanonicalizerRuntime) -> None:
+    def __init__(self, entry: ConfigEntry, runtime: CanonicalizerRuntime) -> None:
         """Initialize the conversation entity."""
         super().__init__()
         self._entry = entry
@@ -292,14 +315,14 @@ class AssistCanonicalizerConversationEntity(
         self,
         text: str,
         user_input: ConversationInput,
-        chat_log: Any,
+        chat_log: ChatLog | None,
         old_len: int | None,
         *,
         update_diagnostics_on_error: bool = False,
         return_error_result: bool = False,
     ) -> ConversationResult | None:
         """Delegate text and capture/play back deltas silently, restoring on failure."""
-        deltas: list[dict] = []
+        deltas: list[ChatLogDelta] = []
         try:
             with self._capture_chat_log_deltas(chat_log) as captured:
                 result = await self._delegate_text(
@@ -357,7 +380,7 @@ class AssistCanonicalizerConversationEntity(
 
         return await self._async_execute_ranked_request(ranked_request, user_input)
 
-    async def _async_request_index(self, language: str) -> Any | None:
+    async def _async_request_index(self, language: str) -> CanonicalIndex | None:
         """Return the request index and record acquisition failures."""
         index = self._runtime.get_index(language)
         try:
@@ -376,7 +399,7 @@ class AssistCanonicalizerConversationEntity(
         self,
         user_input: ConversationInput,
         language: str,
-        index: Any,
+        index: CanonicalIndex,
     ) -> _RankedRequest | None:
         """Rank one request and record ranking failures."""
         try:
@@ -422,7 +445,9 @@ class AssistCanonicalizerConversationEntity(
             )
             return await self._delegate_raw_text(user_input)
 
-    async def _async_load_or_rebuild_index(self, language: str, index: Any) -> Any:
+    async def _async_load_or_rebuild_index(
+        self, language: str, index: CanonicalIndex | None
+    ) -> CanonicalIndex | None:
         """Load a persisted language index or rebuild it when none is cached."""
         if index is None:
             index = await self._runtime.async_load_index_from_store(
@@ -440,7 +465,7 @@ class AssistCanonicalizerConversationEntity(
         self,
         user_input: ConversationInput,
         language: str,
-        index: Any,
+        index: CanonicalIndex,
         min_confidence: float,
         min_margin: float,
     ) -> tuple[tuple[RankedCandidate, ...], ConfidenceGateDecision]:
@@ -458,7 +483,7 @@ class AssistCanonicalizerConversationEntity(
             user_input.text,
             DEFAULT_MAX_CANDIDATES,
         )
-        self._runtime.update_diagnostics(confidence_gate=decision.as_dict())
+        self._runtime.update_diagnostics(confidence_gate=decision.as_json_dict())
         return ranked, decision
 
     async def _async_execute_accepted_candidates(
@@ -570,7 +595,7 @@ class AssistCanonicalizerConversationEntity(
 
     def _intent_context_from_user_input(
         self, user_input: ConversationInput
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, dict[str, str]] | None:
         """Return HassIL-style intent context from satellite or device area."""
         area = self._area_from_user_input(user_input)
         if area is None:
@@ -578,7 +603,9 @@ class AssistCanonicalizerConversationEntity(
         area_name = getattr(area, "name", None)
         return intent_context_from_area_name(area_name)
 
-    def _area_from_user_input(self, user_input: ConversationInput) -> Any | None:
+    def _area_from_user_input(
+        self, user_input: ConversationInput
+    ) -> area_registry.AreaEntry | None:
         """Return the request area using Home Assistant registry metadata."""
         try:
             reg_entity = entity_registry.async_get(self.hass)
@@ -754,7 +781,7 @@ class AssistCanonicalizerConversationEntity(
             query=user_input.text,
             language=normalize_language(user_input.language),
         )
-        self._runtime.update_diagnostics(confidence_gate=decision.as_dict())
+        self._runtime.update_diagnostics(confidence_gate=decision.as_json_dict())
         return decision
 
     async def _async_observe_preflight_candidate(
@@ -1061,7 +1088,7 @@ class AssistCanonicalizerConversationEntity(
             query=user_input.text,
             language=normalize_language(user_input.language),
         )
-        self._runtime.update_diagnostics(confidence_gate=decision.as_dict())
+        self._runtime.update_diagnostics(confidence_gate=decision.as_json_dict())
         accepted = decision.accepted_candidate
         if accepted is None:
             return None
@@ -1115,14 +1142,14 @@ class AssistCanonicalizerConversationEntity(
         )
 
     @contextlib.contextmanager
-    def _capture_chat_log_deltas(self, chat_log: Any) -> Iterator[list[dict]]:
+    def _capture_chat_log_deltas(self, chat_log: object | None) -> Iterator[list[ChatLogDelta]]:
         """Temporarily intercept and capture chat log delta listener callbacks."""
-        captured_deltas: list[dict] = []
-        if chat_log is None:
+        captured_deltas: list[ChatLogDelta] = []
+        if not isinstance(chat_log, _ChatLogWithDeltaListener):
             yield captured_deltas
             return
 
-        def task_listener(log: Any, delta: dict) -> None:
+        def task_listener(log: object, delta: ChatLogDelta) -> None:
             captured_deltas.append(delta)
 
         current_listener = getattr(chat_log, "delta_listener", None)
@@ -1131,7 +1158,9 @@ class AssistCanonicalizerConversationEntity(
             wrapper = current_listener
             restore_listener = wrapper.original_listener
         else:
-            wrapper = TaskDeltaWrapper(current_listener)
+            wrapper = TaskDeltaWrapper(
+                current_listener if isinstance(current_listener, ChatLogDeltaListener) else None
+            )
             chat_log.delta_listener = wrapper
             restore_listener = current_listener
 
@@ -1148,17 +1177,17 @@ class AssistCanonicalizerConversationEntity(
             ):
                 chat_log.delta_listener = restore_listener
 
-    def _play_back_deltas(self, chat_log: Any, deltas: list[dict]) -> None:
+    def _play_back_deltas(self, chat_log: object | None, deltas: list[ChatLogDelta]) -> None:
         """Play back captured deltas to the original listener."""
         if chat_log is not None and deltas:
             listener = getattr(chat_log, "delta_listener", None)
             while isinstance(listener, TaskDeltaWrapper):
                 listener = listener.original_listener
-            if listener is not None:
+            if callable(listener):
                 for delta in deltas:
                     listener(chat_log, delta)
 
-    def _get_active_chat_log(self) -> Any:
+    def _get_active_chat_log(self) -> ChatLog | None:
         """Return the active chat log for the current conversation context."""
         try:
             from homeassistant.components.conversation.chat_log import current_chat_log
@@ -1169,7 +1198,7 @@ class AssistCanonicalizerConversationEntity(
         return None
 
     @staticmethod
-    def _restore_chat_log_content(chat_log: Any, old_len: int | None) -> None:
+    def _restore_chat_log_content(chat_log: ChatLog | None, old_len: int | None) -> None:
         """Restore the chat log content to the pre-delegation length."""
         if chat_log is not None and old_len is not None:
             del chat_log.content[old_len:]

@@ -462,3 +462,85 @@ def test_baseline_detects_a_regressed_case_even_when_pass_count_is_unchanged(
     )
 
     assert any("case-a" in regression for regression in regressions)
+
+
+def test_get_metric_pct_rejects_bool() -> None:
+    """Verify _get_metric_pct rejects boolean values and accepts valid numbers."""
+    from tools.update_readme_benchmark import _get_metric_pct
+
+    stats = {
+        "valid_int": 90,
+        "valid_float": 95.5,
+        "bool_true": True,
+        "bool_false": False,
+        "invalid_str": "90",
+    }
+
+    assert _get_metric_pct(stats, "valid_int") == 90.0
+    assert _get_metric_pct(stats, "valid_float") == 95.5
+
+    with pytest.raises(TypeError, match="must be numeric"):
+        _get_metric_pct(stats, "bool_true")
+
+    with pytest.raises(TypeError, match="must be numeric"):
+        _get_metric_pct(stats, "bool_false")
+
+    with pytest.raises(TypeError, match="must be numeric"):
+        _get_metric_pct(stats, "invalid_str")
+
+
+@pytest.mark.parametrize(
+    "invalid_count",
+    [True, False, 1.5, -1, "-1", "1.5", "abc", None],
+)
+def test_baseline_regressions_invalid_passed_cases(tmp_path: Path, invalid_count: Any) -> None:
+    """Verify _baseline_regressions rejects invalid passed_cases counts."""
+    summary: dict[str, Any] = {
+        "passed_cases": 1,
+        "latency_ms": {"p95": 10.0},
+    }
+    report: dict[str, Any] = {
+        "report_schema_version": benchmark.BENCHMARK_SCHEMA_VERSION,
+        "environment": {
+            "homeassistant_version": "2026.8.0b4",
+            "python_version": "3.14",
+            "dependencies": {"hassil": "1.0"},
+            "fixture": {
+                "fixture_id": "fixture",
+                "schema_version": 1,
+                "fingerprint": "fingerprint",
+                "counts": {"exposed_entities": 60},
+                "domain_counts": EXPECTED_DOMAIN_COUNTS,
+            },
+        },
+        "summary": summary,
+        "cases": [{"id": "case-a", "passed": True}],
+    }
+
+    # Test invalid baseline passed_cases
+    baseline_invalid = deepcopy(report)
+    baseline_invalid["summary"]["passed_cases"] = invalid_count
+    baseline_path = tmp_path / "baseline_invalid.json"
+    baseline_path.write_bytes(orjson.dumps(baseline_invalid))
+
+    with pytest.raises(benchmark.BenchmarkError, match="passed-case count"):
+        benchmark._baseline_regressions(
+            report,
+            baseline_path,
+            max_p95_regression_pct=10.0,
+            allow_homeassistant_upgrade=False,
+        )
+
+    # Test invalid current report passed_cases
+    report_invalid = deepcopy(report)
+    report_invalid["summary"]["passed_cases"] = invalid_count
+    valid_baseline_path = tmp_path / "baseline_valid.json"
+    valid_baseline_path.write_bytes(orjson.dumps(report))
+
+    with pytest.raises(benchmark.BenchmarkError, match="passed-case count"):
+        benchmark._baseline_regressions(
+            report_invalid,
+            valid_baseline_path,
+            max_p95_regression_pct=10.0,
+            allow_homeassistant_upgrade=False,
+        )

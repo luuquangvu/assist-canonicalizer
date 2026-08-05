@@ -6,9 +6,9 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Any
 
 import orjson
+from homeassistant.util.json import JsonObjectType, json_loads
 
 from .const import ENTITY_SLOT_NAME_SET, LOCATION_SLOT_NAME_SET
 from .normalization import (
@@ -79,10 +79,10 @@ class Candidate:
     _wildcard_infos: tuple[tuple[int, str], ...] | None = field(
         default=None, init=False, repr=False, compare=False
     )
-    _parsed_slots: dict[str, Any] | None = field(
+    _parsed_slots: JsonObjectType | None = field(
         default=None, init=False, repr=False, compare=False
     )
-    _parsed_raw_slots: dict[str, Any] | None = field(
+    _parsed_raw_slots: JsonObjectType | None = field(
         default=None, init=False, repr=False, compare=False
     )
     _surface_slot_tokens: frozenset[str] | None = field(
@@ -263,7 +263,7 @@ class Candidate:
         return bool(self.wildcard_infos)
 
     @property
-    def parsed_slots(self) -> dict[str, Any]:
+    def parsed_slots(self) -> JsonObjectType:
         """Return decoded slot metadata, cached after the first access."""
         val = self._parsed_slots
         if val is None:
@@ -272,7 +272,7 @@ class Candidate:
         return val
 
     @property
-    def parsed_raw_slots(self) -> dict[str, Any]:
+    def parsed_raw_slots(self) -> JsonObjectType:
         """Return decoded raw-slot metadata, cached after the first access."""
         val = self._parsed_raw_slots
         if val is None:
@@ -370,34 +370,34 @@ def _literal_variants_from_loaded(loaded: object) -> tuple[frozenset[str], ...] 
     return tuple(variants)
 
 
-def _decode_candidate_metadata_dict(candidate: Candidate, key: str) -> dict[str, Any]:
+def _decode_candidate_metadata_dict(candidate: Candidate, key: str) -> JsonObjectType:
     """Helper to read, validate, JSON decode, and check dict for candidate metadata key."""
     val = candidate.metadata.get(key)
     if not isinstance(val, str) or not val:
         return {}
     try:
-        decoded = orjson.loads(val)
+        decoded = json_loads(val)
     except orjson.JSONDecodeError:
         return {}
     return decoded if isinstance(decoded, dict) else {}
 
 
-def candidate_slot_map(candidate: Candidate) -> dict[str, Any]:
+def candidate_slot_map(candidate: Candidate) -> JsonObjectType:
     """Return decoded candidate slot metadata."""
     return _decode_candidate_metadata_dict(candidate, "slots")
 
 
-def candidate_raw_slot_map(candidate: Candidate) -> dict[str, Any]:
+def candidate_raw_slot_map(candidate: Candidate) -> JsonObjectType:
     """Return decoded raw candidate slot metadata."""
     return _decode_candidate_metadata_dict(candidate, "slots_raw")
 
 
-def slot_alias_values_by_key(
-    slots: Mapping[str, Any],
+def slot_alias_values_by_key[T](
+    slots: Mapping[str, T],
     slot_mappings: Mapping[str, Iterable[str]] | None = None,
-) -> dict[str, tuple[Any, ...]]:
+) -> dict[str, tuple[T, ...]]:
     """Return slot values indexed by direct and aliased slot names."""
-    aliases: dict[str, list[Any]] = {}
+    aliases: dict[str, list[T]] = {}
     slot_mappings = slot_mappings or {}
     for slot_name, slot_value in slots.items():
         candidate_keys = [slot_name]

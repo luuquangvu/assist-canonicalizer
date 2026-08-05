@@ -2288,7 +2288,7 @@ async def test_async_process_fallback_missing(
 ) -> None:
     """Test async_process behavior when fallback agent is not found."""
     # Setup runtime with fallback ID that is missing
-    conversation_entity._entry.options = {"fallback_agent_id": "missing_agent"}
+    cast(Any, conversation_entity._entry).options = {"fallback_agent_id": "missing_agent"}
 
     async def mock_converse(hass, text, conversation_id, context, language, agent_id, **kwargs):
         """Mock conversation agent fallback target failure."""

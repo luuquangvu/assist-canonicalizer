@@ -30,14 +30,29 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from string import ascii_letters, ascii_lowercase, digits
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn, NotRequired, TypedDict
 
 import hassil
 import hassil.errors
 import hassil.intents
 import orjson
+from hassil.recognize import RecognizeResult
 
 _TextSlotList = getattr(hassil, "TextSlotList", None) or hassil.intents.TextSlotList
+
+
+class ValidatedTestCase(TypedDict):
+    """Validated real-world benchmark case."""
+
+    query: str
+    expected_intent: str
+    expected_canonical: str
+    expected_slots: dict[str, str]
+    category: str
+    expected_fallback: bool
+    context: NotRequired[dict[str, str | int | float | bool]]
+    drift: NotRequired[object]
+
 
 if TYPE_CHECKING:
     from custom_components.assist_canonicalizer.ranking import RankedCandidate, WildcardVariantGroup
@@ -133,7 +148,7 @@ def _benchmark_dependency_versions() -> dict[str, str]:
     return versions
 
 
-def _format_dependency_versions(versions: Mapping[str, Any]) -> str:
+def _format_dependency_versions(versions: Mapping[str, object]) -> str:
     """Return a compact dependency version label for human-readable reports."""
     parts = []
     for package_name in BENCHMARK_DEPENDENCIES:
@@ -143,18 +158,18 @@ def _format_dependency_versions(versions: Mapping[str, Any]) -> str:
     return ", ".join(parts)
 
 
-def _first_report_dependency_versions(reports: Mapping[str, Any]) -> Mapping[str, Any]:
+def _first_report_dependency_versions(reports: Mapping[str, object]) -> Mapping[str, object]:
     """Return dependency versions from the first report that includes them."""
     for report in reports.values():
         if not isinstance(report, Mapping):
             continue
         versions = report.get("dependency_versions")
         if isinstance(versions, Mapping):
-            return versions
+            return {str(key): value for key, value in versions.items()}
     return {}
 
 
-def _scan_obj(obj: Any, mappings: dict[str, set[str]]) -> None:
+def _scan_obj(obj: object, mappings: dict[str, set[str]]) -> None:
     """Recursively scan an object for rename patterns and extract slot mappings."""
     if isinstance(obj, str):
         for match in _RENAME_PATTERN.finditer(obj):
@@ -188,7 +203,7 @@ def _intents_match(actual: str | None, expected: str | None) -> bool:
     return False
 
 
-def _extract_slot_mappings(sources: Mapping[str, Any]) -> dict[str, frozenset[str]]:
+def _extract_slot_mappings(sources: Mapping[str, object]) -> dict[str, frozenset[str]]:
     """Traverse all sentences and expansion rules to extract slot mappings."""
     mappings: dict[str, set[str]] = {}
     _scan_obj(sources, mappings)
@@ -472,8 +487,6 @@ REGISTRY_SLOTS: dict[str, dict[str, tuple[str, ...]]] = {
 
 def sanitize_chars(value: str, allowed: str) -> str:
     """Validate and sanitize a string using allowed characters to break taint."""
-    if not isinstance(value, str):
-        raise ValueError("Expected a string.")
     safe_chars: list[str] = []
     for char in value:
         idx = allowed.find(char)
@@ -596,7 +609,7 @@ def atomic_write(path: str, content: str) -> None:
     tmp_path.replace(output_path)
 
 
-def _dataset_registry_slots(data: Mapping[str, Any], lang: str) -> dict[str, tuple[str, ...]]:
+def _dataset_registry_slots(data: Mapping[str, object], lang: str) -> dict[str, tuple[str, ...]]:
     """Return registry slots supplied by a dataset, falling back to built-in fixtures."""
     raw_slots = data.get("registry_slots")
     if raw_slots is None:
@@ -609,11 +622,11 @@ def _dataset_registry_slots(data: Mapping[str, Any], lang: str) -> dict[str, tup
             raise ValueError("registry_slots must map string names to string lists")
         if not all(isinstance(value, str) and value.strip() for value in values):
             raise ValueError("registry_slots values must be non-empty strings")
-        slots[slot_name] = tuple(values)
+        slots[slot_name] = tuple(value for value in values if isinstance(value, str))
     return slots
 
 
-def _validate_expected_slots(expected_slots: Any, path: str, index: int) -> dict[str, str]:
+def _validate_expected_slots(expected_slots: object, path: str, index: int) -> dict[str, str]:
     """Validate and return expected slots dict, checking that it's string->non-empty-string."""
     if not isinstance(expected_slots, dict):
         raise ValueError(f"{path}: test case #{index} expected_slots must be an object")
@@ -626,11 +639,15 @@ def _validate_expected_slots(expected_slots: Any, path: str, index: int) -> dict
             raise ValueError(
                 f"{path}: test case #{index} expected_slots entry {key!r} value is empty"
             )
-    return expected_slots
+    return {
+        key: value
+        for key, value in expected_slots.items()
+        if isinstance(key, str) and isinstance(value, str)
+    }
 
 
 def _validate_context(
-    raw_context: Any, path: str, index: int
+    raw_context: object, path: str, index: int
 ) -> dict[str, str | int | float | bool]:
     """Validate and return context dict, checking keys and scalar values."""
     if not isinstance(raw_context, dict):
@@ -650,52 +667,64 @@ def _validate_context(
     return intent_context
 
 
-def _validate_single_test_case(case: Any, lang: str, path: str, index: int) -> dict[str, Any]:
+def _validate_single_test_case(case: object, lang: str, path: str, index: int) -> ValidatedTestCase:
     """Validate a single test case object and return its validated representation."""
     if not isinstance(case, dict):
         raise ValueError(f"{path}: test case #{index} must be an object")
+    case_data: dict[str, object] = {
+        key: value for key, value in case.items() if isinstance(key, str)
+    }
     required = ("query", "expected_intent", "expected_canonical", "category")
+    required_values = {key: case_data.get(key) for key in required}
     if missing := [
-        key for key in required if not isinstance(case.get(key), str) or not case[key].strip()
+        key
+        for key, value in required_values.items()
+        if not isinstance(value, str) or not value.strip()
     ]:
         raise ValueError(f"{path}: test case #{index} missing fields: {missing}")
-    case_lang = case.get("language", lang)
+    text_values = {key: value for key, value in required_values.items() if isinstance(value, str)}
+    case_lang = case_data.get("language", lang)
     if case_lang != lang:
         raise ValueError(
             f"{path}: test case #{index} language '{case_lang}' does not match dataset"
         )
-    query = case["query"]
-    expected_intent = case["expected_intent"]
-    expected_canonical = case["expected_canonical"]
+    query = text_values["query"]
+    expected_intent = text_values["expected_intent"]
+    expected_canonical = text_values["expected_canonical"]
 
-    expected_slots = _validate_expected_slots(case.get("expected_slots", {}), path, index)
-    intent_context = _validate_context(case.get("context", {}), path, index)
-    expected_fallback = case.get("expected_fallback", False)
+    expected_slots = _validate_expected_slots(case_data.get("expected_slots", {}), path, index)
+    intent_context = _validate_context(case_data.get("context", {}), path, index)
+    expected_fallback = case_data.get("expected_fallback", False)
     if not isinstance(expected_fallback, bool):
         raise ValueError(f"{path}: test case #{index} expected_fallback must be a boolean")
 
-    validated_case = {
+    validated_case: ValidatedTestCase = {
         "query": query,
         "expected_intent": expected_intent,
         "expected_canonical": expected_canonical,
         "expected_slots": expected_slots,
-        "category": case["category"],
+        "category": text_values["category"],
         "expected_fallback": expected_fallback,
     }
     if intent_context:
         validated_case["context"] = intent_context
-    if "drift" in case:
-        validated_case["drift"] = case["drift"]
+    if "drift" in case_data:
+        validated_case["drift"] = case_data["drift"]
     return validated_case
 
 
-def _validate_test_cases(test_cases: list[Any], lang: str, path: str) -> list[dict[str, Any]]:
+def _validate_test_cases(
+    test_cases: Sequence[object], lang: str, path: str
+) -> list[ValidatedTestCase]:
     """Validate and return real-world test cases from one dataset."""
-    validated: list[dict[str, Any]] = []
+    validated: list[ValidatedTestCase] = []
     seen_queries: dict[str, int] = {}
     for index, case in enumerate(test_cases, start=1):
         validated_case = _validate_single_test_case(case, lang, path, index)
-        query_key = " ".join(validated_case["query"].casefold().split())
+        validated_query = validated_case["query"]
+        if not isinstance(validated_query, str):
+            raise RuntimeError("Validated benchmark query is not a string")
+        query_key = " ".join(validated_query.casefold().split())
         if previous_index := seen_queries.get(query_key):
             raise ValueError(
                 f"{path}: test case #{index} duplicates query from case #{previous_index}: "
@@ -757,8 +786,8 @@ def run_hassil_recognize_all(
     query: str,
     intents: hassil.intents.Intents,
     slot_lists: dict[str, hassil.intents.SlotList],
-    intent_context: Mapping[str, Any] | None = None,
-) -> list[Any]:
+    intent_context: Mapping[str, object] | None = None,
+) -> list[RecognizeResult]:
     """Run HassIL recognize_all with lazy slot-list injection on MissingListError."""
     working_lists = dict(slot_lists)
     stubbed: set[str] = set()
@@ -783,9 +812,9 @@ def run_hassil_recognize_best(
     query: str,
     intents: hassil.intents.Intents,
     slot_lists: dict[str, hassil.intents.SlotList],
-    intent_context: Mapping[str, Any] | None = None,
+    intent_context: Mapping[str, object] | None = None,
     language: str | None = None,
-) -> Any | None:
+) -> RecognizeResult | None:
     """Run HassIL with the same best-result preferences as Home Assistant."""
     working_lists = dict(slot_lists)
     stubbed: set[str] = set()
@@ -814,7 +843,7 @@ def run_hassil_recognize_best(
 
 def _slots_from_candidate(
     selected: RankedCandidate | None, query: str | None = None
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """Return slot values from a ranked candidate."""
     if selected is None:
         return {}
@@ -834,11 +863,13 @@ def _slots_from_candidate(
     return decoded
 
 
-def _values_equal(a: Any, b: Any) -> bool:
+def _values_equal(a: object, b: object) -> bool:
     """Compare two slot values with numeric type coercion."""
     if isinstance(a, str) and isinstance(b, str):
         return normalize_text(a) == normalize_text(b)
     if isinstance(a, (int, float)) or isinstance(b, (int, float)):
+        if not isinstance(a, str | int | float) or not isinstance(b, str | int | float):
+            return False
         try:
             return float(a) == float(b)
         except (ValueError, TypeError):
@@ -847,7 +878,7 @@ def _values_equal(a: Any, b: Any) -> bool:
 
 
 def _slots_match(
-    actual: Mapping[str, Any], expected: Mapping[str, Any], language: str | None = None
+    actual: Mapping[str, object], expected: Mapping[str, object], language: str | None = None
 ) -> bool:
     """Check if actual candidate slots contain all expected slot values."""
     if not expected:
@@ -883,8 +914,8 @@ def _slots_match(
 
 
 def _slots_match_any(
-    actual: Mapping[str, Any],
-    expected_options: Sequence[Mapping[str, Any]],
+    actual: Mapping[str, object],
+    expected_options: Sequence[Mapping[str, object]],
     language: str | None = None,
 ) -> bool:
     """Check if actual candidate slots match any of the expected slot options."""
@@ -894,9 +925,9 @@ def _slots_match_any(
 
 
 def _compound_name_slot_matches(
-    normalized_actual: Mapping[str, tuple[Any, ...]],
-    actual_values: tuple[Any, ...],
-    expected_value: Any,
+    normalized_actual: Mapping[str, tuple[object, ...]],
+    actual_values: tuple[object, ...],
+    expected_value: object,
 ) -> bool:
     """Return whether name + location slots decompose a compound entity name."""
     if not isinstance(expected_value, str):
@@ -1599,7 +1630,7 @@ def _failure_detail(
 
 
 def _coverage_payload(
-    test_cases: list[dict[str, Any]],
+    test_cases: Sequence[ValidatedTestCase],
     sources: Mapping[str, Mapping[str, Any]],
     candidate_intents: set[str],
     candidate_count: int,
@@ -1607,7 +1638,7 @@ def _coverage_payload(
 ) -> dict[str, Any]:
     """Return language-level dataset and candidate coverage details."""
     source_intents = _intent_names_from_sources(sources)
-    dataset_intents = {case["expected_intent"] for case in test_cases}
+    dataset_intents = {str(case["expected_intent"]) for case in test_cases}
     return {
         "builtin_intents": sorted(source_intents),
         "candidate_intents": sorted(candidate_intents),
@@ -1621,7 +1652,7 @@ def _coverage_payload(
 
 
 def _print_coverage(
-    lang: str, test_cases: list[dict[str, Any]], coverage: Mapping[str, Any]
+    lang: str, test_cases: Sequence[Mapping[str, object]], coverage: Mapping[str, Any]
 ) -> None:
     """Print language-level dataset and candidate coverage details."""
     missing_candidate_intents = coverage["missing_candidate_intents"]
@@ -2543,7 +2574,7 @@ def _threshold_failures(
 
 def _load_and_validate_dataset(
     lang: str, path: str
-) -> tuple[list[dict[str, Any]], dict[str, Any]] | None:
+) -> tuple[list[ValidatedTestCase], dict[str, tuple[str, ...]]] | None:
     """Load and validate test cases and slots for a dataset path."""
     with open(path, encoding="utf-8") as f:
         data = orjson.loads(f.read())
@@ -2623,7 +2654,7 @@ def _evaluate_mode_candidates(
 
 
 def _evaluate_case(
-    case: dict[str, Any],
+    case: Mapping[str, Any],
     mode_name: str,
     lang: str,
     runtime: Any,
@@ -2753,7 +2784,7 @@ def _print_evaluation_header(
 
 def _build_language_evaluation_context(
     lang: str,
-    slots: dict[str, Any],
+    slots: Mapping[str, tuple[str, ...]],
 ) -> LanguageEvaluationContext:
     """Build production index, runtime, and HassIL objects for one language."""
     sources = load_language_intent_sources(lang)
@@ -2781,7 +2812,7 @@ def _build_language_evaluation_context(
 
 def _language_coverage_payload(
     context: LanguageEvaluationContext,
-    test_cases: list[dict[str, Any]],
+    test_cases: Sequence[ValidatedTestCase],
 ) -> dict[str, Any]:
     """Return coverage diagnostics for one prepared language context."""
     candidate_intents = {candidate.intent_name for candidate in context.candidates}
@@ -2804,7 +2835,7 @@ def _evaluation_modes(skip_hassil: bool) -> tuple[str, ...]:
 def _evaluate_language_mode(
     mode_name: str,
     context: LanguageEvaluationContext,
-    test_cases: list[dict[str, Any]],
+    test_cases: Sequence[ValidatedTestCase],
     skip_ablations: bool,
     benchmark_slot_prefs: set[tuple[str, str]] | None,
     results: dict[str, dict[str, CategoryStats]],
@@ -2856,7 +2887,7 @@ def _evaluate_language_mode(
 
 def _evaluate_language_modes(
     context: LanguageEvaluationContext,
-    test_cases: list[dict[str, Any]],
+    test_cases: Sequence[ValidatedTestCase],
     skip_hassil: bool,
     skip_ablations: bool,
     benchmark_slot_prefs: set[tuple[str, str]] | None,
@@ -2882,8 +2913,8 @@ def _evaluate_language_modes(
 
 def _evaluate_dataset_language(
     lang: str,
-    test_cases: list[dict[str, Any]],
-    slots: dict[str, Any],
+    test_cases: Sequence[ValidatedTestCase],
+    slots: Mapping[str, tuple[str, ...]],
     skip_hassil: bool,
     skip_ablations: bool,
     benchmark_slot_prefs: set[tuple[str, str]] | None,

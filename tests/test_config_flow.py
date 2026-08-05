@@ -1,11 +1,12 @@
 """Tests for Assist Canonicalizer config flow helpers."""
 
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
 import voluptuous as vol
+from homeassistant.core import HomeAssistant
 
 import custom_components.assist_canonicalizer.config_flow as config_flow
 from custom_components.assist_canonicalizer.config_flow import (
@@ -47,7 +48,9 @@ def test_available_fallback_agents_includes_conversation_entities(
         },
     )
 
-    choices = _available_fallback_agents(hass, "conversation.assist_canonicalizer")
+    choices = _available_fallback_agents(
+        cast(HomeAssistant, hass), "conversation.assist_canonicalizer"
+    )
 
     assert choices == {
         "entry-agent-id": "Entry Agent",
@@ -120,7 +123,7 @@ def test_available_fallback_agents_excludes_own_agent_and_entity(
         },
     )
 
-    choices = _available_fallback_agents(hass, "canonicalizer-config-entry-id")
+    choices = _available_fallback_agents(cast(HomeAssistant, hass), "canonicalizer-config-entry-id")
 
     assert choices == {
         "entry-agent-id": "Entry Agent",
@@ -153,7 +156,7 @@ def test_config_schema_types(monkeypatch: pytest.MonkeyPatch) -> None:
 
     hass = SimpleNamespace()
     schema = _config_schema(
-        hass,
+        cast(HomeAssistant, hass),
         {
             "min_confidence": 0.5,
             "min_margin": 0.1,

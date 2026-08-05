@@ -50,6 +50,12 @@ from custom_components.assist_canonicalizer.services import (
 )
 from custom_components.assist_canonicalizer.utils import wildcard_slot_names
 
+
+def _as_hass(value: object) -> HomeAssistant:
+    """Type a deliberately minimal service test double as Home Assistant."""
+    return cast(HomeAssistant, value)
+
+
 _EXPECTED_SERVICE_SCHEMAS = {
     SERVICE_SET_FALLBACK_AGENT: SET_FALLBACK_AGENT_SCHEMA,
     SERVICE_TEST_MATCH: TEST_MATCH_SCHEMA,
@@ -145,7 +151,7 @@ def test_service_language_normalizes_cache_keys() -> None:
     hass = MockHass(runtime)
     call = MockServiceCall({"text": "bật đèn", "language": "Vi"})
 
-    assert _service_language(hass, cast(ServiceCall, call)) == "vi"
+    assert _service_language(_as_hass(hass), cast(ServiceCall, call)) == "vi"
 
 
 @pytest.mark.asyncio
@@ -172,8 +178,8 @@ async def test_set_fallback_agent_service_reports_config_entry_change(
         "custom_components.assist_canonicalizer.services.async_get_agent",
         return_value=MagicMock(unique_id="new-agent"),
     ):
-        result = await _handle_set_fallback_agent(hass, cast(ServiceCall, call))
-        unchanged_result = await _handle_set_fallback_agent(hass, cast(ServiceCall, call))
+        result = await _handle_set_fallback_agent(_as_hass(hass), cast(ServiceCall, call))
+        unchanged_result = await _handle_set_fallback_agent(_as_hass(hass), cast(ServiceCall, call))
 
     assert result == {
         CONF_FALLBACK_AGENT_ID: "new_agent",
@@ -223,7 +229,7 @@ async def test_set_fallback_agent_service_rejects_invalid_targets(
         pytest.raises(HomeAssistantError, match=error),
     ):
         await _handle_set_fallback_agent(
-            hass,
+            _as_hass(hass),
             cast(ServiceCall, MockServiceCall({ATTR_AGENT_ID: agent_id})),
         )
 
@@ -251,7 +257,7 @@ async def test_handle_test_match_index_none() -> None:
         ),
         pytest.raises(HomeAssistantError, match="Assist Canonicalizer index could not be built"),
     ):
-        await _handle_test_match(hass, cast(ServiceCall, call))
+        await _handle_test_match(_as_hass(hass), cast(ServiceCall, call))
 
 
 @pytest.mark.asyncio
@@ -265,7 +271,7 @@ async def test_handle_test_match_entry_none_and_data_fallback() -> None:
     # Case 1: Entry is None in hass.data
     hass_none = MockHass(runtime, entry=None)
     hass_none.data[DOMAIN]["mock_entry_id"]["entry"] = None
-    result = await _handle_test_match(hass_none, cast(ServiceCall, call))
+    result = await _handle_test_match(_as_hass(hass_none), cast(ServiceCall, call))
     assert result["accepted"] is True
     assert result["evaluation"] == {
         "scope": "lexical",
@@ -275,15 +281,17 @@ async def test_handle_test_match_entry_none_and_data_fallback() -> None:
     }
     assert result["confidence_gate"]["accepted"] is True
     assert result["confidence_gate"]["margin_policy"] == "no_competitor"
-    assert "score" not in result["selected_candidate"]
-    assert result["selected_candidate"]["scores"]["final"] == 1.0
+    selected_candidate = result["selected_candidate"]
+    assert selected_candidate is not None
+    assert "score" not in selected_candidate
+    assert selected_candidate["scores"]["final"] == 1.0
 
     # Case 2: entry is not None, options is empty, fallback to data
     entry_data = MockConfigEntry(
         options={}, data={CONF_MIN_CONFIDENCE: 0.10, CONF_MIN_MARGIN: 0.01}
     )
     hass_data = MockHass(runtime, entry=entry_data)
-    result_data = await _handle_test_match(hass_data, cast(ServiceCall, call))
+    result_data = await _handle_test_match(_as_hass(hass_data), cast(ServiceCall, call))
     assert result_data["accepted"] is True
 
 
@@ -317,10 +325,12 @@ async def test_handle_test_match_rehydrates_from_candidate_metadata_with_cold_ca
         ),
         patch("home_assistant_intents.get_intents") as get_intents,
     ):
-        result = await _handle_test_match(hass, cast(ServiceCall, call))
+        result = await _handle_test_match(_as_hass(hass), cast(ServiceCall, call))
 
-    assert result["selected_candidate"]["text"] == "add milk to shopping list"
-    assert result["selected_candidate"]["wildcard_replacements"] == {"shopping_list_item": "milk"}
+    selected_candidate = result["selected_candidate"]
+    assert selected_candidate is not None
+    assert selected_candidate["text"] == "add milk to shopping list"
+    assert selected_candidate["wildcard_replacements"] == {"shopping_list_item": "milk"}
     assert result["top_candidates"][0]["text"] == "add milk to shopping list"
     get_intents.assert_not_called()
     wildcard_slot_names.cache_clear("en")
@@ -336,7 +346,7 @@ async def test_rebuild_index_service() -> None:
     with patch.object(
         CanonicalizerRuntime, "async_rebuild_index", AsyncMock(return_value=build_index("vi", []))
     ):
-        result = await _handle_rebuild_index(hass, cast(ServiceCall, call))
+        result = await _handle_rebuild_index(_as_hass(hass), cast(ServiceCall, call))
         assert result["language"] == "vi"
         assert result["candidate_count"] == 0
         assert result["rebuild_latency_ms"] >= 0
@@ -389,7 +399,7 @@ async def test_clear_index_service() -> None:
         AsyncMock(side_effect=clear_index),
     ) as mock_clear:
         call = MockServiceCall({"language": "en-US"})
-        result = await _handle_clear_index(hass, cast(ServiceCall, call))
+        result = await _handle_clear_index(_as_hass(hass), cast(ServiceCall, call))
         assert result == {
             "language": "en",
             "scope": "language",
@@ -408,7 +418,7 @@ async def test_clear_index_service() -> None:
             )
         )
         call_all = MockServiceCall({})
-        result_all = await _handle_clear_index(hass, cast(ServiceCall, call_all))
+        result_all = await _handle_clear_index(_as_hass(hass), cast(ServiceCall, call_all))
         assert result_all == {
             "language": None,
             "scope": "all",
@@ -441,7 +451,7 @@ async def test_clear_index_service_uses_atomic_runtime_result() -> None:
         AsyncMock(return_value=clear_result),
     ):
         result = await _handle_clear_index(
-            hass,
+            _as_hass(hass),
             cast(ServiceCall, MockServiceCall({"language": "en"})),
         )
 
@@ -470,7 +480,7 @@ async def test_diagnostics_service() -> None:
     hass = MockHass(runtime)
     call = MockServiceCall({})
 
-    result = await _handle_diagnostics(hass, cast(ServiceCall, call))
+    result = await _handle_diagnostics(_as_hass(hass), cast(ServiceCall, call))
     assert result["total_cached_candidate_count"] == 3
     assert result["cached_indexes"] == {
         "en": {"candidate_count": 1, "version": 1},
@@ -482,7 +492,8 @@ async def test_diagnostics_service() -> None:
     assert "cached_candidate_counts" not in result
     assert "dynamic_candidate_generation" in result
     assert "registry_retrieval" in result
-    assert result["registry_retrieval"]["values_scored"] == 0
+    registry_retrieval = cast(dict[str, Any], result["registry_retrieval"])
+    assert registry_retrieval["values_scored"] == 0
 
 
 @pytest.mark.asyncio
@@ -493,10 +504,11 @@ async def test_dump_candidates_service() -> None:
 
     # 1. Uncached index, no rebuild
     call_no_rebuild = MockServiceCall({"language": "vi", "rebuild": False})
-    result = await _handle_dump_candidates(hass, cast(ServiceCall, call_no_rebuild))
-    intent_source_counts = result.pop("intent_source_counts")
+    result = await _handle_dump_candidates(_as_hass(hass), cast(ServiceCall, call_no_rebuild))
+    result_dict = cast(dict[str, Any], result)
+    intent_source_counts = result_dict.pop("intent_source_counts")
     assert intent_source_counts.get("built_in", 0) > 0
-    assert result == {
+    assert result_dict == {
         "language": "vi",
         "candidate_count": 0,
         "index_status": "missing",
@@ -525,10 +537,12 @@ async def test_dump_candidates_service() -> None:
         "async_rebuild_index",
         AsyncMock(return_value=build_index("vi", [rebuilt_candidate])),
     ) as mock_rebuild:
-        result = await _handle_dump_candidates(hass, cast(ServiceCall, call_rebuild))
+        result = await _handle_dump_candidates(_as_hass(hass), cast(ServiceCall, call_rebuild))
         mock_rebuild.assert_awaited_once()
         assert result["index_status"] == "rebuilt"
-        assert result["rebuild_latency_ms"] >= 0
+        rebuild_latency_ms = result["rebuild_latency_ms"]
+        assert rebuild_latency_ms is not None
+        assert rebuild_latency_ms >= 0
         assert result["candidate_count"] == 1
         assert result["candidate_sample"] == {
             "truncated": False,
@@ -562,7 +576,7 @@ async def test_dump_candidates_reports_sample_truncation() -> None:
     hass = MockHass(runtime)
 
     result = await _handle_dump_candidates(
-        hass,
+        _as_hass(hass),
         cast(ServiceCall, MockServiceCall({"language": "en"})),
     )
 
@@ -700,7 +714,7 @@ async def test_services_exception_wrapping() -> None:
         ),
         pytest.raises(HomeAssistantError, match="Matching test failed; see logs for details"),
     ):
-        await _handle_test_match(hass, cast(ServiceCall, call))
+        await _handle_test_match(_as_hass(hass), cast(ServiceCall, call))
 
     # 2. _handle_set_fallback_agent raising error while persisting the option
     entry = MockConfigEntry(options={}, data={})
@@ -718,7 +732,7 @@ async def test_services_exception_wrapping() -> None:
         ),
     ):
         await _handle_set_fallback_agent(
-            hass,
+            _as_hass(hass),
             cast(ServiceCall, MockServiceCall({ATTR_AGENT_ID: "other_agent"})),
         )
 
@@ -730,7 +744,7 @@ async def test_services_exception_wrapping() -> None:
         ),
         pytest.raises(HomeAssistantError, match="Index rebuild failed; see logs for details"),
     ):
-        await _handle_rebuild_index(hass, cast(ServiceCall, call))
+        await _handle_rebuild_index(_as_hass(hass), cast(ServiceCall, call))
 
     # 4. _handle_clear_index raising error
     with (
@@ -741,7 +755,7 @@ async def test_services_exception_wrapping() -> None:
         ),
         pytest.raises(HomeAssistantError, match="Clear index failed; see logs for details"),
     ):
-        await _handle_clear_index(hass, cast(ServiceCall, call))
+        await _handle_clear_index(_as_hass(hass), cast(ServiceCall, call))
 
     # 5. _handle_dump_candidates raising error
     with (
@@ -752,7 +766,7 @@ async def test_services_exception_wrapping() -> None:
         ),
         pytest.raises(HomeAssistantError, match="Dump candidates failed; see logs for details"),
     ):
-        await _handle_dump_candidates(hass, cast(ServiceCall, call))
+        await _handle_dump_candidates(_as_hass(hass), cast(ServiceCall, call))
 
     # 6. Verify RuntimeError is also caught and wrapped (it is a subclass of Exception)
     with (
@@ -762,4 +776,4 @@ async def test_services_exception_wrapping() -> None:
         ),
         pytest.raises(HomeAssistantError, match="Matching test failed; see logs for details"),
     ):
-        await _handle_test_match(hass, cast(ServiceCall, call))
+        await _handle_test_match(_as_hass(hass), cast(ServiceCall, call))
