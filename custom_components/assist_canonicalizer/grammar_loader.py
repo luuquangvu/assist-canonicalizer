@@ -1445,6 +1445,7 @@ def _candidates_from_intent_config(
     data_items = intent_config.get("data", [])
     if not isinstance(data_items, list):
         return ()
+    available_domains = _available_domains_from_registry(registry_slot_values)
     _name_data_items: list[Mapping[str, object]] = []
     _other_data_items: list[Mapping[str, object]] = []
     for di in data_items:
@@ -1453,6 +1454,10 @@ def _candidates_from_intent_config(
         typed_data_item = _string_keyed_mapping(di)
         if typed_data_item is None:
             continue
+        if available_domains is not None:
+            block_domains = _context_domains(typed_data_item)
+            if block_domains and available_domains.isdisjoint(block_domains):
+                continue
         sentences = typed_data_item.get("sentences", [])
         if not isinstance(sentences, list):
             continue
@@ -4505,12 +4510,34 @@ def _slot_reference(raw: str) -> TemplateSlotReference:
 def _context_domains(data_item: Mapping[str, object]) -> tuple[str, ...]:
     """Return required entity domains for one HassIL data item."""
     domains: list[str] = []
+    if inferred := data_item.get("inferred_domain"):
+        domains.extend(_domain_values(inferred))
+    if name_doms := data_item.get("name_domains"):
+        domains.extend(_domain_values(name_doms))
     for key in ("requires_context", "slots"):
         context = data_item.get(key, {})
         if not isinstance(context, Mapping):
             continue
         domains.extend(_domain_values(context.get("domain")))
     return tuple(_deduplicate_texts(domains, len(domains) or 1))
+
+
+def _available_domains_from_registry(
+    registry_slot_values: Mapping[str, tuple[str, ...]],
+) -> set[str] | None:
+    """Return active entity domains extracted from domain-scoped registry slot keys.
+
+    If no domain-scoped keys are present, returns None to disable domain filtering.
+    """
+    if not registry_slot_values:
+        return None
+    domains: set[str] = set()
+    for key in registry_slot_values:
+        if ":" in key:
+            domain = key.split(":", 1)[1]
+            if domain:
+                domains.add(domain)
+    return domains or None
 
 
 def _context_slot_names(data_item: Mapping[str, object]) -> frozenset[str]:

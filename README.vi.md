@@ -164,27 +164,27 @@ Benchmark `managed_live` chạy mỗi truy vấn hai lần trên cùng một mô
 
 <!-- BENCHMARK_OVERALL_START -->
 
-> Phiên bản phụ thuộc benchmark: `Python` 3.14.6, `homeassistant` 2026.8.0b4, `hassil` 3.10.0, `home-assistant-intents` 2026.7.30.
+> Phiên bản phụ thuộc benchmark: `Python` 3.14.6, `homeassistant` 2026.8.0, `hassil` 3.11.0, `home-assistant-intents` 2026.7.30.
 
-| Chế độ         | Assist Canonicalizer | HassIL trực tiếp | Tăng điểm % | Khôi phục | Ngăn hồi quy | Nhận diện sai | Dự phòng | P50 ms | P95 ms |
-| :------------- | -------------------: | ---------------: | ----------: | --------: | -----------: | ------------: | -------: | -----: | -----: |
-| `managed_live` |            **90.3%** |            47.9% |       +42.4 |       254 |            5 |          1.3% |     8.3% |   98.0 |  284.6 |
+| Chế độ         | Assist Canonicalizer | HassIL trực tiếp | Mức tăng (%p) | Khôi phục | Ngăn hồi quy | Nhận diện sai | Dự phòng | P50 ms | P95 ms |
+| :------------- | -------------------: | ---------------: | ------------: | --------: | -----------: | ------------: | -------: | -----: | -----: |
+| `managed_live` |            **90.3%** |            47.9% |         +42.4 |       254 |            5 |          1.2% |     8.5% |   95.5 |  283.6 |
 
 <!-- BENCHMARK_OVERALL_END -->
 
-> Độ chính xác, nhận diện sai và dự phòng là ba kết quả loại trừ lẫn nhau của luồng ưu tiên HassIL; tổng các tỷ lệ là 100% trước khi làm tròn. “Ngăn hồi quy” là số truy vấn được HassIL xử lý chính xác trong khi đường dẫn chuẩn hóa trực tiếp không đạt tiêu chí đánh giá. Độ trễ được đo từ lượt chạy trực tiếp qua Assist Canonicalizer; báo cáo thô vẫn cung cấp riêng các chỉ số của đường dẫn này.
+> `Độ chính xác`, `Nhận diện sai` và `Dự phòng` là ba kết quả loại trừ lẫn nhau của luồng ưu tiên HassIL; tổng các tỷ lệ là 100% trước khi làm tròn. `Ngăn hồi quy` là số truy vấn được HassIL xử lý chính xác trong khi đường dẫn chuẩn hóa trực tiếp không đạt tiêu chí đánh giá. Độ trễ được đo từ lượt chạy trực tiếp qua Assist Canonicalizer; báo cáo thô vẫn cung cấp riêng các chỉ số của đường dẫn này.
 
 ### Chi tiết theo từng ngôn ngữ
 
 <!-- BENCHMARK_LANGS_START -->
 
-| Ngôn ngữ | Assist Canonicalizer | HassIL trực tiếp | Tăng điểm % | Khôi phục | Ngăn hồi quy | Nhận diện sai | Dự phòng | P50 ms | P95 ms |
-| :------- | -------------------: | ---------------: | ----------: | --------: | -----------: | ------------: | -------: | -----: | -----: |
-| EN       |            **92.2%** |            52.7% |       +39.5 |        51 |            0 |          0.8% |     7.0% |   67.0 |  294.5 |
-| DE       |            **91.0%** |            48.4% |       +42.6 |        52 |            1 |          0.8% |     8.2% |  156.1 |  301.8 |
-| FR       |            **89.9%** |            50.4% |       +39.5 |        47 |            1 |          2.5% |     7.6% |  100.5 |  311.8 |
-| NL       |            **89.9%** |            48.8% |       +41.1 |        53 |            1 |          0.8% |     9.3% |   90.5 |  256.3 |
-| VI       |            **88.0%** |            37.0% |       +51.0 |        51 |            2 |          2.0% |    10.0% |   73.3 |  181.2 |
+| Ngôn ngữ | Assist Canonicalizer | HassIL trực tiếp | Mức tăng (%p) | Khôi phục | Ngăn hồi quy | Nhận diện sai | Dự phòng | P50 ms | P95 ms |
+| :------- | -------------------: | ---------------: | ------------: | --------: | -----------: | ------------: | -------: | -----: | -----: |
+| EN       |            **92.2%** |            52.7% |         +39.5 |        51 |            0 |          0.0% |     7.8% |   69.2 |  292.3 |
+| DE       |            **91.0%** |            48.4% |         +42.6 |        52 |            1 |          0.8% |     8.2% |  155.6 |  294.2 |
+| FR       |            **89.9%** |            50.4% |         +39.5 |        47 |            1 |          2.5% |     7.6% |   98.6 |  309.0 |
+| NL       |            **89.9%** |            48.8% |         +41.1 |        53 |            1 |          0.8% |     9.3% |   91.1 |  252.7 |
+| VI       |            **88.0%** |            37.0% |         +51.0 |        51 |            2 |          2.0% |    10.0% |   72.4 |  177.7 |
 
 <!-- BENCHMARK_LANGS_END -->
 
