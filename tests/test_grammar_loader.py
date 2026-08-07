@@ -3229,3 +3229,70 @@ def test_build_candidates_drop_empty_normalized_text() -> None:
 def test_is_fixed_sentence_treats_semicolon_as_template() -> None:
     """Bare semicolons are HassIL permutation separators, not literal text."""
     assert not is_fixed_sentence("schalte das licht an;im wohnzimmer")
+
+
+def test_domain_aware_candidate_pre_filtering() -> None:
+    """Filter out data items requiring unavailable domains while keeping domainless ones."""
+    intent_sources = {
+        "builtin": {
+            "intents": {
+                "HassTurnOn": {
+                    "data": [
+                        {
+                            "sentences": ["turn on the light"],
+                            "slots": {"domain": "light"},
+                        },
+                        {
+                            "sentences": ["turn on the TV"],
+                            "slots": {"domain": "media_player"},
+                        },
+                        {
+                            "sentences": ["open the cover"],
+                            "inferred_domain": "cover",
+                        },
+                        {
+                            "sentences": ["lock the door"],
+                            "name_domains": ["lock"],
+                        },
+                        {
+                            "sentences": ["turn on generic"],
+                        },
+                    ]
+                }
+            }
+        }
+    }
+
+    # Available domains: only 'light' is in registry_slot_values
+    registry_slots_light_only = {
+        "name:light": ("kitchen light",),
+    }
+
+    candidates = build_candidates_from_intent_sources(
+        "en",
+        intent_sources,
+        registry_slots_light_only,
+    )
+
+    candidate_texts = [c.text for c in candidates]
+    assert "turn on the light" in candidate_texts
+    assert "turn on generic" in candidate_texts
+    assert "turn on the TV" not in candidate_texts
+    assert "open the cover" not in candidate_texts
+    assert "lock the door" not in candidate_texts
+
+    # With only unscoped registry mappings (e.g., 'name'), domain filtering is bypassed
+    unscoped_registry_slots = {
+        "name": ("generic name",),
+    }
+    candidates_unscoped = build_candidates_from_intent_sources(
+        "en",
+        intent_sources,
+        unscoped_registry_slots,
+    )
+    all_texts = [c.text for c in candidates_unscoped]
+    assert "turn on the light" in all_texts
+    assert "turn on generic" in all_texts
+    assert "turn on the TV" in all_texts
+    assert "open the cover" in all_texts
+    assert "lock the door" in all_texts
