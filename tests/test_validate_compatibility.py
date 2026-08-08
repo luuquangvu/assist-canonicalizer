@@ -9,6 +9,7 @@ from tools import validate_compatibility
 
 TEST_DEP_VERSIONS = {"home-assistant-intents": "2026.6.1"}
 ASSIST_RUNTIME_VERSIONS = {
+    "aiodns": "4.0.0",
     "ha-ffmpeg": "3.2.2",
     "mutagen": "1.47.0",
     "pymicro-vad": "1.0.1",
@@ -345,6 +346,47 @@ def test_required_deps_pin_assist_runtime_packages() -> None:
 
     assert all(f"{package}=={version}" in deps for package, version in pins.items())
     assert not set(pins).intersection(deps)
+
+
+def test_transitive_compatibility_specs_cap_legacy_pycares() -> None:
+    """Prevent future pycares majors from breaking historical aiodns releases."""
+    assert validate_compatibility._transitive_compatibility_specs({"aiodns": "3.5.0"}) == (
+        "pycares<5",
+    )
+    assert validate_compatibility._transitive_compatibility_specs({"aiodns": "4.0.0b1"}) == ()
+    assert validate_compatibility._transitive_compatibility_specs({"aiodns": "4.0.0"}) == ()
+
+
+def test_refresh_dependencies_preserves_selection_and_legacy_transitive_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Apply legacy transitive constraints during a targeted dependency refresh."""
+    calls: list[tuple[Path, tuple[str, ...], str]] = []
+
+    def record_install(
+        python_bin: Path,
+        package_args: tuple[str, ...] | list[str],
+        step_label: str,
+    ) -> None:
+        calls.append((python_bin, tuple(package_args), step_label))
+
+    monkeypatch.setattr(validate_compatibility, "_run_uv_pip_install", record_install)
+    python_bin = Path("python")
+    selected = ("aiodns==3.5.0", "home-assistant-intents==2025.10.1")
+
+    validate_compatibility._refresh_compatibility_dependencies(
+        python_bin,
+        selected,
+        {"aiodns": "3.5.0"},
+    )
+
+    assert calls == [
+        (
+            python_bin,
+            (*selected, "pycares<5"),
+            "aiodns==3.5.0 home-assistant-intents==2025.10.1",
+        )
+    ]
 
 
 def test_venv_dependency_marker_tracks_full_pin_set(tmp_path: Path) -> None:
@@ -798,8 +840,18 @@ def test_test_matrix_loads_matrix_lazily(monkeypatch: pytest.MonkeyPatch) -> Non
                 "ha_version": "2026.6.0",
                 "harness_version": "0.13.330",
                 "python_version": "3.14",
-            }
+            },
+            {
+                "ha_version": "latest",
+                "harness_version": "latest",
+                "python_version": "3.14",
+            },
         ],
+    )
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_minimum_supported_ha_version",
+        lambda: "2026.6.0",
     )
 
     assert validate_compatibility._test_matrix() == [
@@ -807,8 +859,93 @@ def test_test_matrix_loads_matrix_lazily(monkeypatch: pytest.MonkeyPatch) -> Non
             "ha_ver": "2026.6.0",
             "harness_ver": "0.13.330",
             "python_ver": "3.14",
-        }
+        },
+        {
+            "ha_ver": "latest",
+            "harness_ver": "latest",
+            "python_ver": "3.14",
+        },
     ]
+
+
+def test_matrix_supported_range_accepts_transition_checkpoints() -> None:
+    """Accept ordered API-transition checkpoints and a moving edge."""
+    entries: list[validate_compatibility.CompatibilityConfig] = [
+        {"ha_ver": "2024.12.0", "harness_ver": "1.0", "python_ver": "3.12"},
+        {"ha_ver": "2025.4.4", "harness_ver": "1.1", "python_ver": "3.13"},
+        {"ha_ver": "2026.3.4", "harness_ver": "1.2", "python_ver": "3.14"},
+        {"ha_ver": "latest", "harness_ver": "latest", "python_ver": "3.14"},
+    ]
+
+    validate_compatibility._validate_matrix_supported_range(entries, "2024.12.0")
+
+
+def test_matrix_supported_range_compares_minimum_semantically() -> None:
+    """Accept equivalent minimum versions with different release formatting."""
+    entries: list[validate_compatibility.CompatibilityConfig] = [
+        {"ha_ver": "2024.5", "harness_ver": "1.0", "python_ver": "3.12"},
+        {"ha_ver": "latest", "harness_ver": "latest", "python_ver": "3.14"},
+    ]
+
+    validate_compatibility._validate_matrix_supported_range(entries, "2024.5.0")
+
+
+def test_repository_matrix_tracks_home_assistant_api_transitions() -> None:
+    """Keep fixed rows at compatibility-relevant Home Assistant API boundaries."""
+    assert [entry["ha_ver"] for entry in validate_compatibility._test_matrix()] == [
+        "2024.12.0",  # Declared minimum and legacy conversation input.
+        "2025.2.5",  # Extra system prompt before the chat-log lifecycle.
+        "2025.4.4",  # ConversationEntity chat-log lifecycle.
+        "2025.10.4",  # Satellite-aware ConversationInput.
+        "2026.3.4",  # Dynamic intent subscriptions and Python 3.14.
+        "2026.4.4",  # Entity-registry alias helper.
+        "latest",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("entries", "match"),
+    [
+        (
+            [
+                {"ha_ver": "2024.12.1", "harness_ver": "1.0", "python_ver": "3.12"},
+                {"ha_ver": "latest", "harness_ver": "latest", "python_ver": "3.14"},
+            ],
+            "first row must match",
+        ),
+        (
+            [
+                {"ha_ver": "2024.12.0", "harness_ver": "1.0", "python_ver": "3.12"},
+                {"ha_ver": "2024.12.0", "harness_ver": "1.1", "python_ver": "3.12"},
+                {"ha_ver": "latest", "harness_ver": "latest", "python_ver": "3.14"},
+            ],
+            "duplicate fixed",
+        ),
+        (
+            [
+                {"ha_ver": "2024.12.0", "harness_ver": "1.0", "python_ver": "3.12"},
+            ],
+            "must end with",
+        ),
+        ([], "must not be empty"),
+        (
+            [
+                {"ha_ver": "2024.12.0", "harness_ver": "1.0", "python_ver": "3.12"},
+                {"ha_ver": "2026.3.4", "harness_ver": "1.2", "python_ver": "3.14"},
+                {"ha_ver": "2025.4.4", "harness_ver": "1.1", "python_ver": "3.13"},
+                {"ha_ver": "latest", "harness_ver": "latest", "python_ver": "3.14"},
+            ],
+            "must be ordered",
+        ),
+    ],
+)
+def test_matrix_supported_range_rejects_invalid_structure(
+    entries: list[validate_compatibility.CompatibilityConfig],
+    match: str,
+) -> None:
+    """Reject matrix shapes that cannot provide stable transition assurance."""
+    with pytest.raises(ValueError, match=match):
+        validate_compatibility._validate_matrix_supported_range(entries, "2024.12.0")
 
 
 @pytest.mark.parametrize(
@@ -930,6 +1067,86 @@ def test_main_outputs_required_test_dependency_metadata(
     }
 
 
+def test_main_validates_source_matrix(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Expose semantic source-matrix validation as a dedicated CI gate."""
+    matrix: list[validate_compatibility.CompatibilityConfig] = [
+        {"ha_ver": "2024.12.0", "harness_ver": "0.13.190", "python_ver": "3.12"},
+        {"ha_ver": "latest", "harness_ver": "latest", "python_ver": "3.14"},
+    ]
+    monkeypatch.setattr(validate_compatibility, "_test_matrix", lambda: matrix)
+    monkeypatch.setattr(
+        validate_compatibility.sys,
+        "argv",
+        ["validate_compatibility.py", "--validate-matrix"],
+    )
+
+    validate_compatibility.main()
+
+    assert capsys.readouterr().out == "STEP_OK: compatibility matrix validated (2 rows)\n"
+
+
+def test_main_matrix_validation_failure_exits_nonzero(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Make invalid source matrices fail the dedicated CI gate."""
+
+    def reject_matrix() -> list[validate_compatibility.CompatibilityConfig]:
+        raise ValueError("matrix is unordered")
+
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_test_matrix",
+        reject_matrix,
+    )
+    monkeypatch.setattr(
+        validate_compatibility.sys,
+        "argv",
+        ["validate_compatibility.py", "--validate-matrix"],
+    )
+
+    with pytest.raises(SystemExit) as raised:
+        validate_compatibility.main()
+
+    assert raised.value.code == 1
+    assert capsys.readouterr().out == "VALIDATION_ERROR: matrix is unordered\n"
+
+
+@pytest.mark.parametrize(
+    ("aiodns_version", "expected"),
+    [
+        ("3.5.0", ["pycares<5"]),
+        ("4.0.0b1", []),
+        ("4.0.0", []),
+        ("4.0.0.post1", []),
+    ],
+)
+def test_main_outputs_transitive_compatibility_specs(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    aiodns_version: str,
+    expected: list[str],
+) -> None:
+    """Expose the local runner's transitive compatibility rules to CI."""
+    monkeypatch.setattr(
+        validate_compatibility.sys,
+        "argv",
+        [
+            "validate_compatibility.py",
+            "--transitive-compatibility-specs-json",
+            "--aiodns-version",
+            aiodns_version,
+        ],
+    )
+
+    validate_compatibility.main()
+
+    assert validate_compatibility.orjson.loads(capsys.readouterr().out) == expected
+
+
 def test_verify_pair_requires_uv_before_inspection(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -995,6 +1212,17 @@ def test_parse_requirements_dependency_version_normalizes_distribution_names() -
             "Home.Assistant_Intents",
         )
         == "2026.6.1"
+    )
+
+
+def test_parse_requirements_dependency_version_accepts_pep440_versions() -> None:
+    """Allow resolver pins containing PEP 440 epochs, prereleases, and local versions."""
+    assert (
+        validate_compatibility._parse_requirements_dependency_version(
+            "aiodns==1!4.0.0b1+linux.1\n",
+            "aiodns",
+        )
+        == "1!4.0.0b1+linux.1"
     )
 
 

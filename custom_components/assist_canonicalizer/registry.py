@@ -111,8 +111,24 @@ def _entity_names(
     """Yield spoken entity names from registry aliases or state names."""
     has_yielded = False
     if entry is not None:
-        with contextlib.suppress(AttributeError, RuntimeError, ValueError):
-            for alias in entity_registry.async_get_entity_aliases(hass, entry, allow_empty=False):
+        entry_aliases = getattr(entry, "aliases", ())
+        aliases: Iterable[object]
+        if isinstance(entry_aliases, str):
+            aliases = (entry_aliases,)
+        elif isinstance(entry_aliases, Iterable):
+            aliases = entry_aliases
+        else:
+            aliases = ()
+        get_entity_aliases = getattr(entity_registry, "async_get_entity_aliases", None)
+        if callable(get_entity_aliases):
+            with contextlib.suppress(AttributeError, RuntimeError, ValueError):
+                helper_aliases = get_entity_aliases(hass, entry, allow_empty=False)
+                if isinstance(helper_aliases, str):
+                    aliases = (helper_aliases,)
+                elif isinstance(helper_aliases, Iterable):
+                    aliases = helper_aliases
+        for alias in aliases:
+            with contextlib.suppress(AttributeError, RuntimeError, ValueError):
                 if isinstance(alias, str) and (cleaned_alias := alias.strip()):
                     yield cleaned_alias
                     has_yielded = True

@@ -294,6 +294,54 @@ async def test_conversation_entity_properties_and_reload() -> None:
 
 
 @pytest.mark.asyncio
+async def test_async_process_uses_legacy_request_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Call the request processor directly when the HA base has no chat lifecycle."""
+    entry = MagicMock()
+    entity = AssistCanonicalizerConversationEntity(entry, CanonicalizerRuntime())
+    user_input = MockConversationInput("turn on the light", "en")
+    expected = MagicMock()
+    request_process = AsyncMock(return_value=expected)
+    base_process = AsyncMock()
+    base_entity = conversation_platform.conversation.ConversationEntity
+    monkeypatch.delattr(base_entity, "_async_handle_message", raising=False)
+
+    with (
+        patch.object(entity, "_async_process_request", request_process),
+        patch.object(base_entity, "async_process", base_process),
+    ):
+        assert await entity.async_process(user_input) is expected
+
+    request_process.assert_awaited_once_with(user_input)
+    base_process.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_async_process_uses_modern_home_assistant_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Delegate to the HA base processor when it exposes the chat lifecycle."""
+    entry = MagicMock()
+    entity = AssistCanonicalizerConversationEntity(entry, CanonicalizerRuntime())
+    user_input = MockConversationInput("turn on the light", "en")
+    expected = MagicMock()
+    request_process = AsyncMock()
+    base_process = AsyncMock(return_value=expected)
+    base_entity = conversation_platform.conversation.ConversationEntity
+    monkeypatch.setattr(base_entity, "_async_handle_message", object(), raising=False)
+
+    with (
+        patch.object(entity, "_async_process_request", request_process),
+        patch.object(base_entity, "async_process", base_process),
+    ):
+        assert await entity.async_process(user_input) is expected
+
+    base_process.assert_awaited_once_with(user_input)
+    request_process.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_conversation_entity_prepare() -> None:
     """Test async_prepare index load and rebuild flows."""
     entry = MagicMock()
@@ -347,7 +395,7 @@ async def test_async_process_error_handling() -> None:
         ),
         patch("homeassistant.helpers.intent.IntentResponse", return_value=mock_resp),
     ):
-        res = await entity.async_process(user_input)
+        res = await entity._async_process_request(user_input)
         assert res.response.error_code is not None
         assert runtime.diagnostics.last_fallback_reason == FallbackReason.UNEXPECTED_EXCEPTION
         assert runtime.diagnostics.last_error == "Database error"
@@ -1803,7 +1851,7 @@ async def test_conversation_delegate_and_fallback_agent_logic() -> None:
         patch.object(CanonicalizerRuntime, "rank_with_dynamic_candidates", return_value=(rc,)),
         patch.object(entity, "_delegate_text", AsyncMock(return_value=validation_ok_res)),
     ):
-        res = await entity.async_process(user_input)
+        res = await entity._async_process_request(user_input)
         assert res is validation_ok_res
         assert runtime.diagnostics.last_fallback_reason is None
 
@@ -1946,7 +1994,7 @@ async def test_async_process_shortcut_restores_chat_log(
 
         mock_delegate.side_effect = side_effect
 
-        res = await entity.async_process(user_input)
+        res = await entity._async_process_request(user_input)
         assert res is validation_ok_res
 
         # Verify that mock_chat_log.content was restored to the original snapshot
@@ -2302,7 +2350,7 @@ async def test_async_process_fallback_missing(
     )
     with converse_patch:
         user_input = MockConversationInput("hello", "en")
-        res = await conversation_entity.async_process(user_input)
+        res = await conversation_entity._async_process_request(user_input)
         # Should return a default error response when fallback completely fails
         assert res is not None
         assert res.response.error_code == "unknown"

@@ -68,7 +68,11 @@ def test_entry_names_and_aliases_excludes_registry_ids() -> None:
 def test_entity_names_extraction() -> None:
     """Test extracting spoke entity names and aliases."""
     hass = MagicMock()
-    entry = SimpleNamespace(name="My Device", original_name="Orig Device")
+    entry = SimpleNamespace(
+        aliases={"Legacy Alias"},
+        name="My Device",
+        original_name="Orig Device",
+    )
     state = SimpleNamespace(name="State Device")
 
     with patch.object(
@@ -82,6 +86,7 @@ def test_entity_names_extraction() -> None:
 
         mock_get_aliases.side_effect = AttributeError
         names = list(_entity_names(hass, cast(RegistryEntry, entry), cast(State, state)))
+        assert "Legacy Alias" in names
         assert "My Device" in names
 
         names = list(_entity_names(hass, None, cast(State, state)))
@@ -108,6 +113,53 @@ def test_entity_names_extraction() -> None:
             )
         )
         assert names == ["Orig Device"]
+
+
+def test_entity_names_prefers_helper_aliases_over_entry_aliases() -> None:
+    """Use helper aliases exclusively when the installed HA provides them."""
+    hass = MagicMock()
+    entry = SimpleNamespace(
+        aliases=("Entry Alias",),
+        name="My Device",
+        original_name=None,
+    )
+    state = SimpleNamespace(name="State Device")
+
+    with patch.object(
+        registry.entity_registry,
+        "async_get_entity_aliases",
+        return_value=[" Helper Alias "],
+        create=True,
+    ) as mock_get_aliases:
+        names = list(_entity_names(hass, cast(RegistryEntry, entry), cast(State, state)))
+
+    assert names == ["Helper Alias", "My Device"]
+    assert "Entry Alias" not in names
+    mock_get_aliases.assert_called_once_with(hass, entry, allow_empty=False)
+
+
+def test_entity_names_treats_single_string_aliases_as_one_value() -> None:
+    """Do not split lone entry or helper alias strings into characters."""
+    hass = MagicMock()
+    entry = SimpleNamespace(
+        aliases="Entry Alias",
+        name=None,
+        original_name=None,
+    )
+    state = SimpleNamespace(name="State Device")
+
+    with patch.object(registry.entity_registry, "async_get_entity_aliases", None, create=True):
+        names = list(_entity_names(hass, cast(RegistryEntry, entry), cast(State, state)))
+    assert names == ["Entry Alias"]
+
+    with patch.object(
+        registry.entity_registry,
+        "async_get_entity_aliases",
+        return_value="Helper Alias",
+        create=True,
+    ):
+        names = list(_entity_names(hass, cast(RegistryEntry, entry), cast(State, state)))
+    assert names == ["Helper Alias"]
 
 
 def test_build_registry_slot_values_non_string_domains() -> None:

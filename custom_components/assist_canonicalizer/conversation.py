@@ -215,7 +215,24 @@ class AssistCanonicalizerConversationEntity(
         await super().async_will_remove_from_hass()
 
     async def async_process(self, user_input: ConversationInput) -> ConversationResult:
-        """Process a conversation request."""
+        """Process a request through the lifecycle provided by the installed HA."""
+        if hasattr(conversation.ConversationEntity, "_async_handle_message"):
+            return await super().async_process(user_input)
+        return await self._async_process_request(user_input)
+
+    async def _async_handle_message(
+        self,
+        user_input: ConversationInput,
+        chat_log: ChatLog,
+    ) -> ConversationResult:
+        """Process a request inside the modern Home Assistant chat-log lifecycle."""
+        return await self._async_process_request(user_input)
+
+    async def _async_process_request(
+        self,
+        user_input: ConversationInput,
+    ) -> ConversationResult:
+        """Process one request after Home Assistant establishes its lifecycle context."""
         started_at = time.monotonic()
         request_id = user_input.conversation_id or getattr(user_input.context, "id", None)
         self._runtime.update_diagnostics(
