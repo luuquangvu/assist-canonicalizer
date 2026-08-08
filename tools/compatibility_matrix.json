@@ -5,23 +5,28 @@
     "python_version": "3.12"
   },
   {
-    "ha_version": "2025.1.0",
-    "harness_version": "0.13.201",
-    "python_version": "3.12"
-  },
-  {
-    "ha_version": "2025.2.0",
-    "harness_version": "0.13.210",
+    "ha_version": "2025.2.5",
+    "harness_version": "0.13.215",
     "python_version": "3.13"
   },
   {
-    "ha_version": "2026.2.0",
-    "harness_version": "0.13.313",
+    "ha_version": "2025.4.4",
+    "harness_version": "0.13.236",
     "python_version": "3.13"
   },
   {
-    "ha_version": "2026.3.1",
-    "harness_version": "0.13.317",
+    "ha_version": "2025.10.4",
+    "harness_version": "0.13.289",
+    "python_version": "3.13"
+  },
+  {
+    "ha_version": "2026.3.4",
+    "harness_version": "0.13.320",
+    "python_version": "3.14"
+  },
+  {
+    "ha_version": "2026.4.4",
+    "harness_version": "0.13.325",
     "python_version": "3.14"
   },
   {

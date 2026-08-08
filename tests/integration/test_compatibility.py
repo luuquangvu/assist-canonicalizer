@@ -1,18 +1,22 @@
 """Functional compatibility contract for supported Home Assistant versions."""
 
 import inspect
+from datetime import timedelta
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from homeassistant import config_entries
 from homeassistant.components import conversation
 from homeassistant.components.conversation.const import HOME_ASSISTANT_AGENT
+from homeassistant.components.homeassistant.exposed_entities import async_expose_entity
 from homeassistant.core import Context, HomeAssistant, callback
+from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import area_registry, entity_registry, floor_registry
 from homeassistant.setup import async_setup_component
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from homeassistant.util import dt as dt_util
+from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
 
-from custom_components.assist_canonicalizer import _refresh_registry_slot_values
 from custom_components.assist_canonicalizer.const import (
     ATTR_AGENT_ID,
     ATTR_CANDIDATE_COUNT,
@@ -21,6 +25,8 @@ from custom_components.assist_canonicalizer.const import (
     CONF_MIN_CONFIDENCE,
     CONF_MIN_MARGIN,
     DATA_RUNTIME,
+    DEFAULT_MIN_CONFIDENCE,
+    DEFAULT_MIN_MARGIN,
     DOMAIN,
     SERVICE_CLEAR_INDEX,
     SERVICE_DIAGNOSTICS,
@@ -29,7 +35,10 @@ from custom_components.assist_canonicalizer.const import (
     SERVICE_SET_FALLBACK_AGENT,
     SERVICE_TEST_MATCH,
 )
-from custom_components.assist_canonicalizer.recognition import async_observe_delegated_text
+from custom_components.assist_canonicalizer.recognition import (
+    RecognitionKind,
+    async_observe_delegated_text,
+)
 
 pytestmark = pytest.mark.compatibility
 
@@ -116,15 +125,46 @@ async def test_home_assistant_functional_contract(
     assert fallback_response["fallback_agent_id"] == HOME_ASSISTANT_AGENT
 
     # 5. Process conversation input
-    result = await conversation.async_converse(
-        hass,
-        "compatibility smoke phrase with no supported intent",
-        "compatibility-smoke",
-        Context(),
-        language="en",
-        agent_id=entry.entry_id,
-    )
+    agent = conversation.agent_manager.async_get_agent(hass, entry.entry_id)
+    assert agent is not None
+    original_process = cast(Any, agent)._async_process_with_runtime
+    lifecycle_observations: list[tuple[str, str] | None] = []
+
+    async def observe_chat_lifecycle(user_input: conversation.ConversationInput) -> object:
+        """Record the modern HA chat-log context before processing the request."""
+        try:
+            from homeassistant.components.conversation.chat_log import current_chat_log
+        except ImportError:
+            lifecycle_observations.append(None)
+        else:
+            chat_log = current_chat_log.get(None)
+            if chat_log is None:
+                lifecycle_observations.append(None)
+            else:
+                user_content = chat_log.content[-1]
+                if user_content.role == "user":
+                    lifecycle_observations.append((user_content.role, user_content.content))
+                else:
+                    lifecycle_observations.append(None)
+        return await original_process(user_input)
+
+    raw_text = "compatibility smoke phrase with no supported intent"
+    with patch.object(
+        agent,
+        "_async_process_with_runtime",
+        observe_chat_lifecycle,
+    ):
+        result = await conversation.async_converse(
+            hass,
+            raw_text,
+            "compatibility-smoke",
+            Context(),
+            language="en",
+            agent_id=entry.entry_id,
+        )
     assert result.response is not None
+    if hasattr(conversation.ConversationEntity, "_async_handle_message"):
+        assert lifecycle_observations == [("user", raw_text)]
 
     # 6. Diagnostics service
     diagnostics = await hass.services.async_call(
@@ -178,6 +218,17 @@ async def test_compatibility_registry_and_observation(
     entity = entity_reg.async_get_or_create(
         "light", "compatibility_test", "light_1", suggested_object_id="test_light"
     )
+    entity = entity_reg.async_update_entity(
+        entity.entity_id,
+        aliases=["Compatibility Lamp Alias"],
+        name="Compatibility Test Light",
+    )
+    hass.states.async_set(
+        entity.entity_id,
+        "on",
+        {"friendly_name": "Compatibility State Light"},
+    )
+    async_expose_entity(hass, "conversation", entity.entity_id, True)
     floor = floor_reg.async_create("compatibility_test_floor")
 
     entry = MockConfigEntry(
@@ -191,7 +242,7 @@ async def test_compatibility_registry_and_observation(
     await hass.async_block_till_done()
 
     raw_input_text = "turn on the test light raw input"
-    delegated_text = "turn on the test light"
+    delegated_text = "turn on Compatibility Lamp Alias"
     test_context = Context()
 
     input_kwargs: dict[str, Any] = {
@@ -223,11 +274,16 @@ async def test_compatibility_registry_and_observation(
     assert forwarded_input.conversation_id == "test-conv-id"
     assert forwarded_input.language == "en"
 
-    assert observation is not None
-    assert observation.kind is not None
+    assert observation.kind is RecognitionKind.INTENT
+    assert observation.executable
+    assert observation.intent_name == "HassTurnOn"
+    assert not observation.unmatched_entities
 
     runtime = hass.data[DOMAIN][entry.entry_id][DATA_RUNTIME]
-    assert runtime.registry_slot_values is not None
+    assert "Compatibility Test Light" in runtime.registry_slot_values["name"]
+    assert "Compatibility Lamp Alias" in runtime.registry_slot_values["name"]
+    assert "compatibility_test_area" in runtime.registry_slot_values["area"]
+    assert "compatibility_test_floor" in runtime.registry_slot_values["floor"]
 
     str_entity_event = str(entity_registry.EVENT_ENTITY_REGISTRY_UPDATED)
     str_area_event = str(area_registry.EVENT_AREA_REGISTRY_UPDATED)
@@ -249,7 +305,11 @@ async def test_compatibility_registry_and_observation(
     for event_name in events_fired:
         hass.bus.async_listen(event_name, _track_event)
 
-    entity_reg.async_update_entity(entity.entity_id, name="Updated Test Light")
+    entity_reg.async_update_entity(
+        entity.entity_id,
+        aliases=["Updated Compatibility Alias"],
+        name="Updated Test Light",
+    )
     area_reg.async_update(area.id, name="Updated Test Area")
     floor_reg.async_update(floor.floor_id, name="Updated Test Floor")
     await hass.async_block_till_done()
@@ -258,6 +318,71 @@ async def test_compatibility_registry_and_observation(
     assert events_fired[str_area_event] >= 1
     assert events_fired[str_floor_event] >= 1
 
-    assert _refresh_registry_slot_values(hass, runtime) is True
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=6))
+    await hass.async_block_till_done()
+    assert "Updated Test Light" in runtime.registry_slot_values["name"]
+    assert "Updated Compatibility Alias" in runtime.registry_slot_values["name"]
+    assert "Updated Test Area" in runtime.registry_slot_values["area"]
+    assert "Updated Test Floor" in runtime.registry_slot_values["floor"]
 
     assert await hass.config_entries.async_unload(entry.entry_id)
+    assert runtime.closed
+    generation_after_unload = runtime.registry_generation
+    entity_reg.async_update_entity(entity.entity_id, name="Post Unload Test Light")
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=12))
+    await hass.async_block_till_done()
+    assert runtime.registry_generation == generation_after_unload
+    assert runtime.rebuild_timer_cancel is None
+
+
+@pytest.mark.asyncio
+async def test_config_and_options_flow_framework_contract(hass: HomeAssistant) -> None:
+    """Create and configure the integration through Home Assistant's flow managers."""
+    assert await async_setup_component(hass, "homeassistant", {})
+    assert await async_setup_component(hass, conversation.DOMAIN, {})
+
+    form = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_USER},
+    )
+    assert form.get("type") is FlowResultType.FORM
+    assert form.get("step_id") == "user"
+    assert "errors" in form
+    assert form.get("errors") is None
+
+    created = await hass.config_entries.flow.async_configure(
+        form["flow_id"],
+        {
+            "fallback_agent_id": HOME_ASSISTANT_AGENT,
+            CONF_MIN_CONFIDENCE: DEFAULT_MIN_CONFIDENCE,
+            CONF_MIN_MARGIN: DEFAULT_MIN_MARGIN,
+        },
+    )
+    assert created.get("type") is FlowResultType.CREATE_ENTRY
+    entry = created.get("result")
+    assert isinstance(entry, config_entries.ConfigEntry)
+    assert entry.domain == DOMAIN
+    assert entry.data["fallback_agent_id"] == HOME_ASSISTANT_AGENT
+
+    options_form = await hass.config_entries.options.async_init(entry.entry_id)
+    assert options_form.get("type") is FlowResultType.FORM
+    assert options_form.get("step_id") == "init"
+
+    options_created = await hass.config_entries.options.async_configure(
+        options_form["flow_id"],
+        {
+            "fallback_agent_id": HOME_ASSISTANT_AGENT,
+            CONF_MIN_CONFIDENCE: 0.7,
+            CONF_MIN_MARGIN: 0.08,
+        },
+    )
+    assert options_created.get("type") is FlowResultType.CREATE_ENTRY
+    assert entry.options[CONF_MIN_CONFIDENCE] == 0.7
+    assert entry.options[CONF_MIN_MARGIN] == 0.08
+
+    duplicate = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_USER},
+    )
+    assert duplicate.get("type") is FlowResultType.ABORT
+    assert duplicate.get("reason") == "single_instance_allowed"

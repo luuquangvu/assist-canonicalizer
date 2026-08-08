@@ -78,11 +78,6 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 pythonpath = ["."]
 testpaths = ["tests"]
-filterwarnings = [
-  "ignore::DeprecationWarning",
-  "ignore::pytest.PytestDeprecationWarning",
-  "error::DeprecationWarning:custom_components.assist_canonicalizer",
-]
 markers = [
   "compatibility: functional integration contract run against every supported Home Assistant version",
   "current_intents: tests that assert the current home-assistant-intents corpus or metadata",
@@ -100,9 +95,6 @@ addopts = [
 
 [tool.pyright]
 typeCheckingMode = "standard"
-reportUnreachable = "warning"           # Keep until ty implements this feature
-reportUnnecessaryComparison = "warning" # Keep until ty implements this feature
-reportUnnecessaryContains = "warning"   # Keep until ty implements this feature
 
 [tool.interrogate]
 fail-under = 100
