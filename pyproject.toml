@@ -23,6 +23,7 @@ dev = [
   "pytest-timeout",
   "pytest-xdist",
   "ruff",
+  "taplo",
   "tomlkit",
   "ty",
 ]
