@@ -7,7 +7,10 @@
         "data": {
           "fallback_agent_id": "Fallback-gespreksagent",
           "min_confidence": "Minimale matchbetrouwbaarheid",
-          "min_margin": "Basisbetrouwbaarheidsmarge"
+          "min_margin": "Basisbetrouwbaarheidsmarge",
+          "enable_hotword": "Hotword-bypass inschakelen",
+          "hotword": "Aangepast hotword",
+          "hotword_min_confidence": "Hotword-overeenkomst betrouwbaarheid"
         }
       }
     },
@@ -23,7 +26,10 @@
         "data": {
           "fallback_agent_id": "Fallback-gespreksagent",
           "min_confidence": "Minimale matchbetrouwbaarheid",
-          "min_margin": "Basisbetrouwbaarheidsmarge"
+          "min_margin": "Basisbetrouwbaarheidsmarge",
+          "enable_hotword": "Hotword-bypass inschakelen",
+          "hotword": "Aangepast hotword",
+          "hotword_min_confidence": "Hotword-overeenkomst betrouwbaarheid"
         }
       }
     }

@@ -7,7 +7,10 @@
         "data": {
           "fallback_agent_id": "Tác nhân hội thoại dự phòng",
           "min_confidence": "Độ tin cậy trùng khớp tối thiểu",
-          "min_margin": "Chênh lệch độ tin cậy cơ sở"
+          "min_margin": "Chênh lệch độ tin cậy cơ sở",
+          "enable_hotword": "Bật bỏ qua bằng từ khóa nóng",
+          "hotword": "Từ khóa nóng tùy chỉnh",
+          "hotword_min_confidence": "Độ tin cậy khớp từ khóa nóng"
         }
       }
     },
@@ -23,7 +26,10 @@
         "data": {
           "fallback_agent_id": "Tác nhân hội thoại dự phòng",
           "min_confidence": "Độ tin cậy trùng khớp tối thiểu",
-          "min_margin": "Chênh lệch độ tin cậy cơ sở"
+          "min_margin": "Chênh lệch độ tin cậy cơ sở",
+          "enable_hotword": "Bật bỏ qua bằng từ khóa nóng",
+          "hotword": "Từ khóa nóng tùy chỉnh",
+          "hotword_min_confidence": "Độ tin cậy khớp từ khóa nóng"
         }
       }
     }

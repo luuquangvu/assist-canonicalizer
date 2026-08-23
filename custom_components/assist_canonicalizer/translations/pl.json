@@ -7,7 +7,10 @@
         "data": {
           "fallback_agent_id": "Zapasowy agent konwersacyjny",
           "min_confidence": "Minimalna pewność dopasowania",
-          "min_margin": "Bazowy margines pewności"
+          "min_margin": "Bazowy margines pewności",
+          "enable_hotword": "Włącz pomijanie za pomocą słowa kluczowego",
+          "hotword": "Własne słowo kluczowe",
+          "hotword_min_confidence": "Pewność dopasowania słowa kluczowego"
         }
       }
     },
@@ -23,7 +26,10 @@
         "data": {
           "fallback_agent_id": "Zapasowy agent konwersacyjny",
           "min_confidence": "Minimalna pewność dopasowania",
-          "min_margin": "Bazowy margines pewności"
+          "min_margin": "Bazowy margines pewności",
+          "enable_hotword": "Włącz pomijanie za pomocą słowa kluczowego",
+          "hotword": "Własne słowo kluczowe",
+          "hotword_min_confidence": "Pewność dopasowania słowa kluczowego"
         }
       }
     }

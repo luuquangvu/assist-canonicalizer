@@ -7,7 +7,10 @@
         "data": {
           "fallback_agent_id": "Agente de conversa de fallback",
           "min_confidence": "Confiança mínima de correspondência",
-          "min_margin": "Margem base de confiança"
+          "min_margin": "Margem base de confiança",
+          "enable_hotword": "Ativar desvio por palavra de ativação",
+          "hotword": "Palavra de ativação personalizada",
+          "hotword_min_confidence": "Confiança de correspondência da palavra de ativação"
         }
       }
     },
@@ -23,7 +26,10 @@
         "data": {
           "fallback_agent_id": "Agente de conversa de fallback",
           "min_confidence": "Confiança mínima de correspondência",
-          "min_margin": "Margem base de confiança"
+          "min_margin": "Margem base de confiança",
+          "enable_hotword": "Ativar desvio por palavra de ativação",
+          "hotword": "Palavra de ativação personalizada",
+          "hotword_min_confidence": "Confiança de correspondência da palavra de ativação"
         }
       }
     }

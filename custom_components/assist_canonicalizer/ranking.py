@@ -22,6 +22,7 @@ from .const import (
     CHAR_NGRAM_WEIGHT,
     CONTEXT_SLOT_MATCH_BOOST,
     CONTEXT_SLOT_MISMATCH_PENALTY,
+    DEFAULT_HOTWORD_MIN_CONFIDENCE,
     DEFAULT_MAX_CANDIDATES,
     DEFAULT_MIN_CONFIDENCE,
     DEFAULT_MIN_MARGIN,
@@ -68,6 +69,8 @@ from .normalization import (
     literal_token_variants,
     normalize_text,
     normalize_text_no_diacritics,
+    normalize_text_no_diacritics_from_normalized,
+    tokenize_normalized,
 )
 from .rehydration import (
     WildcardVariantAnalysis,
@@ -76,6 +79,7 @@ from .rehydration import (
 )
 from .utils import (
     NormalizedIntentContext,
+    normalize_hotword_list,
     normalize_intent_context,
     normalized_slot_value_tokens,
     parse_float,
@@ -4802,6 +4806,76 @@ def _is_exact_lexical_match(ranked_candidate: RankedCandidate) -> bool:
     """Return whether a ranked candidate exactly matches query text lexically."""
     scores = ranked_candidate.scores
     return scores.rapidfuzz_score == 1.0 and scores.char_ngram_score == 1.0
+
+
+def _hotword_similarity(text_a: str, text_b: str) -> float:
+    """Calculate normalized similarity between two token-normalized strings."""
+    return max(
+        _raw_cached_fuzz_ratio(text_a, text_b) / 100.0,
+        rapidfuzz_similarity_normalized(text_a, text_b),
+    )
+
+
+def match_hotword_prefix(
+    query: str,
+    hotwords: str | Sequence[str],
+    min_confidence: float = DEFAULT_HOTWORD_MIN_CONFIDENCE,
+    language: str | None = None,
+) -> tuple[bool, float, str | None]:
+    """Return whether the query prefix matches any configured hotword with high confidence.
+
+    Splits query and hotword into normalized tokens, slices the query prefix by the
+    token length of each target hotword, and computes similarity scores using RapidFuzz
+    and token-level lexical comparison. Returns (matched, score, matched_hotword).
+    """
+    if not query or not hotwords:
+        return False, 0.0, None
+
+    candidate_hotwords = normalize_hotword_list(hotwords)
+    if not candidate_hotwords:
+        return False, 0.0, None
+
+    norm_query = normalize_text(query)
+    query_tokens = tokenize_normalized(norm_query)
+    if not query_tokens:
+        return False, 0.0, None
+
+    norm_query_no_dia = normalize_text_no_diacritics_from_normalized(norm_query, language)
+    query_tokens_no_dia = tokenize_normalized(norm_query_no_dia)
+
+    best_score = 0.0
+    best_hw: str | None = None
+
+    for hw in candidate_hotwords:
+        norm_hw = normalize_text(hw)
+        hw_tokens = tokenize_normalized(norm_hw)
+        if not hw_tokens:
+            continue
+
+        token_len = len(hw_tokens)
+        if len(query_tokens) < token_len:
+            continue
+
+        prefix_text = " ".join(query_tokens[:token_len])
+        score = _hotword_similarity(prefix_text, norm_hw)
+
+        if len(query_tokens_no_dia) >= token_len:
+            norm_hw_no_dia = normalize_text_no_diacritics_from_normalized(norm_hw, language)
+            prefix_no_dia = " ".join(query_tokens_no_dia[:token_len])
+            if prefix_no_dia != prefix_text or norm_hw_no_dia != norm_hw:
+                score = max(score, _hotword_similarity(prefix_no_dia, norm_hw_no_dia))
+
+        if score > best_score:
+            best_score = score
+            best_hw = hw
+
+        if best_score >= 1.0:
+            break
+
+    if best_score >= min_confidence and best_hw is not None:
+        return True, best_score, best_hw
+
+    return False, best_score, None
 
 
 def clear_ranking_caches() -> None:

@@ -58,6 +58,7 @@ from custom_components.assist_canonicalizer.ranking import (
     clear_ranking_caches,
     confidence_gate_rejection_reason,
     evaluate_confidence_gates,
+    match_hotword_prefix,
     rank_candidates,
     rapidfuzz_similarity_normalized,
     token_count_ratio,
@@ -5128,3 +5129,111 @@ def test_multiwildcard_partial_rehydration_fails_closed() -> None:
 
     assert rehydrated_text == candidate.text
     assert replacements == {}
+
+
+def test_match_hotword_prefix() -> None:
+    """Test hotword prefix matching logic with various scenarios and thresholds."""
+    # 1. Exact match single word
+    matched, score, hw = match_hotword_prefix("Jarvis what is the weather tomorrow", "Jarvis")
+    assert matched is True
+    assert score == 1.0
+    assert hw == "Jarvis"
+
+    # 2. Case and punctuation normalization
+    matched, score, hw = match_hotword_prefix("jarvis, what time is it?", "Jarvis")
+    assert matched is True
+    assert score == 1.0
+    assert hw == "Jarvis"
+
+    # 3. Multi-word hotword
+    matched, score, hw = match_hotword_prefix("Hey Jarvis, turn off the lights", "Hey Jarvis")
+    assert matched is True
+    assert score == 1.0
+    assert hw == "Hey Jarvis"
+
+    # 4. Multiple hotwords in list of items
+    matched, score, hw = match_hotword_prefix(
+        "Computer, status report", ["Jarvis", "Computer", "Alexa"]
+    )
+    assert matched is True
+    assert score == 1.0
+    assert hw == "Computer"
+
+    # 5. Multiple hotwords in tuple of items
+    matched, score, hw = match_hotword_prefix("Alexa play music", ("Jarvis", "Computer", "Alexa"))
+    assert matched is True
+    assert score == 1.0
+    assert hw == "Alexa"
+
+    # 6. Multiple hotwords in sequence
+    matched, score, hw = match_hotword_prefix("Hey Jarvis what is up", ["Jarvis", "Hey Jarvis"])
+    assert matched is True
+    assert score == 1.0
+    assert hw in ("Jarvis", "Hey Jarvis")
+
+    # 7. Minor typo / STT variation (fuzzy matching >= 0.85)
+    matched, score, hw = match_hotword_prefix(
+        "Jarviss what time is it", "Jarvis", min_confidence=0.85
+    )
+    assert matched is True
+    assert score >= 0.85
+    assert hw == "Jarvis"
+
+    # 8. High threshold rejects typo
+    matched, score, hw = match_hotword_prefix(
+        "Jarviss what time is it", "Jarvis", min_confidence=0.98
+    )
+    assert matched is False
+    assert hw is None
+
+    # 9. Non-matching queries
+    matched, score, hw = match_hotword_prefix("Turn on the living room light", "Jarvis")
+    assert matched is False
+    assert score < 0.85
+    assert hw is None
+
+    matched, score, hw = match_hotword_prefix("Japanese restaurants nearby", "Jarvis")
+    assert matched is False
+    assert hw is None
+
+    # 10. Query shorter than hotword
+    matched, score, hw = match_hotword_prefix("Hey", "Hey Jarvis")
+    assert matched is False
+    assert hw is None
+
+    # 11. Exact single word equal to hotword alone
+    matched, score, hw = match_hotword_prefix("Jarvis", "Jarvis")
+    assert matched is True
+    assert score == 1.0
+    assert hw == "Jarvis"
+
+    # 12. Diacritic / Accent support
+    matched, score, hw = match_hotword_prefix("Trợ lý ơi bật đèn lên", "Tro ly oi", language="vi")
+    assert matched is True
+    assert score >= 0.85
+
+    # 13. Empty inputs / edge cases
+    assert match_hotword_prefix("", "Jarvis") == (False, 0.0, None)
+    assert match_hotword_prefix("Jarvis hello", "") == (False, 0.0, None)
+    assert match_hotword_prefix("   ", "Jarvis") == (False, 0.0, None)
+    assert match_hotword_prefix("Jarvis hello", "   ") == (False, 0.0, None)
+    assert match_hotword_prefix("Jarvis hello", []) == (False, 0.0, None)
+
+    # 14. Non-string items in list are safely ignored
+    matched, score, hw = match_hotword_prefix(
+        "Jarvis what is the time", cast(Any, ["   ", None, 123, "Jarvis"])
+    )
+    assert matched is True
+    assert score == 1.0
+    assert hw == "Jarvis"
+
+    # 15. Multiple hotwords matching chooses the highest scoring hotword
+    # "Jarvis" matches prefix of "Jarvis what" with score 1.0
+    # "Jarviss" matches with fuzzy score < 1.0 but >= 0.85
+    # If list has ["Jarviss", "Jarvis"], it must pick "Jarvis" with score 1.0
+    matched, score, hw = match_hotword_prefix(
+        "Jarvis what is the time", ["Jarviss", "Jarvis"], min_confidence=0.85
+    )
+    assert matched is True
+    assert score == 1.0
+    assert hw == "Jarvis"

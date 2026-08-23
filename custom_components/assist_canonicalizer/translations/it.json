@@ -7,7 +7,10 @@
         "data": {
           "fallback_agent_id": "Agente di conversazione di fallback",
           "min_confidence": "Confidenza minima di corrispondenza",
-          "min_margin": "Margine di confidenza di base"
+          "min_margin": "Margine di confidenza di base",
+          "enable_hotword": "Abilita bypass con parola di attivazione",
+          "hotword": "Parola di attivazione personalizzata",
+          "hotword_min_confidence": "Confidenza di corrispondenza parola di attivazione"
         }
       }
     },
@@ -23,7 +26,10 @@
         "data": {
           "fallback_agent_id": "Agente di conversazione di fallback",
           "min_confidence": "Confidenza minima di corrispondenza",
-          "min_margin": "Margine di confidenza di base"
+          "min_margin": "Margine di confidenza di base",
+          "enable_hotword": "Abilita bypass con parola di attivazione",
+          "hotword": "Parola di attivazione personalizzata",
+          "hotword_min_confidence": "Confidenza di corrispondenza parola di attivazione"
         }
       }
     }

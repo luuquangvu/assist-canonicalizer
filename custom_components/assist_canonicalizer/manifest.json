@@ -9,7 +9,7 @@
   "integration_type": "service",
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/luuquangvu/assist-canonicalizer/issues",
-  "requirements": ["rapidfuzz>=3.10.0"],
+  "requirements": ["rapidfuzz>=3.14.2"],
   "single_config_entry": true,
   "version": "1.12.1"
 }

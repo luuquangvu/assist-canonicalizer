@@ -1,10 +1,10 @@
 [project]
 name = "assist-canonicalizer"
 version = "1.12.1"
-description = "Improve Assist intent recognition using lexical canonicalization"
+description = "Enhance Assist intent recognition accuracy by integrating a multi-signal lexical ranking engine into the Home Assistant conversation pipeline."
 readme = "README.md"
 requires-python = ">=3.14.2"
-dependencies = ["rapidfuzz>=3.10.0"]
+dependencies = ["rapidfuzz>=3.14.2"]
 
 [dependency-groups]
 dev = [
@@ -79,10 +79,6 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 pythonpath = ["."]
 testpaths = ["tests"]
-markers = [
-  "compatibility: functional integration contract run against every supported Home Assistant version",
-  "current_intents: tests that assert the current home-assistant-intents corpus or metadata",
-]
 addopts = [
   "-n",
   "auto",
@@ -93,9 +89,14 @@ addopts = [
   "--timeout=60",
   "--strict-markers",
 ]
+markers = [
+  "compatibility: functional integration contract run against every supported Home Assistant version",
+  "current_intents: tests that assert the current home-assistant-intents corpus or metadata",
+]
 
 [tool.pyright]
 typeCheckingMode = "standard"
+reportUnreachable = "warning"
 
 [tool.interrogate]
 fail-under = 100

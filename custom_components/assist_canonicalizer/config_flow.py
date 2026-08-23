@@ -12,23 +12,33 @@ from homeassistant.components.conversation.entity import ConversationEntity
 from homeassistant.config_entries import ConfigFlowResult
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.selector import (
+    BooleanSelector,
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
     SelectSelector,
     SelectSelectorConfig,
     SelectSelectorMode,
+    TextSelector,
+    TextSelectorConfig,
 )
 
 from .const import (
+    CONF_ENABLE_HOTWORD,
     CONF_FALLBACK_AGENT_ID,
+    CONF_HOTWORD,
+    CONF_HOTWORD_MIN_CONFIDENCE,
     CONF_MIN_CONFIDENCE,
     CONF_MIN_MARGIN,
+    DEFAULT_ENABLE_HOTWORD,
+    DEFAULT_HOTWORD,
+    DEFAULT_HOTWORD_MIN_CONFIDENCE,
     DEFAULT_MIN_CONFIDENCE,
     DEFAULT_MIN_MARGIN,
     DOMAIN,
     NAME,
 )
+from .utils import normalize_hotword_list
 
 
 class AssistCanonicalizerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -89,6 +99,8 @@ def _config_schema(
     fallback_default = str(defaults.get(CONF_FALLBACK_AGENT_ID, ""))
     if not fallback_default and HOME_ASSISTANT_AGENT:
         fallback_default = HOME_ASSISTANT_AGENT
+    raw_hotword = defaults.get(CONF_HOTWORD, DEFAULT_HOTWORD)
+    hotword_default = normalize_hotword_list(raw_hotword)
     return vol.Schema(
         {
             vol.Optional(
@@ -119,6 +131,28 @@ def _config_schema(
             vol.Optional(
                 CONF_MIN_MARGIN,
                 default=defaults.get(CONF_MIN_MARGIN, DEFAULT_MIN_MARGIN),
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=0.0,
+                    max=1.0,
+                    step=0.01,
+                    mode=NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Optional(
+                CONF_ENABLE_HOTWORD,
+                default=defaults.get(CONF_ENABLE_HOTWORD, DEFAULT_ENABLE_HOTWORD),
+            ): BooleanSelector(),
+            vol.Optional(
+                CONF_HOTWORD,
+                default=hotword_default,
+            ): TextSelector(TextSelectorConfig(multiple=True)),
+            vol.Optional(
+                CONF_HOTWORD_MIN_CONFIDENCE,
+                default=defaults.get(
+                    CONF_HOTWORD_MIN_CONFIDENCE,
+                    DEFAULT_HOTWORD_MIN_CONFIDENCE,
+                ),
             ): NumberSelector(
                 NumberSelectorConfig(
                     min=0.0,

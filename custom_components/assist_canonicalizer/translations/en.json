@@ -7,7 +7,10 @@
         "data": {
           "fallback_agent_id": "Fallback Conversation Agent",
           "min_confidence": "Minimum Match Confidence",
-          "min_margin": "Base Confidence Margin"
+          "min_margin": "Base Confidence Margin",
+          "enable_hotword": "Enable Hot Word Bypass",
+          "hotword": "Custom Hot Word",
+          "hotword_min_confidence": "Hot Word Match Confidence"
         }
       }
     },
@@ -23,7 +26,10 @@
         "data": {
           "fallback_agent_id": "Fallback Conversation Agent",
           "min_confidence": "Minimum Match Confidence",
-          "min_margin": "Base Confidence Margin"
+          "min_margin": "Base Confidence Margin",
+          "enable_hotword": "Enable Hot Word Bypass",
+          "hotword": "Custom Hot Word",
+          "hotword_min_confidence": "Hot Word Match Confidence"
         }
       }
     }

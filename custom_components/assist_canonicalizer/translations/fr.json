@@ -7,7 +7,10 @@
         "data": {
           "fallback_agent_id": "Agent de conversation de secours",
           "min_confidence": "Confiance minimale de correspondance",
-          "min_margin": "Marge de confiance de base"
+          "min_margin": "Marge de confiance de base",
+          "enable_hotword": "Activer le contournement par mot-clé",
+          "hotword": "Mot-clé personnalisé",
+          "hotword_min_confidence": "Confiance de correspondance du mot-clé"
         }
       }
     },
@@ -23,7 +26,10 @@
         "data": {
           "fallback_agent_id": "Agent de conversation de secours",
           "min_confidence": "Confiance minimale de correspondance",
-          "min_margin": "Marge de confiance de base"
+          "min_margin": "Marge de confiance de base",
+          "enable_hotword": "Activer le contournement par mot-clé",
+          "hotword": "Mot-clé personnalisé",
+          "hotword_min_confidence": "Confiance de correspondance du mot-clé"
         }
       }
     }

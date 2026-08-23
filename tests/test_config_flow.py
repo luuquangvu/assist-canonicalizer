@@ -169,10 +169,42 @@ def test_config_schema_types(monkeypatch: pytest.MonkeyPatch) -> None:
             "fallback_agent_id": "conversation.home_assistant",
             "min_confidence": 0.8,
             "min_margin": 0.05,
+            "enable_hotword": True,
+            "hotword": ["Jarvis", "Hey Jarvis"],
+            "hotword_min_confidence": 0.90,
         }
     )
     assert res["min_confidence"] == 0.8
     assert res["min_margin"] == 0.05
+    assert res["enable_hotword"] is True
+    assert res["hotword"] == ["Jarvis", "Hey Jarvis"]
+    assert res["hotword_min_confidence"] == 0.90
+
+
+def test_config_schema_hotword_normalization_and_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify _config_schema handles hotword normalization and defaults correctly."""
+    monkeypatch.setattr(config_flow, "HOME_ASSISTANT_AGENT", "conversation.home_assistant")
+    monkeypatch.setattr(
+        config_flow,
+        "_available_fallback_agents",
+        lambda hass, exclude_agent_id: {"conversation.home_assistant": "Home Assistant"},
+    )
+    hass = SimpleNamespace()
+
+    # 1. No defaults specified -> uses system defaults
+    schema_default = _config_schema(cast(HomeAssistant, hass))
+    res_default: Any = schema_default({})
+    assert res_default["enable_hotword"] is False
+    assert res_default["hotword"] == []
+    assert res_default["hotword_min_confidence"] == 0.85
+
+    # 2. String hotword default is normalized to list
+    schema_str = _config_schema(
+        cast(HomeAssistant, hass),
+        {"hotword": "Jarvis"},
+    )
+    res_str: Any = schema_str({})
+    assert res_str["hotword"] == ["Jarvis"]
 
 
 @pytest.mark.asyncio

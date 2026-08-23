@@ -7,7 +7,10 @@
         "data": {
           "fallback_agent_id": "Agente de conversación de respaldo",
           "min_confidence": "Confianza mínima de coincidencia",
-          "min_margin": "Margen base de confianza"
+          "min_margin": "Margen base de confianza",
+          "enable_hotword": "Habilitar omisión por palabra de activación",
+          "hotword": "Palabra de activación personalizada",
+          "hotword_min_confidence": "Confianza de coincidencia de palabra de activación"
         }
       }
     },
@@ -23,7 +26,10 @@
         "data": {
           "fallback_agent_id": "Agente de conversación de respaldo",
           "min_confidence": "Confianza mínima de coincidencia",
-          "min_margin": "Margen base de confianza"
+          "min_margin": "Margen base de confianza",
+          "enable_hotword": "Habilitar omisión por palabra de activación",
+          "hotword": "Palabra de activación personalizada",
+          "hotword_min_confidence": "Confianza de coincidencia de palabra de activación"
         }
       }
     }
