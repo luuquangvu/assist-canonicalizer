@@ -2428,7 +2428,7 @@ async def test_store_load_failure_delegates_to_fallback_agent() -> None:
 
 @pytest.mark.asyncio
 async def test_hotword_matched_bypasses_ranking_and_delegates_raw_text() -> None:
-    """A matching hotword must bypass ranking and delegate untouched raw text directly."""
+    """A matching hotword must bypass ranking and delegate stripped text directly."""
     entry = MagicMock()
     entry.entry_id = "test_entry"
     entry.options = {
@@ -2443,16 +2443,45 @@ async def test_hotword_matched_bypasses_ranking_and_delegates_raw_text() -> None
     user_input = MockConversationInput("Jarvis what is the weather tomorrow", "en")
 
     with (
-        patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw_delegated")) as raw,
+        patch.object(entity, "_delegate_text", AsyncMock(return_value="delegated")) as delegate,
         patch.object(entity, "_async_rank_request") as rank_mock,
     ):
         res = await entity._async_process_with_runtime(user_input)
 
-    assert res == "raw_delegated"
-    raw.assert_awaited_once_with(user_input)
+    assert res == "delegated"
+    delegate.assert_awaited_once_with("what is the weather tomorrow", user_input, primary=False)
     rank_mock.assert_not_called()
     assert runtime.diagnostics.last_fallback_reason == FallbackReason.HOTWORD_MATCHED
     assert runtime.diagnostics.execution_result == "hotword_fallback"
+
+
+@pytest.mark.asyncio
+async def test_hotword_matched_strips_punctuation_and_preserves_hotword_only() -> None:
+    """A matching hotword strips leading punctuation and retains query when hotword-only."""
+    entry = MagicMock()
+    entry.entry_id = "test_entry"
+    entry.options = {
+        ConfigKey.ENABLE_HOTWORD: True,
+        ConfigKey.HOTWORD: "Hey Jarvis",
+    }
+    entry.data = {}
+    runtime = CanonicalizerRuntime()
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    entity.hass = MagicMock()
+
+    # 1. Query with punctuation after hotword
+    user_input1 = MockConversationInput("Hey Jarvis: tell me a joke!", "en")
+    with patch.object(entity, "_delegate_text", AsyncMock(return_value="delegated")) as delegate:
+        res1 = await entity._async_process_with_runtime(user_input1)
+    assert res1 == "delegated"
+    delegate.assert_awaited_once_with("tell me a joke!", user_input1, primary=False)
+
+    # 2. Hotword only input preserves text
+    user_input2 = MockConversationInput("Hey Jarvis", "en")
+    with patch.object(entity, "_delegate_text", AsyncMock(return_value="delegated")) as delegate:
+        res2 = await entity._async_process_with_runtime(user_input2)
+    assert res2 == "delegated"
+    delegate.assert_awaited_once_with("Hey Jarvis", user_input2, primary=False)
 
 
 @pytest.mark.asyncio
@@ -2528,13 +2557,13 @@ async def test_hotword_multiword_and_custom_confidence_matched() -> None:
     user_input = MockConversationInput("Hey Javis turn off everything", "en")
 
     with (
-        patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw_delegated")) as raw,
+        patch.object(entity, "_delegate_text", AsyncMock(return_value="delegated")) as delegate,
         patch.object(entity, "_async_rank_request") as rank_mock,
     ):
         res = await entity._async_process_with_runtime(user_input)
 
-    assert res == "raw_delegated"
-    raw.assert_awaited_once_with(user_input)
+    assert res == "delegated"
+    delegate.assert_awaited_once_with("turn off everything", user_input, primary=False)
     rank_mock.assert_not_called()
     assert runtime.diagnostics.last_fallback_reason == FallbackReason.HOTWORD_MATCHED
 
@@ -2586,13 +2615,13 @@ async def test_hotword_list_of_strings_matched() -> None:
     user_input = MockConversationInput("Computer what time is it", "en")
 
     with (
-        patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw_delegated")) as raw,
+        patch.object(entity, "_delegate_text", AsyncMock(return_value="delegated")) as delegate,
         patch.object(entity, "_async_rank_request") as rank_mock,
     ):
         res = await entity._async_process_with_runtime(user_input)
 
-    assert res == "raw_delegated"
-    raw.assert_awaited_once_with(user_input)
+    assert res == "delegated"
+    delegate.assert_awaited_once_with("what time is it", user_input, primary=False)
     rank_mock.assert_not_called()
     assert runtime.diagnostics.last_fallback_reason == FallbackReason.HOTWORD_MATCHED
 
@@ -2614,13 +2643,13 @@ async def test_hotword_mixed_invalid_list_filtered_and_matched() -> None:
     user_input = MockConversationInput("Jarvis turn on lights", "en")
 
     with (
-        patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw_delegated")) as raw,
+        patch.object(entity, "_delegate_text", AsyncMock(return_value="delegated")) as delegate,
         patch.object(entity, "_async_rank_request") as rank_mock,
     ):
         res = await entity._async_process_with_runtime(user_input)
 
-    assert res == "raw_delegated"
-    raw.assert_awaited_once_with(user_input)
+    assert res == "delegated"
+    delegate.assert_awaited_once_with("turn on lights", user_input, primary=False)
     rank_mock.assert_not_called()
     assert runtime.diagnostics.last_fallback_reason == FallbackReason.HOTWORD_MATCHED
 

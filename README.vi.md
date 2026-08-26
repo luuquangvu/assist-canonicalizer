@@ -54,7 +54,7 @@ Trong thực tế, cùng một yêu cầu có thể được diễn đạt theo 
 - **Tự động xây dựng chỉ mục ứng viên (Automatic Candidate Index Building)**: Tạo chỉ mục riêng cho từng ngôn ngữ từ các nguồn Home Assistant được hỗ trợ: ý định tích hợp sẵn, tệp YAML chứa mẫu câu tùy chỉnh, tên và bí danh thực thể, sổ đăng ký khu vực và tầng, cùng các giá trị tham số (slot) được mở rộng động.
 - **Lưu ứng viên trên ổ đĩa (On-Disk Candidate Persistence)**: Lưu danh sách ứng viên chuẩn trong hệ thống lưu trữ của Home Assistant. Các lần xây dựng sau có thể dùng lại danh sách này thay vì phân tích lại toàn bộ mẫu câu và tệp YAML.
 - **Bộ lọc độ tin cậy có thể cấu hình (Configurable Confidence Gates)**: Điều chỉnh việc chấp nhận kết quả qua hai ngưỡng **Độ tin cậy tối thiểu (Minimum Match Confidence)** và **Khoảng cách độ tin cậy cơ sở (Base Confidence Margin)**. Kết quả khớp từ vựng chính xác và các chính sách có bằng chứng mạnh khác có thể giảm khoảng cách yêu cầu. Nếu không có chính sách nới lỏng phù hợp, các hành động cạnh tranh, kể cả hành động đối nghịch đã biết, phải đạt mức chênh lệch đầy đủ theo cấu hình.
-- **Bỏ qua bằng từ khóa nóng (Hot Word Bypass)**: Tùy chọn chỉ định từ khóa nóng (ví dụ `"Jarvis"`, `"Hey Jarvis"`) để bỏ qua toàn bộ các bước chuẩn hóa và xếp hạng ứng viên, chuyển thẳng nguyên văn câu lệnh tới tác nhân dự phòng đã cấu hình (chẳng hạn như LLM).
+- **Bỏ qua bằng từ khóa nóng (Hot Word Bypass)**: Tùy chọn chỉ định từ khóa nóng (ví dụ `"Jarvis"`, `"Hey Jarvis"`). Khi gặp câu hỏi khó, yêu cầu phức tạp hoặc câu lệnh chưa rõ ràng, tính năng này giúp ngăn hệ thống xếp hạng nhận diện sai lệch thành các lệnh nhà thông minh ngoài ý muốn, tự động cắt bỏ tiền tố từ khóa nóng và chuyển câu lệnh sạch tới tác nhân hội thoại dự phòng đã cấu hình (chẳng hạn như tác nhân LLM).
 - **Tiền kiểm nhận diện theo trạng thái thực tế và khôi phục có giới hạn (Live Recognition Preflight and Bounded Recovery)**: Xác minh câu lệnh chuẩn bằng bộ nhận diện ý định tích hợp sẵn của Home Assistant trước khi thực thi. Hệ thống thử tối đa ba ứng viên có độ tin cậy cao trước khi chuyển sang dự phòng, đồng thời cho phép một lần khôi phục nếu lệnh bị từ chối trước khi bộ xử lý ý định chạy.
 - **Hành động dành cho nhà phát triển**: Sáu hành động `set_fallback_agent`, `test_match`, `rebuild_index`, `clear_index`, `diagnostics` và `dump_candidates` cho phép thay đổi tuyến dự phòng, xem điểm xếp hạng, thông tin chỉ mục, dữ liệu chẩn đoán và quản lý vòng đời chỉ mục ngay trong bảng Hành động của Home Assistant.
 - **Chỉ mục riêng theo ngôn ngữ**: Quản lý độc lập chỉ mục cho từng ngôn ngữ và tự động đối chiếu biến thể ngôn ngữ với danh sách Home Assistant hỗ trợ.
@@ -91,7 +91,7 @@ Trong thực tế, cùng một yêu cầu có thể được diễn đạt theo 
 3. Chọn **Tác nhân hội thoại dự phòng (Fallback Conversation Agent)**. Khi Assist Canonicalizer không thể xử lý yêu cầu một cách an toàn, bộ tích hợp sẽ chuyển nguyên văn yêu cầu tới tác nhân này. Để tăng khả năng khôi phục, hãy chọn một tác nhân có cách diễn giải ngôn ngữ khác, chẳng hạn như tác nhân sử dụng LLM. Tác nhân mặc định của Home Assistant vẫn được hỗ trợ, nhưng có thể gặp lại chính hạn chế đã khiến yêu cầu chuyển sang dự phòng.
 4. Cấu hình **Độ tin cậy tối thiểu (Minimum Match Confidence)**: Điểm tổng hợp có trọng số của ứng viên phải đạt ngưỡng này mới được chấp nhận. Bạn nên bắt đầu với giá trị mặc định và dùng **Test Match** để xem điểm thực tế trước khi điều chỉnh.
 5. Cấu hình **Khoảng cách độ tin cậy cơ sở (Base Confidence Margin)**: Xác định mức chênh lệch điểm thông thường giữa kết quả cao nhất và lựa chọn phù hợp tiếp theo thuộc ý định khác, giúp tránh thực thi khi câu lệnh còn mơ hồ. Kết quả khớp từ vựng chính xác và các chính sách có bằng chứng mạnh khác có thể giảm hoặc bỏ qua yêu cầu này trước khi hệ thống đánh giá cạnh tranh giữa các hành động. Nếu không có chính sách nới lỏng phù hợp, các hành động cạnh tranh, kể cả cặp đối nghịch như bật và tắt, phải đạt mức chênh lệch đầy đủ theo cấu hình.
-6. _(Tùy chọn)_ Cấu hình **Bỏ qua bằng từ khóa nóng (Hot Word Bypass)**: Bật tính năng và thêm các từ khóa nóng tùy chỉnh (ví dụ `"Jarvis"`, `"Hey Jarvis"`). Khi câu lệnh có tiền tố khớp với bất kỳ từ khóa nóng nào ở độ tin cậy cao (mặc định $\ge 0.85$), hệ thống sẽ bỏ qua bước xếp hạng chuẩn hóa và chuyển trực tiếp nguyên văn câu lệnh đến tác nhân dự phòng.
+6. _(Tùy chọn)_ Cấu hình **Bỏ qua bằng từ khóa nóng (Hot Word Bypass)**: Bật tính năng và thêm các từ khóa nóng tùy chỉnh (ví dụ `"Jarvis"`, `"Hey Jarvis"`). Khi gặp các câu hỏi khó, câu lệnh phức tạp hoặc đàm thoại mở, tiền tố khớp từ khóa nóng ở độ tin cậy cao (mặc định $\ge 0.85$) sẽ ngăn hệ thống phân loại nhầm thành các hành động điều khiển thiết bị ngoài ý muốn, cắt bỏ tiền tố từ khóa nóng và chuyển thẳng câu lệnh tới tác nhân LLM dự phòng.
 7. Vào **Cài đặt (Settings)** > **Trợ lý giọng nói (Voice assistants)** và mở pipeline Assist của bạn. Tại mục **Tác nhân hội thoại (Conversation agents)**, chọn **Assist Canonicalizer**.
 
 > [!IMPORTANT]
@@ -103,11 +103,18 @@ Trong thực tế, cùng một yêu cầu có thể được diễn đạt theo 
 
 ## Cách hoạt động
 
-Khi pipeline Assist bật `prefer_local_intents`, Home Assistant để tác nhân HassIL tích hợp sẵn thử xử lý yêu cầu trước. Khi tùy chọn này bị tắt, Assist Canonicalizer cung cấp shortcut ưu tiên HassIL tương đương. Quá trình chuẩn hóa chỉ bắt đầu khi HassIL không xử lý được văn bản gốc:
+Cách các câu lệnh được chuyển đến Assist Canonicalizer phụ thuộc vào tùy chọn **prefer_local_intents** trong pipeline Assist của bạn:
+
+- **Khi bật `prefer_local_intents` (mặc định trong Home Assistant)**: Home Assistant sẽ thử xử lý bằng bộ nhận diện HassIL tích hợp sẵn trước. Các câu lệnh khớp chính xác mẫu câu tích hợp sẵn sẽ được Home Assistant thực thi ngay mà không cần gọi đến bộ tích hợp này. Mọi câu lệnh mà HassIL không khớp được (bao gồm cả các lệnh điều khiển thông thường bị lỗi chính tả, thay đổi vị trí từ, diễn đạt tự do, cũng như các câu hỏi có tiền tố từ khóa nóng như `"Jarvis, giải thích thuyết tương đối"`) sẽ được chuyển sang Assist Canonicalizer để chuẩn hóa hoặc chuyển tiếp dự phòng.
+- **Khi tắt `prefer_local_intents`**: Home Assistant chuyển thẳng toàn bộ câu lệnh tới Assist Canonicalizer. Khi đó, bộ tích hợp sẽ kiểm tra **Bỏ qua bằng từ khóa nóng (Hot Word Bypass)** trước tiên, chạy một shortcut tới HassIL cho các câu lệnh chuẩn, và thực hiện xếp hạng chuẩn hóa đa tín hiệu cho các trường hợp còn lại.
+
+Bên trong Assist Canonicalizer, luồng xử lý diễn ra như sau:
 
 ```mermaid
 flowchart TD
-    A[Nhập liệu từ người dùng] --> L{HassIL xử lý được yêu cầu gốc?}
+    A[Nhập liệu từ người dùng] --> HW{Khớp từ khóa nóng bỏ qua?}
+    HW -->|Có| HW_G[Tác nhân dự phòng nhận câu lệnh đã cắt tiền tố]
+    HW -->|Không| L{HassIL xử lý được yêu cầu gốc?}
     L -->|Có| H[Trả về kết quả từ Home Assistant]
     L -->|Không| B[Chuẩn hóa văn bản]
     B --> C[Tra cứu chỉ mục]
@@ -129,32 +136,34 @@ flowchart TD
     K -->|Thất bại| G
 ```
 
-1. **Ưu tiên HassIL**: Khi bật `prefer_local_intents`, Home Assistant thử HassIL trước khi chuyển sang Assist Canonicalizer. Khi tắt tùy chọn này, pipeline chuyển thẳng đến Assist Canonicalizer và bộ tích hợp gửi nguyên văn yêu cầu đến HassIL dưới dạng shortcut. Bộ tích hợp bỏ qua shortcut khi Home Assistant đã thực hiện lượt nhận diện ý định cục bộ. Nếu HassIL xử lý thành công, kết quả được trả về ngay và các bước còn lại được bỏ qua.
+1. **Bỏ qua bằng từ khóa nóng (Tùy chọn)**: Khi được bật, văn bản đầu vào được so khớp tiền tố với danh sách từ khóa nóng tùy chỉnh bằng so khớp mờ (ngưỡng tin cậy mặc định $\ge 0.85$, hỗ trợ bỏ dấu phụ). Khi gặp câu hỏi khó hoặc câu lệnh chưa rõ ràng, tính năng này ngăn hệ thống xếp hạng phân loại nhầm thành các lệnh điều khiển thiết bị ngoài ý muốn, bỏ qua hoàn toàn bước so khớp ý định cục bộ, tự động cắt bỏ tiền tố từ khóa nóng cùng dấu câu đầu dòng và chuyển câu lệnh tới LLM dự phòng (ghi nhận lý do `hotword_matched` trong chẩn đoán). Nếu người dùng chỉ nói riêng từ khóa nóng, văn bản gốc sẽ được giữ nguyên.
 
-2. **Chuẩn hóa văn bản (Text Normalization)**: Chuẩn hóa ký tự theo NFKC, chuyển chữ hoa thành chữ thường theo Unicode, loại bỏ dấu câu và thu gọn khoảng trắng. Quy trình giống nhau được áp dụng cho câu lệnh đầu vào và các câu ứng viên.
+2. **Ưu tiên HassIL**: Khi bật `prefer_local_intents` (mặc định trong Home Assistant), các câu lệnh được chuyển hướng tới HassIL trước khi chuyển tới bộ tích hợp này. Khi tắt `prefer_local_intents`, bộ tích hợp mô phỏng lại đúng logic này bằng cách dùng một shortcut gửi trực tiếp câu lệnh gốc tới HassIL. Nếu HassIL xử lý thành công, kết quả được trả về ngay và các bước chuẩn hóa tiếp theo được bỏ qua; nếu HassIL không nhận diện được, quá trình chuẩn hóa bắt đầu.
 
-3. **Tra cứu chỉ mục (Index Lookup)**: Câu lệnh đã chuẩn hóa được tra cứu trong chỉ mục của ngôn ngữ hiện tại, bao gồm:
+3. **Chuẩn hóa văn bản (Text Normalization)**: Chuẩn hóa ký tự theo NFKC, chuyển chữ hoa thành chữ thường theo Unicode, loại bỏ dấu câu và thu gọn khoảng trắng. Quy trình giống nhau được áp dụng cho câu lệnh đầu vào và các câu ứng viên.
+
+4. **Tra cứu chỉ mục (Index Lookup)**: Câu lệnh đã chuẩn hóa được tra cứu trong chỉ mục của ngôn ngữ hiện tại, bao gồm:
    - **Ý định tích hợp sẵn**: Các câu cố định và phần mở rộng mẫu câu có giới hạn từ cấu hình ngôn ngữ của Home Assistant.
    - **Câu lệnh tùy chỉnh**: Định nghĩa trong tệp YAML `custom_sentences/<lang>/`, tập lệnh ý định trong `configuration.yaml` hoặc tự động hóa câu lệnh được tạo từ giao diện.
    - **Thực thể**: Tên và bí danh của các thực thể được cung cấp cho Assist.
    - **Khu vực và tầng**: Tên và bí danh trong sổ đăng ký khu vực, tầng.
 
-4. **Chấm điểm và xếp hạng đa tín hiệu (Multi-Signal Ranking)**: Mỗi ứng viên được đánh giá bằng bốn tín hiệu trước khi tính điểm tổng hợp:
+5. **Chấm điểm và xếp hạng đa tín hiệu (Multi-Signal Ranking)**: Mỗi ứng viên được đánh giá bằng bốn tín hiệu trước khi tính điểm tổng hợp:
    - **Độ tương đồng từ**: Đo mức khớp của từ và thứ tự xuất hiện, hỗ trợ lỗi chính tả hoặc thay đổi vị trí từ.
    - **So khớp mẫu ký tự**: So sánh các nhóm ba ký tự chồng lấn để nhận diện cách viết tương tự.
    - **Độ liên quan từ khóa**: BM25 đánh giá mức độ quan trọng và tính đặc trưng của từng từ trong câu lệnh.
    - **Ngữ cảnh ý định**: Ưu tiên ứng viên có loại ý định, chẳng hạn bật đèn hoặc đặt nhiệt độ, phù hợp với các kết quả hàng đầu.
 
-5. **Kiểm tra độ tin cậy (Confidence Gate)**: Đánh giá ứng viên đứng đầu dựa trên các ngưỡng đã cấu hình:
+6. **Kiểm tra độ tin cậy (Confidence Gate)**: Đánh giá ứng viên đứng đầu dựa trên các ngưỡng đã cấu hình:
    - **Ngưỡng độ tin cậy**: Điểm số cuối cùng của ứng viên phải vượt qua ngưỡng sàn `min_confidence`.
    - **Khoảng cách độ tin cậy**: Thông thường, ứng viên phải dẫn trước đối thủ phù hợp tiếp theo thuộc ý định khác ít nhất `min_margin`. Kết quả khớp từ vựng chính xác có thể bỏ qua khoảng cách này; các chính sách có bằng chứng mạnh khác có thể giảm yêu cầu trước khi đánh giá cạnh tranh giữa các hành động. Nếu không có chính sách phù hợp, các cặp đối nghịch đã biết như bật/tắt, mở/đóng và khóa/mở khóa phải đạt mức chênh lệch đầy đủ. Quyết định và khoảng cách thực tế được hiển thị trong dữ liệu chẩn đoán.
 
-6. **Tiền kiểm, thực thi và khôi phục có giới hạn**: Khi ứng viên vượt qua bộ lọc độ tin cậy, hệ thống tiến hành quy trình xác thực và thực thi theo nhiều giai đoạn:
+7. **Tiền kiểm, thực thi và khôi phục có giới hạn**: Khi ứng viên vượt qua bộ lọc độ tin cậy, hệ thống tiến hành quy trình xác thực và thực thi theo nhiều giai đoạn:
    - **Tiền kiểm nhận diện theo trạng thái thực tế (Live Recognition Preflight)**: Câu lệnh được kiểm tra bằng bộ nhận diện ý định tích hợp sẵn của Home Assistant để xác nhận có thể thực thi. Nếu không hợp lệ, chẳng hạn tham chiếu đến khu vực hoặc thiết bị không tồn tại, ứng viên sẽ bị loại và hệ thống đánh giá danh sách còn lại, tối đa ba câu khác nhau. Nếu không có phương án khả thi, yêu cầu được chuyển sang tác nhân dự phòng.
    - **Thực thi trực tiếp**: Nếu tiền kiểm thành công, câu lệnh được gửi đến tác nhân hội thoại mặc định của Home Assistant (HassIL) để thực thi.
    - **Khôi phục có giới hạn sau thực thi (Bounded Post-Execution Recovery)**: Nếu câu lệnh bị từ chối trước khi bộ xử lý ý định chạy, chẳng hạn trả về `no_intent_match` hoặc `no_valid_targets` do không tìm thấy thực thể, hệ thống có thể khôi phục một lần. Hệ thống loại các lệnh trùng lặp và thử ứng viên phù hợp tiếp theo vẫn đạt ngưỡng tin cậy. Lỗi phát sinh bên trong bộ xử lý ý định không kích hoạt khôi phục và yêu cầu sẽ được chuyển sang dự phòng.
 
-7. **Chuyển tiếp dự phòng (Fallback)**: Nếu không tìm được ứng viên đủ an toàn, không đủ điều kiện khôi phục hoặc quá trình thực thi thất bại, bộ tích hợp chuyển nguyên văn yêu cầu ban đầu tới tác nhân dự phòng đã cấu hình.
+8. **Chuyển tiếp dự phòng (Fallback)**: Khi kích hoạt bỏ qua bằng từ khóa nóng, bộ tích hợp chuyển câu lệnh đã cắt tiền tố tới tác nhân hội thoại dự phòng đã cấu hình. Đối với các trường hợp dự phòng khác (không tìm được ứng viên đủ an toàn, không đủ điều kiện khôi phục hoặc thực thi thất bại), bộ tích hợp sẽ chuyển nguyên văn yêu cầu gốc ban đầu.
 
 ---
 
@@ -321,6 +330,7 @@ Khi câu lệnh bị **chuyển tiếp dự phòng (fallback)**, nguyên nhân c
 
 | Lý do                  | Ý nghĩa                                                                                              |
 | ---------------------- | ---------------------------------------------------------------------------------------------------- |
+| `hotword_matched`      | Câu lệnh khớp với tiền tố từ khóa nóng đã cấu hình và được chuyển thẳng tới tác nhân dự phòng.       |
 | `low_confidence`       | Không có câu lệnh ứng viên nào đạt ngưỡng điểm `min_confidence`.                                     |
 | `low_margin`           | Điểm của ứng viên đứng đầu và ứng viên tiếp theo thuộc ý định khác quá sát nhau (dưới `min_margin`). |
 | `empty_index`          | Chỉ mục câu lệnh của ngôn ngữ hiện tại chưa được xây dựng.                                           |
@@ -340,9 +350,10 @@ Trước khi điều chỉnh ngưỡng, hãy kiểm tra trạng thái hoạt đ�
 
 **Bộ chuẩn hóa luôn chuyển sang dự phòng và không bao giờ so khớp thành công.**
 
-1. Dùng **Diagnostics** để kiểm tra `last_fallback_reason`. `empty_index` cho biết chỉ mục chưa được tạo. Khi khởi động hoặc tải lại, bộ tích hợp xây dựng trước chỉ mục cho các ngôn ngữ đã cấu hình trong Assist pipeline. Nếu `empty_index` vẫn xuất hiện, có thể không có pipeline hoặc ngôn ngữ mặc định phù hợp, hoặc quá trình xây dựng nền chưa hoàn tất. Bạn có thể chạy **Rebuild Index** theo cách thủ công.
-2. Nếu lý do là `low_confidence`, ngưỡng `min_confidence` bạn đặt có thể quá cao. Hãy thử hạ thấp cấu hình này xuống. Bạn nên dùng công cụ **Test Match** để xem điểm số thực tế của các câu lệnh mẫu.
-3. Nếu lý do là `validation_failed`, câu lệnh được chọn đã thất bại khi tiền kiểm, hoặc cả lượt thực thi chính lẫn khôi phục đều không thành công. Bạn hãy sử dụng công cụ **Test Match** để phân tích cách chấm điểm và **Dump Candidates** để kiểm tra các câu lệnh được đăng ký cho ngôn ngữ đó.
+1. Dùng **Diagnostics** để kiểm tra `last_fallback_reason`. Nếu là `hotword_matched`, câu lệnh khớp với tiền tố từ khóa nóng đã cấu hình và đã được chủ động chuyển thẳng tới tác nhân dự phòng (bỏ qua luồng chuẩn hóa hoặc xếp hạng chính).
+2. Nếu là `empty_index`, chỉ mục chưa được tạo. Khi khởi động hoặc tải lại, bộ tích hợp xây dựng trước chỉ mục cho các ngôn ngữ đã cấu hình trong Assist pipeline. Nếu `empty_index` vẫn xuất hiện, có thể không có pipeline hoặc ngôn ngữ mặc định phù hợp, hoặc quá trình xây dựng nền chưa hoàn tất. Bạn có thể chạy **Rebuild Index** theo cách thủ công.
+3. Nếu lý do là `low_confidence`, ngưỡng `min_confidence` bạn đặt có thể quá cao. Hãy thử hạ thấp cấu hình này xuống. Bạn nên dùng công cụ **Test Match** để xem điểm số thực tế của các câu lệnh mẫu.
+4. Nếu lý do là `validation_failed`, câu lệnh được chọn đã thất bại khi tiền kiểm, hoặc cả lượt thực thi chính lẫn khôi phục đều không thành công. Bạn hãy sử dụng công cụ **Test Match** để phân tích cách chấm điểm và **Dump Candidates** để kiểm tra các câu lệnh được đăng ký cho ngôn ngữ đó.
 
 **Mẫu câu tùy chỉnh của tôi không được nhận diện.**
 
