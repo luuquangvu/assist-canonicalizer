@@ -64,6 +64,7 @@ from .utils import (
     normalize_language,
     resolve_entry_hotword_options,
     resolve_entry_thresholds,
+    strip_hotword_prefix,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -275,19 +276,22 @@ class AssistCanonicalizerConversationEntity(
             normalize_language(language) if language else None,
         )
 
-    def _is_hotword_matched(self, user_input: ConversationInput) -> bool:
-        """Return whether user input starts with a configured hotword with high confidence."""
+    def _is_hotword_matched(self, user_input: ConversationInput) -> tuple[bool, str]:
+        """Return whether user input starts with a configured hotword and the stripped text."""
         enable_hotword, hotword, min_confidence = resolve_entry_hotword_options(self._entry)
         if not enable_hotword or not hotword or not user_input.text:
-            return False
+            return False, user_input.text
         language = normalize_language(user_input.language) if user_input.language else None
-        matched, _score, _matched_hw = match_hotword_prefix(
+        matched, _score, matched_hw = match_hotword_prefix(
             user_input.text,
             hotword,
             min_confidence=min_confidence,
             language=language,
         )
-        return matched
+        if matched and matched_hw:
+            stripped = strip_hotword_prefix(user_input.text, matched_hw)
+            return True, stripped
+        return False, user_input.text
 
     async def _async_try_assist_pipeline_shortcut(
         self, user_input: ConversationInput
@@ -393,12 +397,13 @@ class AssistCanonicalizerConversationEntity(
         Every unsuccessful local path still delegates the original text to the
         configured fallback agent.
         """
-        if self._is_hotword_matched(user_input):
+        is_hotword, hotword_stripped_text = self._is_hotword_matched(user_input)
+        if is_hotword:
             self._runtime.update_diagnostics(
                 last_fallback_reason=FallbackReason.HOTWORD_MATCHED,
                 execution_result="hotword_fallback",
             )
-            return await self._delegate_raw_text(user_input)
+            return await self._delegate_text(hotword_stripped_text, user_input, primary=False)
 
         if shortcut_result := await self._async_try_assist_pipeline_shortcut(user_input):
             return shortcut_result

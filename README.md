@@ -54,7 +54,7 @@ People do not always phrase the same request in the same way. Word order, filler
 - **Automatic Candidate Index Building**: Builds language-specific indexes from supported Home Assistant sources: built-in intents, custom sentence YAML files, exposed entity names and aliases, area and floor registries, and dynamically expanded slot values.
 - **On-Disk Candidate Persistence**: Stores canonical candidate lists in Home Assistant storage. Later rebuilds can reuse these lists instead of parsing every sentence template and YAML file again.
 - **Configurable Confidence Gates**: Fine-tune match acceptance with **Minimum Match Confidence** and **Base Confidence Margin** thresholds. Exact lexical matches and other strong-evidence policies can reduce the required margin; if no earlier relaxation applies, competing actions, including known opposing actions, must clear the full configured margin.
-- **Hot Word Bypass**: Optionally specify custom hot words (e.g. `"Jarvis"`, `"Hey Jarvis"`) to bypass all canonicalization and candidate ranking steps and directly route commands untouched to your configured fallback agent (such as an LLM).
+- **Hot Word Bypass**: Optionally specify custom hot words (e.g. `"Jarvis"`, `"Hey Jarvis"`). When asking difficult questions, complex inquiries, or unclear commands, this prevents the ranking system from accidentally misclassifying them into mismatched or unintended smart home commands, stripping the hot word prefix and routing the clean prompt directly to your configured fallback conversation agent (such as an LLM agent).
 - **Live Recognition Preflight and Bounded Recovery**: Verifies whether a matched sentence is executable using Home Assistant's native intent parser before triggering an action. The engine tests up to three high-confidence candidates before falling back and allows one recovery attempt if a command is rejected before the handler runs.
 - **Developer Tools Actions**: Six actions (`set_fallback_agent`, `test_match`, `rebuild_index`, `clear_index`, `diagnostics`, and `dump_candidates`) provide dynamic fallback routing, ranking details, index summaries, diagnostics, and manual index lifecycle controls from Home Assistant's standard Actions panel.
 - **Per-Language Isolation**: Maintains a dedicated candidate index for each language, with automatic language variant matching against Home Assistant's supported language list. Slot values are dynamically expanded per language.
@@ -91,7 +91,7 @@ People do not always phrase the same request in the same way. Word order, filler
 3. Select the **Fallback Conversation Agent**. When the canonicalizer cannot safely complete a request, it sends the original text to this agent for a second chance. For the best chance of recovery, choose an agent that interprets language differently, such as an LLM-based conversation agent. The built-in Home Assistant agent is also supported, but it may encounter the same limitation that led to fallback.
 4. Set the **Minimum Match Confidence**. A candidate's weighted final score must meet this threshold to be accepted. Start with the default and use **Test Match** to inspect real scores before adjusting it.
 5. Set the **Base Confidence Margin**. This defines the normal required gap in scores between the top match and the next best alternative (with a different intent), preventing execution when a command is ambiguous. Exact lexical matches and other strong-evidence policies can reduce or bypass this requirement before action competition is evaluated. If no earlier relaxation applies, competing actions, including known opposing actions such as turn on vs. turn off, must clear the full configured value.
-6. _(Optional)_ Configure **Hot Word Bypass**: Enable the toggle and add your custom trigger words or phrases (e.g. `"Jarvis"`, `"Hey Jarvis"`). Commands matching any configured hot word prefix with high confidence (default $\ge 0.85$) bypass canonicalization ranking and are forwarded directly as untouched text to your fallback agent.
+6. _(Optional)_ Configure **Hot Word Bypass**: Enable the toggle and add your custom trigger words or phrases (e.g. `"Jarvis"`, `"Hey Jarvis"`). For difficult questions, complex inquiries, or open-ended conversational prompts, matching a hot word prefix with high confidence (default $\ge 0.85$) prevents the ranking system from misclassifying them as unintended smart home actions, stripping the prefix and directly forwarding the clean command to your fallback LLM agent.
 7. Go to **Settings** > **Voice assistants** and open your Assist pipeline. Under **Conversation agents**, select **Assist Canonicalizer** from the agent list.
 
 > [!IMPORTANT]
@@ -103,11 +103,18 @@ People do not always phrase the same request in the same way. Word order, filler
 
 ## How It Works
 
-Home Assistant gives its built-in HassIL agent the first chance when the Assist pipeline has `prefer_local_intents` enabled. When that option is disabled, Assist Canonicalizer supplies the equivalent HassIL-first shortcut. Canonicalization begins only if HassIL cannot handle the original text:
+How requests reach Assist Canonicalizer depends on your Assist pipeline's **prefer_local_intents** setting:
+
+- **When `prefer_local_intents` is enabled (Home Assistant default)**: Home Assistant tests its built-in HassIL parser first. Exact matches to built-in sentence templates are executed directly by Home Assistant without invoking this integration. Any queries that HassIL cannot match (including normal smart home commands with typos, reordered words, or paraphrased phrasing, as well as questions prefixed with a custom hot word like `"Jarvis, what is quantum physics?"`) are handed off to Assist Canonicalizer to be canonicalized or forwarded to fallback.
+- **When `prefer_local_intents` is disabled**: Home Assistant routes all queries directly to Assist Canonicalizer. The integration evaluates **Hot Word Bypass** first, runs an internal shortcut to HassIL for standard commands, and proceeds to multi-signal lexical ranking for everything else.
+
+Inside Assist Canonicalizer, the execution flow is as follows:
 
 ```mermaid
 flowchart TD
-    A[User Input] --> L{Can HassIL handle the original input?}
+    A[User Input] --> HW{Hot word bypass matched?}
+    HW -->|Yes| HW_G[Fallback Agent Receives Stripped Prompt]
+    HW -->|No| L{Can HassIL handle the original input?}
     L -->|Yes| H[Return Home Assistant Result]
     L -->|No| B[Text Normalization]
     B --> C[Index Lookup]
@@ -129,32 +136,34 @@ flowchart TD
     K -->|Failure| G
 ```
 
-1. **HassIL First**: With `prefer_local_intents` enabled, Home Assistant tries HassIL before falling back to Assist Canonicalizer. With it disabled, the pipeline delegates directly to Assist Canonicalizer, which sends the unchanged request to HassIL as a shortcut. The integration skips its shortcut when Home Assistant has already performed the local-intent pass. If HassIL succeeds, its result is returned immediately and the remaining steps are skipped.
+1. **Hot Word Bypass (Optional)**: When enabled, incoming queries are evaluated against configured custom hot words using fuzzy prefix matching (default threshold $\ge 0.85$, with diacritic-tolerant comparison). When a question is difficult or a command is unclear, this prevents the ranking system from misclassifying it as a mismatched or unintended smart home action, bypassing local intent matching entirely, cleanly stripping the hot word prefix and leading punctuation, and forwarding the prompt directly to your fallback LLM (recording `hotword_matched` in diagnostics). If only the hot word is spoken, the original text is preserved.
 
-2. **Text Normalization**: The input is NFKC-normalized, casefolded, stripped of punctuation, and collapsed to a consistent whitespace form. The same process is applied to the input and candidate sentences.
+2. **HassIL First**: When `prefer_local_intents` is enabled (the default in Home Assistant), commands are redirected to HassIL before being handled by this integration. When `prefer_local_intents` is turned off, this integration simulates the same logic by using a shortcut to send the raw command directly to HassIL. If HassIL succeeds, its result is returned immediately and canonicalization is skipped; if HassIL cannot handle the input, canonicalization begins.
 
-3. **Index Lookup**: The normalized query is matched against a pre-built candidate index for the active language. The index contains candidates sourced from:
+3. **Text Normalization**: The input is NFKC-normalized, casefolded, stripped of punctuation, and collapsed to a consistent whitespace form. The same process is applied to the input and candidate sentences.
+
+4. **Index Lookup**: The normalized query is matched against a pre-built candidate index for the active language. The index contains candidates sourced from:
    - **Built-in Intents**: Every fixed sentence and bounded template expansion from Home Assistant's sentence configuration for the language.
    - **Custom Sentences**: Sentences defined in `custom_sentences/<lang>/` YAML files, `configuration.yaml` intent scripts, or sentence automations created via the UI.
    - **Registry Entities**: Exposed entity names and aliases from the entity registry.
    - **Areas and Floors**: Area and floor names from the area and floor registries.
 
-4. **Multi-Signal Ranking**: Each candidate is scored through four independent signals, then combined into a weighted final score:
+5. **Multi-Signal Ranking**: Each candidate is scored through four independent signals, then combined into a weighted final score:
    - **Word Similarity**: Measures how closely the words and their order match, handles typos, reordered words, and partial matches.
    - **Character Pattern Matching**: Compares overlapping 3-letter chunks between your input and each candidate, catching spelling variations and similar-looking words.
    - **Keyword Relevance**: Weighs how important each word is across all candidates, giving more credit to distinctive words that appear in your input.
    - **Intent Context**: Rewards candidates whose intent type (e.g., turning on a light, setting a temperature) aligns with the top matches, preventing nonsensical pairings.
 
-5. **Confidence Gate**: Evaluates the top candidate against your configured thresholds:
+6. **Confidence Gate**: Evaluates the top candidate against your configured thresholds:
    - **Confidence Floor**: The candidate's final score must clear the `min_confidence` threshold.
    - **Dynamic Margin**: The candidate normally must lead its next best meaningful competitor (representing a different intent) by the configured `min_margin`. Exact lexical matches can bypass that margin, and other strong-evidence policies can reduce it before action competition is evaluated. If none of those earlier policies applies, competing actions, including known opposing pairs such as turn on/off, open/close, and lock/unlock, must clear the full configured margin. Gating decisions and effective margins are fully visible via diagnostics.
 
-6. **Live Preflight, Execution, and Bounded Recovery**: Once a candidate passes the confidence gate, it undergoes a multi-stage validation and execution process:
+7. **Live Preflight, Execution, and Bounded Recovery**: Once a candidate passes the confidence gate, it undergoes a multi-stage validation and execution process:
    - **Live Recognition Preflight**: The candidate text is dry-run through Home Assistant's native intent recognition to verify it is executable. If it is invalid (e.g., references a non-existent area or device), the candidate is discarded, and the engine re-evaluates the remaining list (testing up to three distinct alternatives). If none are valid, it falls back to the configured fallback agent.
    - **Live Execution**: If the preflight check succeeds, the command is sent to Home Assistant's built-in conversation agent (HassIL) for execution.
    - **Bounded Post-Execution Recovery**: If execution is rejected before the intent handler begins processing (returning `no_intent_match`, or `no_valid_targets` due to unmatched entities), the integration can attempt a one-time recovery. It filters out duplicate commands and tries the next best candidate that still meets the confidence criteria. Errors occurring inside the intent handler itself do not trigger recovery and will result in fallback.
 
-7. **Fallback**: If ranking does not produce a safe candidate, recovery is not eligible, or execution fails, the integration forwards the original input to your configured fallback conversation agent.
+8. **Fallback**: If hot word bypass is triggered, the integration forwards the stripped prompt to your configured fallback conversation agent. For all other fallback paths (when ranking does not produce a safe candidate, recovery is not eligible, or execution fails), the integration forwards the original input.
 
 ---
 
@@ -321,6 +330,7 @@ When a query **falls back**, the reason is recorded in diagnostics as one of:
 
 | Reason                 | Meaning                                                                                                  |
 | ---------------------- | -------------------------------------------------------------------------------------------------------- |
+| `hotword_matched`      | The input matched a configured hot word prefix and was forwarded directly to the fallback agent          |
 | `low_confidence`       | No candidate met the `min_confidence` threshold                                                          |
 | `low_margin`           | The top candidate and the next candidate with a different intent scored too closely (below `min_margin`) |
 | `empty_index`          | No index exists for the active language                                                                  |
@@ -340,9 +350,10 @@ Before changing thresholds, check the runtime state and candidate coverage, then
 
 **The canonicalizer always falls back and never matches.**
 
-1. Run the **Diagnostics** action and check `last_fallback_reason`. If it's `empty_index`, the index hasn't been built yet. Indexes are proactively warmed up at startup/reload for all configured Assist pipeline languages. If `empty_index` still appears, the warmup may have been skipped (no pipelines configured, no default language available), or the background build hasn't completed yet. You can force a rebuild with the **Rebuild Index** action.
-2. If the reason is `low_confidence`, your `min_confidence` threshold may be too high. Try lowering it in the integration options. Use **Test Match** with sample sentences to see actual scores.
-3. If the reason is `validation_failed`, the selected command failed the live preflight check, or both execution and recovery attempts failed. Use **Test Match** to analyze scoring, and **Dump Candidates** to inspect the registered commands for your language.
+1. Run the **Diagnostics** action and check `last_fallback_reason`. If it's `hotword_matched`, the query matched a configured hot word prefix and was intentionally routed directly to the fallback agent (bypassing the main canonicalization or ranking flow).
+2. If it's `empty_index`, the index hasn't been built yet. Indexes are proactively warmed up at startup/reload for all configured Assist pipeline languages. If `empty_index` still appears, the warmup may have been skipped (no pipelines configured, no default language available), or the background build hasn't completed yet. You can force a rebuild with the **Rebuild Index** action.
+3. If the reason is `low_confidence`, your `min_confidence` threshold may be too high. Try lowering it in the integration options. Use **Test Match** with sample sentences to see actual scores.
+4. If the reason is `validation_failed`, the selected command failed the live preflight check, or both execution and recovery attempts failed. Use **Test Match** to analyze scoring, and **Dump Candidates** to inspect the registered commands for your language.
 
 **My custom sentences aren't being recognized.**
 

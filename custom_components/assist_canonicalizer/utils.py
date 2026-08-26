@@ -5,6 +5,8 @@ from __future__ import annotations
 import contextlib
 import logging
 import re
+import string
+import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from functools import lru_cache
 from math import isclose, isfinite
@@ -25,7 +27,7 @@ from .const import (
     PRESERVED_UNIT_SUFFIXES,
     ConfigKey,
 )
-from .normalization import normalize_text
+from .normalization import normalize_text, tokenize_normalized
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -146,6 +148,64 @@ def resolve_entry_hotword_options(
         min_confidence = DEFAULT_HOTWORD_MIN_CONFIDENCE
     min_confidence = max(0.0, min(min_confidence, 1.0))
     return enable_hotword, hotwords, min_confidence
+
+
+def _strip_leading_punctuation(text: str) -> str:
+    """Strip leading ASCII and Unicode punctuation and whitespace."""
+    idx = 0
+    for char in text:
+        if (
+            char.isspace()
+            or char in string.punctuation
+            or unicodedata.category(char).startswith("P")
+        ):
+            idx += 1
+        else:
+            break
+    return text[idx:]
+
+
+def strip_hotword_prefix(query: str, hotword: str) -> str:
+    """Strip a matched hotword prefix and leading punctuation from the query string.
+
+    Verifies that the query begins with a confirmed hotword match, finds the character
+    boundary after matching the hotword tokens in the raw query, and strips trailing/leading
+    punctuation and whitespace. If stripping would leave an empty string, returns the
+    original query.
+    """
+    if not query or not query.strip():
+        return ""
+    if not hotword or not hotword.strip():
+        return query
+
+    from .ranking import match_hotword_prefix
+
+    matched, _score, _matched_hw = match_hotword_prefix(query, hotword)
+    if not matched:
+        return query
+
+    hw_tokens = tokenize_normalized(normalize_text(hotword))
+    if not hw_tokens:
+        return query
+
+    query_tokens = tokenize_normalized(normalize_text(query))
+    token_len = len(hw_tokens)
+    if len(query_tokens) < token_len:
+        return query
+
+    # Find the character offset in query after matching token_len normalized query tokens.
+    target_tokens = query_tokens[:token_len]
+    pos = 0
+    for end in range(1, len(query) + 1):
+        if tokenize_normalized(normalize_text(query[:end])) == target_tokens:
+            pos = end
+            break
+    else:
+        return query
+
+    remainder = query[pos:]
+    cleaned = _strip_leading_punctuation(remainder).strip()
+    return cleaned or query.strip()
 
 
 @lru_cache(maxsize=128)
