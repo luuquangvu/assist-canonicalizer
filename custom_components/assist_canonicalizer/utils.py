@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from functools import lru_cache
-from math import isclose
+from math import isclose, isfinite
 from string import whitespace
 from threading import Lock
 from time import monotonic
@@ -16,13 +17,21 @@ from homeassistant.config_entries import ConfigEntry
 
 from .builtin_intents import language_variant_for
 from .const import (
+    CONF_ENABLE_HOTWORD,
+    CONF_HOTWORD,
+    CONF_HOTWORD_MIN_CONFIDENCE,
     CONF_MIN_CONFIDENCE,
     CONF_MIN_MARGIN,
+    DEFAULT_ENABLE_HOTWORD,
+    DEFAULT_HOTWORD,
+    DEFAULT_HOTWORD_MIN_CONFIDENCE,
     DEFAULT_MIN_CONFIDENCE,
     DEFAULT_MIN_MARGIN,
     PRESERVED_UNIT_SUFFIXES,
 )
 from .normalization import normalize_text
+
+_LOGGER = logging.getLogger(__name__)
 
 _RANGE_EPSILON = 1e-9  # Tolerance for float comparison when validating range values.
 _HALVES_FRACTIONS = (0.0, 0.5)  # Permitted fractional offsets when set to "halves".
@@ -68,6 +77,79 @@ def resolve_entry_thresholds(entry: ConfigEntry | None) -> tuple[float, float]:
         data.get(CONF_MIN_MARGIN, DEFAULT_MIN_MARGIN),
     )
     return min_confidence, min_margin
+
+
+def normalize_hotword_list(raw_hotword: object) -> list[str]:
+    """Normalize a raw hotword configuration value into a list of clean strings."""
+    if raw_hotword is None:
+        return []
+
+    if isinstance(raw_hotword, (Sequence, set)) and not isinstance(
+        raw_hotword, (str, bytes, Mapping)
+    ):
+        if not raw_hotword:
+            return []
+        if isinstance(raw_hotword, set):
+            _LOGGER.warning(
+                "Hotword configuration received as a set; converting to list may change "
+                "prioritization semantics. Consider using an ordered sequence instead."
+            )
+        normalized: list[str] = []
+        for item in raw_hotword:
+            if not isinstance(item, str):
+                _LOGGER.warning(
+                    "Hotword sequence contains non-string item %r; ignoring",
+                    item,
+                )
+                continue
+            if stripped := item.strip():
+                normalized.append(stripped)
+        return normalized
+
+    if isinstance(raw_hotword, str):
+        return [stripped] if (stripped := raw_hotword.strip()) else []
+
+    _LOGGER.warning(
+        "Hotword configuration is of unexpected type %s (value=%r); "
+        "expected str or sequence of str",
+        type(raw_hotword),
+        raw_hotword,
+    )
+    return []
+
+
+def resolve_entry_hotword_options(
+    entry: ConfigEntry | None,
+) -> tuple[bool, Sequence[str], float]:
+    """Return (enable_hotword, hotword, min_confidence) from entry options with data fallback."""
+    options = (getattr(entry, "options", {}) or {}) if entry is not None else {}
+    data = (getattr(entry, "data", {}) or {}) if entry is not None else {}
+    enable_hotword = bool(
+        options.get(
+            CONF_ENABLE_HOTWORD,
+            data.get(CONF_ENABLE_HOTWORD, DEFAULT_ENABLE_HOTWORD),
+        )
+    )
+    raw_hotword = options.get(
+        CONF_HOTWORD,
+        data.get(CONF_HOTWORD, DEFAULT_HOTWORD),
+    )
+    hotwords = tuple(normalize_hotword_list(raw_hotword))
+    raw_min_confidence = options.get(
+        CONF_HOTWORD_MIN_CONFIDENCE,
+        data.get(CONF_HOTWORD_MIN_CONFIDENCE, DEFAULT_HOTWORD_MIN_CONFIDENCE),
+    )
+    min_confidence: float
+    if isinstance(raw_min_confidence, (int, float)):
+        min_confidence = float(raw_min_confidence)
+    elif (parsed := parse_float(raw_min_confidence)) is not None:
+        min_confidence = parsed
+    else:
+        min_confidence = DEFAULT_HOTWORD_MIN_CONFIDENCE
+    if not isfinite(min_confidence):
+        min_confidence = DEFAULT_HOTWORD_MIN_CONFIDENCE
+    min_confidence = max(0.0, min(min_confidence, 1.0))
+    return enable_hotword, hotwords, min_confidence
 
 
 @lru_cache(maxsize=128)

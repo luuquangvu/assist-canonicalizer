@@ -46,7 +46,12 @@ from .const import (
 )
 from .indexer import CanonicalIndex
 from .normalization import normalize_text
-from .ranking import ConfidenceGateDecision, RankedCandidate, evaluate_confidence_gates
+from .ranking import (
+    ConfidenceGateDecision,
+    RankedCandidate,
+    evaluate_confidence_gates,
+    match_hotword_prefix,
+)
 from .recognition import (
     RecognitionObservation,
     async_observe_delegated_text,
@@ -58,6 +63,7 @@ from .utils import (
     elapsed_ms,
     intent_context_from_area_name,
     normalize_language,
+    resolve_entry_hotword_options,
     resolve_entry_thresholds,
 )
 
@@ -270,6 +276,20 @@ class AssistCanonicalizerConversationEntity(
             normalize_language(language) if language else None,
         )
 
+    def _is_hotword_matched(self, user_input: ConversationInput) -> bool:
+        """Return whether user input starts with a configured hotword with high confidence."""
+        enable_hotword, hotword, min_confidence = resolve_entry_hotword_options(self._entry)
+        if not enable_hotword or not hotword or not user_input.text:
+            return False
+        language = normalize_language(user_input.language) if user_input.language else None
+        matched, _score, _matched_hw = match_hotword_prefix(
+            user_input.text,
+            hotword,
+            min_confidence=min_confidence,
+            language=language,
+        )
+        return matched
+
     async def _async_try_assist_pipeline_shortcut(
         self, user_input: ConversationInput
     ) -> ConversationResult | None:
@@ -374,6 +394,13 @@ class AssistCanonicalizerConversationEntity(
         Every unsuccessful local path still delegates the original text to the
         configured fallback agent.
         """
+        if self._is_hotword_matched(user_input):
+            self._runtime.update_diagnostics(
+                last_fallback_reason=FallbackReason.HOTWORD_MATCHED,
+                execution_result="hotword_fallback",
+            )
+            return await self._delegate_raw_text(user_input)
+
         if shortcut_result := await self._async_try_assist_pipeline_shortcut(user_input):
             return shortcut_result
 

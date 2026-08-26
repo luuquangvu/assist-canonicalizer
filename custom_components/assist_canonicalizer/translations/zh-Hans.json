@@ -7,7 +7,10 @@
         "data": {
           "fallback_agent_id": "备用对话代理",
           "min_confidence": "最小匹配置信度",
-          "min_margin": "基准置信度裕量"
+          "min_margin": "基准置信度裕量",
+          "enable_hotword": "启用热词绕过",
+          "hotword": "自定义热词",
+          "hotword_min_confidence": "热词匹配置信度"
         }
       }
     },
@@ -23,7 +26,10 @@
         "data": {
           "fallback_agent_id": "备用对话代理",
           "min_confidence": "最小匹配置信度",
-          "min_margin": "基准置信度裕量"
+          "min_margin": "基准置信度裕量",
+          "enable_hotword": "启用热词绕过",
+          "hotword": "自定义热词",
+          "hotword_min_confidence": "热词匹配置信度"
         }
       }
     }

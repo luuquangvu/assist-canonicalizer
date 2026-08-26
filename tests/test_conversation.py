@@ -19,7 +19,10 @@ import custom_components.assist_canonicalizer.conversation as conversation_platf
 from custom_components.assist_canonicalizer import _discover_pipeline_languages
 from custom_components.assist_canonicalizer.candidate import Candidate
 from custom_components.assist_canonicalizer.const import (
+    CONF_ENABLE_HOTWORD,
     CONF_FALLBACK_AGENT_ID,
+    CONF_HOTWORD,
+    CONF_HOTWORD_MIN_CONFIDENCE,
     CONF_MIN_CONFIDENCE,
     CONF_MIN_MARGIN,
     CONVERSATION_INPUT_AGENT_ID_FIELD,
@@ -46,7 +49,11 @@ from custom_components.assist_canonicalizer.recognition import (
     RecognitionObservation,
 )
 from custom_components.assist_canonicalizer.runtime import CanonicalizerRuntime
-from custom_components.assist_canonicalizer.utils import wildcard_slot_names
+from custom_components.assist_canonicalizer.utils import (
+    normalize_hotword_list,
+    resolve_entry_hotword_options,
+    wildcard_slot_names,
+)
 
 
 class MockConversationInput(ConversationInput):
@@ -2429,3 +2436,334 @@ async def test_store_load_failure_delegates_to_fallback_agent() -> None:
     assert runtime.diagnostics.last_fallback_reason == FallbackReason.EMPTY_INDEX
     assert "malformed custom sentences YAML" in (runtime.diagnostics.last_error or "")
     raw.assert_awaited_once_with(user_input)
+
+
+@pytest.mark.asyncio
+async def test_hotword_matched_bypasses_ranking_and_delegates_raw_text() -> None:
+    """A matching hotword must bypass ranking and delegate untouched raw text directly."""
+    entry = MagicMock()
+    entry.entry_id = "test_entry"
+    entry.options = {
+        CONF_ENABLE_HOTWORD: True,
+        CONF_HOTWORD: "Jarvis",
+    }
+    entry.data = {}
+    runtime = CanonicalizerRuntime()
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    entity.hass = MagicMock()
+
+    user_input = MockConversationInput("Jarvis what is the weather tomorrow", "en")
+
+    with (
+        patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw_delegated")) as raw,
+        patch.object(entity, "_async_rank_request") as rank_mock,
+    ):
+        res = await entity._async_process_with_runtime(user_input)
+
+    assert res == "raw_delegated"
+    raw.assert_awaited_once_with(user_input)
+    rank_mock.assert_not_called()
+    assert runtime.diagnostics.last_fallback_reason == FallbackReason.HOTWORD_MATCHED
+    assert runtime.diagnostics.execution_result == "hotword_fallback"
+
+
+@pytest.mark.asyncio
+async def test_hotword_disabled_proceeds_to_standard_ranking() -> None:
+    """A disabled hotword configuration must not bypass ranking."""
+    entry = MagicMock()
+    entry.entry_id = "test_entry"
+    entry.options = {
+        CONF_ENABLE_HOTWORD: False,
+        CONF_HOTWORD: "Jarvis",
+    }
+    entry.data = {}
+    runtime = CanonicalizerRuntime()
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    entity.hass = MagicMock()
+
+    user_input = MockConversationInput("Jarvis what is the weather tomorrow", "en")
+
+    with (
+        patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw_delegated")) as raw,
+        patch.object(entity, "_async_request_index", AsyncMock(return_value=None)) as req_idx,
+    ):
+        res = await entity._async_process_with_runtime(user_input)
+
+    assert res == "raw_delegated"
+    raw.assert_awaited_once_with(user_input)
+    req_idx.assert_awaited_once_with("en")
+
+
+@pytest.mark.asyncio
+async def test_hotword_enabled_non_matching_query_proceeds_to_ranking() -> None:
+    """An unmatched query with hotword enabled proceeds through the normal ranking pipeline."""
+    entry = MagicMock()
+    entry.entry_id = "test_entry"
+    entry.options = {
+        CONF_ENABLE_HOTWORD: True,
+        CONF_HOTWORD: "Jarvis",
+    }
+    entry.data = {}
+    runtime = CanonicalizerRuntime()
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    entity.hass = MagicMock()
+
+    user_input = MockConversationInput("Turn on the living room light", "en")
+
+    with (
+        patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw_delegated")) as raw,
+        patch.object(entity, "_async_request_index", AsyncMock(return_value=None)) as req_idx,
+    ):
+        res = await entity._async_process_with_runtime(user_input)
+
+    assert res == "raw_delegated"
+    raw.assert_awaited_once_with(user_input)
+    req_idx.assert_awaited_once_with("en")
+    assert runtime.diagnostics.last_fallback_reason != FallbackReason.HOTWORD_MATCHED
+
+
+@pytest.mark.asyncio
+async def test_hotword_multiword_and_custom_confidence_matched() -> None:
+    """Multi-word hotword with custom confidence threshold delegates raw text on match."""
+    entry = MagicMock()
+    entry.entry_id = "test_entry"
+    entry.options = {
+        CONF_ENABLE_HOTWORD: True,
+        CONF_HOTWORD: "Hey Jarvis",
+        CONF_HOTWORD_MIN_CONFIDENCE: 0.80,
+    }
+    entry.data = {}
+    runtime = CanonicalizerRuntime()
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    entity.hass = MagicMock()
+
+    user_input = MockConversationInput("Hey Javis turn off everything", "en")
+
+    with (
+        patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw_delegated")) as raw,
+        patch.object(entity, "_async_rank_request") as rank_mock,
+    ):
+        res = await entity._async_process_with_runtime(user_input)
+
+    assert res == "raw_delegated"
+    raw.assert_awaited_once_with(user_input)
+    rank_mock.assert_not_called()
+    assert runtime.diagnostics.last_fallback_reason == FallbackReason.HOTWORD_MATCHED
+
+
+@pytest.mark.asyncio
+async def test_hotword_below_custom_confidence_proceeds_to_ranking() -> None:
+    """When hotword confidence score is below custom threshold, it does not bypass ranking."""
+    entry = MagicMock()
+    entry.entry_id = "test_entry"
+    entry.options = {
+        CONF_ENABLE_HOTWORD: True,
+        CONF_HOTWORD: "Hey Jarvis",
+        CONF_HOTWORD_MIN_CONFIDENCE: 0.98,
+    }
+    entry.data = {}
+    runtime = CanonicalizerRuntime()
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    entity.hass = MagicMock()
+
+    # "Hey Javis" has a typo, score < 0.98 -> does not match
+    user_input = MockConversationInput("Hey Javis turn off everything", "en")
+
+    with (
+        patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw_delegated")) as raw,
+        patch.object(entity, "_async_request_index", AsyncMock(return_value=None)) as req_idx,
+    ):
+        res = await entity._async_process_with_runtime(user_input)
+
+    assert res == "raw_delegated"
+    raw.assert_awaited_once_with(user_input)
+    req_idx.assert_awaited_once_with("en")
+    assert runtime.diagnostics.last_fallback_reason != FallbackReason.HOTWORD_MATCHED
+
+
+@pytest.mark.asyncio
+async def test_hotword_list_of_strings_matched() -> None:
+    """List of hotword strings delegates raw text when any item matches."""
+    entry = MagicMock()
+    entry.entry_id = "test_entry"
+    entry.options = {
+        CONF_ENABLE_HOTWORD: True,
+        CONF_HOTWORD: ["Jarvis", "Computer", "Alexa"],
+    }
+    entry.data = {}
+    runtime = CanonicalizerRuntime()
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    entity.hass = MagicMock()
+
+    user_input = MockConversationInput("Computer what time is it", "en")
+
+    with (
+        patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw_delegated")) as raw,
+        patch.object(entity, "_async_rank_request") as rank_mock,
+    ):
+        res = await entity._async_process_with_runtime(user_input)
+
+    assert res == "raw_delegated"
+    raw.assert_awaited_once_with(user_input)
+    rank_mock.assert_not_called()
+    assert runtime.diagnostics.last_fallback_reason == FallbackReason.HOTWORD_MATCHED
+
+
+@pytest.mark.asyncio
+async def test_hotword_mixed_invalid_list_filtered_and_matched() -> None:
+    """Non-string and empty hotword entries are filtered and valid entries still match."""
+    entry = MagicMock()
+    entry.entry_id = "test_entry"
+    entry.options = {
+        CONF_ENABLE_HOTWORD: True,
+        CONF_HOTWORD: ["Jarvis", "   ", None, 123],
+    }
+    entry.data = {}
+    runtime = CanonicalizerRuntime()
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    entity.hass = MagicMock()
+
+    user_input = MockConversationInput("Jarvis turn on lights", "en")
+
+    with (
+        patch.object(entity, "_delegate_raw_text", AsyncMock(return_value="raw_delegated")) as raw,
+        patch.object(entity, "_async_rank_request") as rank_mock,
+    ):
+        res = await entity._async_process_with_runtime(user_input)
+
+    assert res == "raw_delegated"
+    raw.assert_awaited_once_with(user_input)
+    rank_mock.assert_not_called()
+    assert runtime.diagnostics.last_fallback_reason == FallbackReason.HOTWORD_MATCHED
+
+
+def test_resolve_entry_hotword_options_fallback_chains() -> None:
+    """Verify resolve_entry_hotword_options fallback across options, data, and defaults."""
+    # 1. Options present and overrides data
+    entry_both = MagicMock()
+    entry_both.options = {
+        CONF_ENABLE_HOTWORD: True,
+        CONF_HOTWORD: ["Jarvis", "Alexa"],
+        CONF_HOTWORD_MIN_CONFIDENCE: 0.92,
+    }
+    entry_both.data = {
+        CONF_ENABLE_HOTWORD: False,
+        CONF_HOTWORD: ["OldHotword"],
+        CONF_HOTWORD_MIN_CONFIDENCE: 0.70,
+    }
+    enabled, hws, conf = resolve_entry_hotword_options(entry_both)
+    assert enabled is True
+    assert hws == ("Jarvis", "Alexa")
+    assert conf == 0.92
+
+    # 2. Data only (no options)
+    entry_data = MagicMock()
+    entry_data.options = {}
+    entry_data.data = {
+        CONF_ENABLE_HOTWORD: True,
+        CONF_HOTWORD: ["Jarvis"],
+        CONF_HOTWORD_MIN_CONFIDENCE: 0.88,
+    }
+    enabled, hws, conf = resolve_entry_hotword_options(entry_data)
+    assert enabled is True
+    assert hws == ("Jarvis",)
+    assert conf == 0.88
+
+    # 3. Neither options nor data (defaults used)
+    entry_empty = MagicMock()
+    entry_empty.options = {}
+    entry_empty.data = {}
+    enabled, hws, conf = resolve_entry_hotword_options(entry_empty)
+    assert enabled is False
+    assert hws == ()
+    assert conf == 0.85
+
+    # 4. None entry (defaults used)
+    enabled, hws, conf = resolve_entry_hotword_options(None)
+    assert enabled is False
+    assert hws == ()
+    assert conf == 0.85
+
+
+def test_normalize_hotword_list_types_and_edge_cases() -> None:
+    """Verify normalize_hotword_list handles sets, empty states, and invalid types cleanly."""
+    # 1. Empty states
+    assert normalize_hotword_list(None) == []
+    assert normalize_hotword_list(()) == []
+    assert normalize_hotword_list([]) == []
+    assert normalize_hotword_list("") == []
+    assert normalize_hotword_list("   ") == []
+
+    # 2. String input
+    assert normalize_hotword_list("Jarvis") == ["Jarvis"]
+    assert normalize_hotword_list("  Hey Jarvis  ") == ["Hey Jarvis"]
+
+    # 3. Sequence input ordering must be preserved
+    assert normalize_hotword_list(["b", "a"]) == ["b", "a"]
+    assert normalize_hotword_list(("first", "second", "third")) == ["first", "second", "third"]
+
+    # 4. Set input (warns and returns normalized list)
+    assert normalize_hotword_list({"Jarvis"}) == ["Jarvis"]
+
+    # 5. Unexpected types (warns and returns empty list)
+    assert normalize_hotword_list(123) == []
+    assert normalize_hotword_list(True) == []
+    assert normalize_hotword_list({"key": "val"}) == []
+
+
+def test_resolve_entry_hotword_options_defensive_confidence_parsing() -> None:
+    """Verify resolve_entry_hotword_options defensively parses confidence values."""
+    # 1. String float confidence is parsed cleanly
+    entry_str = MagicMock()
+    entry_str.options = {
+        CONF_ENABLE_HOTWORD: True,
+        CONF_HOTWORD: ["Jarvis"],
+        CONF_HOTWORD_MIN_CONFIDENCE: "0.95",
+    }
+    entry_str.data = {}
+    _, _, conf = resolve_entry_hotword_options(entry_str)
+    assert conf == 0.95
+
+    # 2. Invalid string confidence falls back to default
+    entry_inv = MagicMock()
+    entry_inv.options = {
+        CONF_ENABLE_HOTWORD: True,
+        CONF_HOTWORD: ["Jarvis"],
+        CONF_HOTWORD_MIN_CONFIDENCE: "invalid_not_a_number",
+    }
+    entry_inv.data = {}
+    _, _, conf = resolve_entry_hotword_options(entry_inv)
+    assert conf == 0.85
+
+    # 3. Out-of-bounds values are clamped to [0.0, 1.0]
+    entry_high = MagicMock()
+    entry_high.options = {
+        CONF_ENABLE_HOTWORD: True,
+        CONF_HOTWORD: ["Jarvis"],
+        CONF_HOTWORD_MIN_CONFIDENCE: 2.5,
+    }
+    entry_high.data = {}
+    _, _, conf = resolve_entry_hotword_options(entry_high)
+    assert conf == 1.0
+
+    entry_low = MagicMock()
+    entry_low.options = {
+        CONF_ENABLE_HOTWORD: True,
+        CONF_HOTWORD: ["Jarvis"],
+        CONF_HOTWORD_MIN_CONFIDENCE: -0.5,
+    }
+    entry_low.data = {}
+    _, _, conf = resolve_entry_hotword_options(entry_low)
+    assert conf == 0.0
+
+    # 4. Non-finite values (NaN, inf, -inf) fall back to default
+    for non_finite in (float("nan"), float("inf"), float("-inf")):
+        entry_non_finite = MagicMock()
+        entry_non_finite.options = {
+            CONF_ENABLE_HOTWORD: True,
+            CONF_HOTWORD: ["Jarvis"],
+            CONF_HOTWORD_MIN_CONFIDENCE: non_finite,
+        }
+        entry_non_finite.data = {}
+        _, _, conf = resolve_entry_hotword_options(entry_non_finite)
+        assert conf == 0.85

@@ -9,6 +9,9 @@ NAME = "Assist Canonicalizer"
 CONF_FALLBACK_AGENT_ID = "fallback_agent_id"
 CONF_MIN_CONFIDENCE = "min_confidence"
 CONF_MIN_MARGIN = "min_margin"
+CONF_ENABLE_HOTWORD = "enable_hotword"
+CONF_HOTWORD = "hotword"
+CONF_HOTWORD_MIN_CONFIDENCE = "hotword_min_confidence"
 
 DATA_RUNTIME = "runtime"
 
@@ -74,6 +77,9 @@ PRESERVED_UNIT_SUFFIXES = {
 
 DEFAULT_MIN_CONFIDENCE = 0.50
 DEFAULT_MIN_MARGIN = 0.04
+DEFAULT_ENABLE_HOTWORD = False
+DEFAULT_HOTWORD: tuple[str, ...] = ()
+DEFAULT_HOTWORD_MIN_CONFIDENCE = 0.85
 HIGH_CONFIDENCE_RELAXED_MIN_SCORE = 0.80
 HIGH_CONFIDENCE_RELAXED_MIN_MARGIN = 0.005
 SAFE_EMPTY_SLOT_RELAXED_MIN_MARGIN = 0.035
@@ -176,6 +182,7 @@ class FallbackReason(StrEnum):
     RANKING_FAILED = "ranking_failed"
     UNEXPECTED_EXCEPTION = "unexpected_exception"
     NO_CANDIDATE = "no_candidate"
+    HOTWORD_MATCHED = "hotword_matched"
 
 
 # GENERIC_LATIN_REPLACEMENTS maps specific Latin-extended characters
