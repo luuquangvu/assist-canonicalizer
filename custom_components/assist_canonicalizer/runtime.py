@@ -1582,7 +1582,7 @@ def _serialize_candidate(candidate: Candidate) -> JsonObjectType:
     return {
         "text": candidate.text,
         "intent_name": candidate.intent_name,
-        "source": str(candidate.source),
+        "source": candidate.source.value,
         "language": candidate.language,
         "metadata": dict(candidate.metadata),
         "slot_values": list(candidate.slot_values),

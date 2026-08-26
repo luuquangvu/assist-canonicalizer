@@ -6,59 +6,78 @@ from math import ceil
 DOMAIN = "assist_canonicalizer"
 NAME = "Assist Canonicalizer"
 
-CONF_FALLBACK_AGENT_ID = "fallback_agent_id"
-CONF_MIN_CONFIDENCE = "min_confidence"
-CONF_MIN_MARGIN = "min_margin"
-CONF_ENABLE_HOTWORD = "enable_hotword"
-CONF_HOTWORD = "hotword"
-CONF_HOTWORD_MIN_CONFIDENCE = "hotword_min_confidence"
+
+class ConfigKey(StrEnum):
+    """Configuration keys for Assist Canonicalizer."""
+
+    FALLBACK_AGENT_ID = "fallback_agent_id"
+    MIN_CONFIDENCE = "min_confidence"
+    MIN_MARGIN = "min_margin"
+    ENABLE_HOTWORD = "enable_hotword"
+    HOTWORD = "hotword"
+    HOTWORD_MIN_CONFIDENCE = "hotword_min_confidence"
+
 
 DATA_RUNTIME = "runtime"
 
-SERVICE_CLEAR_INDEX = "clear_index"
-SERVICE_DIAGNOSTICS = "diagnostics"
-SERVICE_DUMP_CANDIDATES = "dump_candidates"
-SERVICE_REBUILD_INDEX = "rebuild_index"
-SERVICE_SET_FALLBACK_AGENT = "set_fallback_agent"
-SERVICE_TEST_MATCH = "test_match"
 
-ATTR_ACCEPTED = "accepted"
-ATTR_AGENT_ID = "agent_id"
-ATTR_CANDIDATE_COUNT = "candidate_count"
-ATTR_INTENT_NAME = "intent_name"
-ATTR_LANGUAGE = "language"
-ATTR_NORMALIZED_TEXT = "normalized_text"
-ATTR_SELECTED_CANDIDATE = "selected_candidate"
-ATTR_SOURCE = "source"
-ATTR_TEXT = "text"
-ATTR_TOP_CANDIDATES = "top_candidates"
+class ServiceName(StrEnum):
+    """Service names registered by Assist Canonicalizer."""
 
-CONVERSATION_INPUT_AGENT_ID_FIELD = "agent_id"
-CONVERSATION_INPUT_CONTEXT_FIELD = "context"
-CONVERSATION_INPUT_CONVERSATION_ID_FIELD = "conversation_id"
-CONVERSATION_INPUT_DEVICE_ID_FIELD = "device_id"
-CONVERSATION_INPUT_EXTRA_SYSTEM_PROMPT_FIELD = "extra_system_prompt"
-CONVERSATION_INPUT_LANGUAGE_FIELD = "language"
-CONVERSATION_INPUT_SATELLITE_ID_FIELD = "satellite_id"
-CONVERSATION_INPUT_TEXT_FIELD = "text"
-CONVERSATION_INPUT_AREA_CONTEXT_FIELD = "area_context"
+    CLEAR_INDEX = "clear_index"
+    DIAGNOSTICS = "diagnostics"
+    DUMP_CANDIDATES = "dump_candidates"
+    REBUILD_INDEX = "rebuild_index"
+    SET_FALLBACK_AGENT = "set_fallback_agent"
+    TEST_MATCH = "test_match"
+
+
+class AttributeName(StrEnum):
+    """Service parameter and response attribute names."""
+
+    ACCEPTED = "accepted"
+    AGENT_ID = "agent_id"
+    CANDIDATE_COUNT = "candidate_count"
+    INTENT_NAME = "intent_name"
+    LANGUAGE = "language"
+    NORMALIZED_TEXT = "normalized_text"
+    REBUILD = "rebuild"
+    SELECTED_CANDIDATE = "selected_candidate"
+    SOURCE = "source"
+    TEXT = "text"
+    TOP_CANDIDATES = "top_candidates"
+
+
+class ConversationInputField(StrEnum):
+    """Field names on conversation input instances and synthetic contexts."""
+
+    AGENT_ID = "agent_id"
+    AREA_CONTEXT = "area_context"
+    CONTEXT = "context"
+    CONVERSATION_ID = "conversation_id"
+    DEVICE_ID = "device_id"
+    EXTRA_SYSTEM_PROMPT = "extra_system_prompt"
+    LANGUAGE = "language"
+    SATELLITE_ID = "satellite_id"
+    TEXT = "text"
+
 
 CONVERSATION_INPUT_OPTIONAL_FIELDS = (
-    CONVERSATION_INPUT_SATELLITE_ID_FIELD,
-    CONVERSATION_INPUT_EXTRA_SYSTEM_PROMPT_FIELD,
+    ConversationInputField.SATELLITE_ID,
+    ConversationInputField.EXTRA_SYSTEM_PROMPT,
 )
 CONVERSATION_INPUT_REQUIRED_CONTEXT_FIELDS = (
-    CONVERSATION_INPUT_CONTEXT_FIELD,
-    CONVERSATION_INPUT_LANGUAGE_FIELD,
+    ConversationInputField.CONTEXT,
+    ConversationInputField.LANGUAGE,
 )
 CONVERSATION_INPUT_OPTIONAL_CONTEXT_FIELDS = (
-    CONVERSATION_INPUT_CONVERSATION_ID_FIELD,
-    CONVERSATION_INPUT_DEVICE_ID_FIELD,
+    ConversationInputField.CONVERSATION_ID,
+    ConversationInputField.DEVICE_ID,
     *CONVERSATION_INPUT_OPTIONAL_FIELDS,
 )
 CONVERSATION_INPUT_AREA_CONTEXT_FIELDS = (
-    CONVERSATION_INPUT_DEVICE_ID_FIELD,
-    CONVERSATION_INPUT_SATELLITE_ID_FIELD,
+    ConversationInputField.DEVICE_ID,
+    ConversationInputField.SATELLITE_ID,
 )
 
 ASSISTANT_CONVERSATION = "conversation"

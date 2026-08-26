@@ -19,23 +19,11 @@ import custom_components.assist_canonicalizer.conversation as conversation_platf
 from custom_components.assist_canonicalizer import _discover_pipeline_languages
 from custom_components.assist_canonicalizer.candidate import Candidate
 from custom_components.assist_canonicalizer.const import (
-    CONF_ENABLE_HOTWORD,
-    CONF_FALLBACK_AGENT_ID,
-    CONF_HOTWORD,
-    CONF_HOTWORD_MIN_CONFIDENCE,
-    CONF_MIN_CONFIDENCE,
-    CONF_MIN_MARGIN,
-    CONVERSATION_INPUT_AGENT_ID_FIELD,
-    CONVERSATION_INPUT_CONTEXT_FIELD,
-    CONVERSATION_INPUT_CONVERSATION_ID_FIELD,
-    CONVERSATION_INPUT_DEVICE_ID_FIELD,
-    CONVERSATION_INPUT_EXTRA_SYSTEM_PROMPT_FIELD,
-    CONVERSATION_INPUT_LANGUAGE_FIELD,
     CONVERSATION_INPUT_OPTIONAL_FIELDS,
-    CONVERSATION_INPUT_SATELLITE_ID_FIELD,
-    CONVERSATION_INPUT_TEXT_FIELD,
     DATA_RUNTIME,
     DOMAIN,
+    ConfigKey,
+    ConversationInputField,
     FallbackReason,
 )
 from custom_components.assist_canonicalizer.conversation import (
@@ -63,20 +51,20 @@ class MockConversationInput(ConversationInput):
         """Initialize."""
         sig = inspect.signature(super().__init__)
         kwargs: dict[str, Any] = {
-            CONVERSATION_INPUT_TEXT_FIELD: text,
-            CONVERSATION_INPUT_CONTEXT_FIELD: Context(),
-            CONVERSATION_INPUT_CONVERSATION_ID_FIELD: conversation_id,
-            CONVERSATION_INPUT_DEVICE_ID_FIELD: None,
-            CONVERSATION_INPUT_LANGUAGE_FIELD: language,
+            ConversationInputField.TEXT: text,
+            ConversationInputField.CONTEXT: Context(),
+            ConversationInputField.CONVERSATION_ID: conversation_id,
+            ConversationInputField.DEVICE_ID: None,
+            ConversationInputField.LANGUAGE: language,
         }
-        if CONVERSATION_INPUT_AGENT_ID_FIELD in sig.parameters:
-            kwargs[CONVERSATION_INPUT_AGENT_ID_FIELD] = "test_agent"
-        if CONVERSATION_INPUT_SATELLITE_ID_FIELD in sig.parameters:
-            kwargs[CONVERSATION_INPUT_SATELLITE_ID_FIELD] = None
+        if ConversationInputField.AGENT_ID in sig.parameters:
+            kwargs[ConversationInputField.AGENT_ID] = "test_agent"
+        if ConversationInputField.SATELLITE_ID in sig.parameters:
+            kwargs[ConversationInputField.SATELLITE_ID] = None
         super().__init__(**kwargs)
-        if not hasattr(self, CONVERSATION_INPUT_AGENT_ID_FIELD):
+        if not hasattr(self, ConversationInputField.AGENT_ID):
             self.agent_id = "test_agent"
-        if not hasattr(self, CONVERSATION_INPUT_SATELLITE_ID_FIELD):
+        if not hasattr(self, ConversationInputField.SATELLITE_ID):
             self.satellite_id = None
 
 
@@ -124,12 +112,12 @@ async def test_delegate_text_filters_newer_home_assistant_arguments(
         frozenset(
             {
                 "hass",
-                CONVERSATION_INPUT_TEXT_FIELD,
-                CONVERSATION_INPUT_CONVERSATION_ID_FIELD,
-                CONVERSATION_INPUT_CONTEXT_FIELD,
-                CONVERSATION_INPUT_LANGUAGE_FIELD,
-                CONVERSATION_INPUT_AGENT_ID_FIELD,
-                CONVERSATION_INPUT_DEVICE_ID_FIELD,
+                ConversationInputField.TEXT,
+                ConversationInputField.CONVERSATION_ID,
+                ConversationInputField.CONTEXT,
+                ConversationInputField.LANGUAGE,
+                ConversationInputField.AGENT_ID,
+                ConversationInputField.DEVICE_ID,
             }
         ),
     )
@@ -178,8 +166,8 @@ async def test_delegate_text_forwards_newer_home_assistant_arguments(
         agent_id=HOME_ASSISTANT_AGENT,
         device_id=user_input.device_id,
         **{
-            CONVERSATION_INPUT_SATELLITE_ID_FIELD: user_input.satellite_id,
-            CONVERSATION_INPUT_EXTRA_SYSTEM_PROMPT_FIELD: user_input.extra_system_prompt,
+            ConversationInputField.SATELLITE_ID: user_input.satellite_id,
+            ConversationInputField.EXTRA_SYSTEM_PROMPT: user_input.extra_system_prompt,
         },
     )
 
@@ -1296,7 +1284,7 @@ async def test_recovery_handler_error_routes_to_fallback_agent() -> None:
     entry.options = {
         "min_confidence": 0.60,
         "min_margin": 0.05,
-        CONF_FALLBACK_AGENT_ID: "llm_agent",
+        ConfigKey.FALLBACK_AGENT_ID: "llm_agent",
     }
     runtime = CanonicalizerRuntime()
     runtime.indexes["en"] = MagicMock(candidate_count=2)
@@ -1337,9 +1325,7 @@ async def test_recovery_handler_error_routes_to_fallback_agent() -> None:
         "turn on kitchen lamp",
         user_input.text,
     ]
-    assert [
-        call.kwargs[CONVERSATION_INPUT_AGENT_ID_FIELD] for call in converse.await_args_list
-    ] == [
+    assert [call.kwargs[ConversationInputField.AGENT_ID] for call in converse.await_args_list] == [
         HOME_ASSISTANT_AGENT,
         HOME_ASSISTANT_AGENT,
         "llm_agent",
@@ -1748,9 +1734,9 @@ async def test_conversation_resolves_updated_options_without_reload() -> None:
     entry.entry_id = "this_agent"
     entry.data = {}
     entry.options = {
-        CONF_FALLBACK_AGENT_ID: "first_agent",
-        CONF_MIN_CONFIDENCE: 0.60,
-        CONF_MIN_MARGIN: 0.05,
+        ConfigKey.FALLBACK_AGENT_ID: "first_agent",
+        ConfigKey.MIN_CONFIDENCE: 0.60,
+        ConfigKey.MIN_MARGIN: 0.05,
     }
     entity = AssistCanonicalizerConversationEntity(entry, CanonicalizerRuntime())
     user_input = MockConversationInput("turn on the light", "en")
@@ -1765,9 +1751,9 @@ async def test_conversation_resolves_updated_options_without_reload() -> None:
         assert entity._fallback_agent_id("default") == "first_agent"
 
         entry.options = {
-            CONF_FALLBACK_AGENT_ID: "second_agent",
-            CONF_MIN_CONFIDENCE: 0.80,
-            CONF_MIN_MARGIN: 0.10,
+            ConfigKey.FALLBACK_AGENT_ID: "second_agent",
+            ConfigKey.MIN_CONFIDENCE: 0.80,
+            ConfigKey.MIN_MARGIN: 0.10,
         }
         second_request = await entity._async_rank_request(user_input, "en", MagicMock())
 
@@ -1787,7 +1773,9 @@ async def test_conversation_delegate_and_fallback_agent_logic() -> None:
     """Test delegation and fallback agent ID selection branch options."""
     entry = MagicMock()
     entry.entry_id = "this_agent"
-    entry.options = cast(dict[str, Any], {CONF_MIN_CONFIDENCE: 0.60, CONF_MIN_MARGIN: 0.05})
+    entry.options = cast(
+        dict[str, Any], {ConfigKey.MIN_CONFIDENCE: 0.60, ConfigKey.MIN_MARGIN: 0.05}
+    )
     entry.data = {}
     runtime = CanonicalizerRuntime()
     entity = AssistCanonicalizerConversationEntity(entry, runtime)
@@ -1799,24 +1787,24 @@ async def test_conversation_delegate_and_fallback_agent_logic() -> None:
     user_input = MockConversationInput("tắt đèn bếp", "vi")
 
     # 1. Test fallback_agent_id with options
-    entry.options[CONF_FALLBACK_AGENT_ID] = "options_agent"
+    entry.options[ConfigKey.FALLBACK_AGENT_ID] = "options_agent"
     assert entity._fallback_agent_id("default") == "options_agent"
 
     # 2. Test fallback_agent_id with options matching entry_id (self-forwarding prevention)
-    entry.options[CONF_FALLBACK_AGENT_ID] = "this_agent"
+    entry.options[ConfigKey.FALLBACK_AGENT_ID] = "this_agent"
     assert entity._fallback_agent_id("default") == "default"
 
     # 3. Test fallback_agent_id with invalid type
-    entry.options[CONF_FALLBACK_AGENT_ID] = 123
+    entry.options[ConfigKey.FALLBACK_AGENT_ID] = 123
     assert entity._fallback_agent_id("default") == "default"
 
     # 4. Test fallback_agent_id fallback to data
     entry.options = {}
-    entry.data[CONF_FALLBACK_AGENT_ID] = "data_agent"
+    entry.data[ConfigKey.FALLBACK_AGENT_ID] = "data_agent"
     assert entity._fallback_agent_id("default") == "data_agent"
 
     # 5. Test actual delegate_raw_text calls conversation.async_converse
-    entry.options = {CONF_FALLBACK_AGENT_ID: "options_agent"}
+    entry.options = {ConfigKey.FALLBACK_AGENT_ID: "options_agent"}
     mock_result = MagicMock()
     with patch(
         "homeassistant.components.conversation.async_converse", AsyncMock(return_value=mock_result)
@@ -2444,8 +2432,8 @@ async def test_hotword_matched_bypasses_ranking_and_delegates_raw_text() -> None
     entry = MagicMock()
     entry.entry_id = "test_entry"
     entry.options = {
-        CONF_ENABLE_HOTWORD: True,
-        CONF_HOTWORD: "Jarvis",
+        ConfigKey.ENABLE_HOTWORD: True,
+        ConfigKey.HOTWORD: "Jarvis",
     }
     entry.data = {}
     runtime = CanonicalizerRuntime()
@@ -2473,8 +2461,8 @@ async def test_hotword_disabled_proceeds_to_standard_ranking() -> None:
     entry = MagicMock()
     entry.entry_id = "test_entry"
     entry.options = {
-        CONF_ENABLE_HOTWORD: False,
-        CONF_HOTWORD: "Jarvis",
+        ConfigKey.ENABLE_HOTWORD: False,
+        ConfigKey.HOTWORD: "Jarvis",
     }
     entry.data = {}
     runtime = CanonicalizerRuntime()
@@ -2500,8 +2488,8 @@ async def test_hotword_enabled_non_matching_query_proceeds_to_ranking() -> None:
     entry = MagicMock()
     entry.entry_id = "test_entry"
     entry.options = {
-        CONF_ENABLE_HOTWORD: True,
-        CONF_HOTWORD: "Jarvis",
+        ConfigKey.ENABLE_HOTWORD: True,
+        ConfigKey.HOTWORD: "Jarvis",
     }
     entry.data = {}
     runtime = CanonicalizerRuntime()
@@ -2528,9 +2516,9 @@ async def test_hotword_multiword_and_custom_confidence_matched() -> None:
     entry = MagicMock()
     entry.entry_id = "test_entry"
     entry.options = {
-        CONF_ENABLE_HOTWORD: True,
-        CONF_HOTWORD: "Hey Jarvis",
-        CONF_HOTWORD_MIN_CONFIDENCE: 0.80,
+        ConfigKey.ENABLE_HOTWORD: True,
+        ConfigKey.HOTWORD: "Hey Jarvis",
+        ConfigKey.HOTWORD_MIN_CONFIDENCE: 0.80,
     }
     entry.data = {}
     runtime = CanonicalizerRuntime()
@@ -2557,9 +2545,9 @@ async def test_hotword_below_custom_confidence_proceeds_to_ranking() -> None:
     entry = MagicMock()
     entry.entry_id = "test_entry"
     entry.options = {
-        CONF_ENABLE_HOTWORD: True,
-        CONF_HOTWORD: "Hey Jarvis",
-        CONF_HOTWORD_MIN_CONFIDENCE: 0.98,
+        ConfigKey.ENABLE_HOTWORD: True,
+        ConfigKey.HOTWORD: "Hey Jarvis",
+        ConfigKey.HOTWORD_MIN_CONFIDENCE: 0.98,
     }
     entry.data = {}
     runtime = CanonicalizerRuntime()
@@ -2587,8 +2575,8 @@ async def test_hotword_list_of_strings_matched() -> None:
     entry = MagicMock()
     entry.entry_id = "test_entry"
     entry.options = {
-        CONF_ENABLE_HOTWORD: True,
-        CONF_HOTWORD: ["Jarvis", "Computer", "Alexa"],
+        ConfigKey.ENABLE_HOTWORD: True,
+        ConfigKey.HOTWORD: ["Jarvis", "Computer", "Alexa"],
     }
     entry.data = {}
     runtime = CanonicalizerRuntime()
@@ -2615,8 +2603,8 @@ async def test_hotword_mixed_invalid_list_filtered_and_matched() -> None:
     entry = MagicMock()
     entry.entry_id = "test_entry"
     entry.options = {
-        CONF_ENABLE_HOTWORD: True,
-        CONF_HOTWORD: ["Jarvis", "   ", None, 123],
+        ConfigKey.ENABLE_HOTWORD: True,
+        ConfigKey.HOTWORD: ["Jarvis", "   ", None, 123],
     }
     entry.data = {}
     runtime = CanonicalizerRuntime()
@@ -2642,14 +2630,14 @@ def test_resolve_entry_hotword_options_fallback_chains() -> None:
     # 1. Options present and overrides data
     entry_both = MagicMock()
     entry_both.options = {
-        CONF_ENABLE_HOTWORD: True,
-        CONF_HOTWORD: ["Jarvis", "Alexa"],
-        CONF_HOTWORD_MIN_CONFIDENCE: 0.92,
+        ConfigKey.ENABLE_HOTWORD: True,
+        ConfigKey.HOTWORD: ["Jarvis", "Alexa"],
+        ConfigKey.HOTWORD_MIN_CONFIDENCE: 0.92,
     }
     entry_both.data = {
-        CONF_ENABLE_HOTWORD: False,
-        CONF_HOTWORD: ["OldHotword"],
-        CONF_HOTWORD_MIN_CONFIDENCE: 0.70,
+        ConfigKey.ENABLE_HOTWORD: False,
+        ConfigKey.HOTWORD: ["OldHotword"],
+        ConfigKey.HOTWORD_MIN_CONFIDENCE: 0.70,
     }
     enabled, hws, conf = resolve_entry_hotword_options(entry_both)
     assert enabled is True
@@ -2660,9 +2648,9 @@ def test_resolve_entry_hotword_options_fallback_chains() -> None:
     entry_data = MagicMock()
     entry_data.options = {}
     entry_data.data = {
-        CONF_ENABLE_HOTWORD: True,
-        CONF_HOTWORD: ["Jarvis"],
-        CONF_HOTWORD_MIN_CONFIDENCE: 0.88,
+        ConfigKey.ENABLE_HOTWORD: True,
+        ConfigKey.HOTWORD: ["Jarvis"],
+        ConfigKey.HOTWORD_MIN_CONFIDENCE: 0.88,
     }
     enabled, hws, conf = resolve_entry_hotword_options(entry_data)
     assert enabled is True
@@ -2716,9 +2704,9 @@ def test_resolve_entry_hotword_options_defensive_confidence_parsing() -> None:
     # 1. String float confidence is parsed cleanly
     entry_str = MagicMock()
     entry_str.options = {
-        CONF_ENABLE_HOTWORD: True,
-        CONF_HOTWORD: ["Jarvis"],
-        CONF_HOTWORD_MIN_CONFIDENCE: "0.95",
+        ConfigKey.ENABLE_HOTWORD: True,
+        ConfigKey.HOTWORD: ["Jarvis"],
+        ConfigKey.HOTWORD_MIN_CONFIDENCE: "0.95",
     }
     entry_str.data = {}
     _, _, conf = resolve_entry_hotword_options(entry_str)
@@ -2727,9 +2715,9 @@ def test_resolve_entry_hotword_options_defensive_confidence_parsing() -> None:
     # 2. Invalid string confidence falls back to default
     entry_inv = MagicMock()
     entry_inv.options = {
-        CONF_ENABLE_HOTWORD: True,
-        CONF_HOTWORD: ["Jarvis"],
-        CONF_HOTWORD_MIN_CONFIDENCE: "invalid_not_a_number",
+        ConfigKey.ENABLE_HOTWORD: True,
+        ConfigKey.HOTWORD: ["Jarvis"],
+        ConfigKey.HOTWORD_MIN_CONFIDENCE: "invalid_not_a_number",
     }
     entry_inv.data = {}
     _, _, conf = resolve_entry_hotword_options(entry_inv)
@@ -2738,9 +2726,9 @@ def test_resolve_entry_hotword_options_defensive_confidence_parsing() -> None:
     # 3. Out-of-bounds values are clamped to [0.0, 1.0]
     entry_high = MagicMock()
     entry_high.options = {
-        CONF_ENABLE_HOTWORD: True,
-        CONF_HOTWORD: ["Jarvis"],
-        CONF_HOTWORD_MIN_CONFIDENCE: 2.5,
+        ConfigKey.ENABLE_HOTWORD: True,
+        ConfigKey.HOTWORD: ["Jarvis"],
+        ConfigKey.HOTWORD_MIN_CONFIDENCE: 2.5,
     }
     entry_high.data = {}
     _, _, conf = resolve_entry_hotword_options(entry_high)
@@ -2748,9 +2736,9 @@ def test_resolve_entry_hotword_options_defensive_confidence_parsing() -> None:
 
     entry_low = MagicMock()
     entry_low.options = {
-        CONF_ENABLE_HOTWORD: True,
-        CONF_HOTWORD: ["Jarvis"],
-        CONF_HOTWORD_MIN_CONFIDENCE: -0.5,
+        ConfigKey.ENABLE_HOTWORD: True,
+        ConfigKey.HOTWORD: ["Jarvis"],
+        ConfigKey.HOTWORD_MIN_CONFIDENCE: -0.5,
     }
     entry_low.data = {}
     _, _, conf = resolve_entry_hotword_options(entry_low)
@@ -2760,9 +2748,9 @@ def test_resolve_entry_hotword_options_defensive_confidence_parsing() -> None:
     for non_finite in (float("nan"), float("inf"), float("-inf")):
         entry_non_finite = MagicMock()
         entry_non_finite.options = {
-            CONF_ENABLE_HOTWORD: True,
-            CONF_HOTWORD: ["Jarvis"],
-            CONF_HOTWORD_MIN_CONFIDENCE: non_finite,
+            ConfigKey.ENABLE_HOTWORD: True,
+            ConfigKey.HOTWORD: ["Jarvis"],
+            ConfigKey.HOTWORD_MIN_CONFIDENCE: non_finite,
         }
         entry_non_finite.data = {}
         _, _, conf = resolve_entry_hotword_options(entry_non_finite)

@@ -16,10 +16,10 @@ from homeassistant.core import HomeAssistant
 from homeassistant.util.json import JsonObjectType
 
 from .const import (
-    CONVERSATION_INPUT_AREA_CONTEXT_FIELD,
     CONVERSATION_INPUT_AREA_CONTEXT_FIELDS,
     CONVERSATION_INPUT_OPTIONAL_CONTEXT_FIELDS,
     CONVERSATION_INPUT_REQUIRED_CONTEXT_FIELDS,
+    ConversationInputField,
 )
 from .normalization import normalize_text
 from .utils import elapsed_ms
@@ -223,7 +223,7 @@ def _forwarded_context_fields(user_input: ConversationInput) -> tuple[str, ...]:
         getattr(user_input, field_name, None) is not None
         for field_name in CONVERSATION_INPUT_AREA_CONTEXT_FIELDS
     ):
-        fields.append(CONVERSATION_INPUT_AREA_CONTEXT_FIELD)
+        fields.append(ConversationInputField.AREA_CONTEXT)
     return tuple(fields)
 
 

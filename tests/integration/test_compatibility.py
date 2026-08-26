@@ -18,22 +18,13 @@ from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
 
 from custom_components.assist_canonicalizer.const import (
-    ATTR_AGENT_ID,
-    ATTR_CANDIDATE_COUNT,
-    ATTR_LANGUAGE,
-    ATTR_TEXT,
-    CONF_MIN_CONFIDENCE,
-    CONF_MIN_MARGIN,
     DATA_RUNTIME,
     DEFAULT_MIN_CONFIDENCE,
     DEFAULT_MIN_MARGIN,
     DOMAIN,
-    SERVICE_CLEAR_INDEX,
-    SERVICE_DIAGNOSTICS,
-    SERVICE_DUMP_CANDIDATES,
-    SERVICE_REBUILD_INDEX,
-    SERVICE_SET_FALLBACK_AGENT,
-    SERVICE_TEST_MATCH,
+    AttributeName,
+    ConfigKey,
+    ServiceName,
 )
 from custom_components.assist_canonicalizer.recognition import (
     RecognitionKind,
@@ -57,8 +48,8 @@ async def test_home_assistant_functional_contract(
         title="Assist Canonicalizer",
         data={},
         options={
-            CONF_MIN_CONFIDENCE: 1.0,
-            CONF_MIN_MARGIN: 1.0,
+            ConfigKey.MIN_CONFIDENCE: 1.0,
+            ConfigKey.MIN_MARGIN: 1.0,
         },
     )
     entry.add_to_hass(hass)
@@ -67,57 +58,57 @@ async def test_home_assistant_functional_contract(
     await hass.async_block_till_done()
 
     assert conversation.async_get_agent_info(hass, entry.entry_id) is not None
-    assert hass.services.has_service(DOMAIN, SERVICE_REBUILD_INDEX)
-    assert hass.services.has_service(DOMAIN, SERVICE_TEST_MATCH)
-    assert hass.services.has_service(DOMAIN, SERVICE_CLEAR_INDEX)
-    assert hass.services.has_service(DOMAIN, SERVICE_DUMP_CANDIDATES)
-    assert hass.services.has_service(DOMAIN, SERVICE_DIAGNOSTICS)
-    assert hass.services.has_service(DOMAIN, SERVICE_SET_FALLBACK_AGENT)
+    assert hass.services.has_service(DOMAIN, ServiceName.REBUILD_INDEX)
+    assert hass.services.has_service(DOMAIN, ServiceName.TEST_MATCH)
+    assert hass.services.has_service(DOMAIN, ServiceName.CLEAR_INDEX)
+    assert hass.services.has_service(DOMAIN, ServiceName.DUMP_CANDIDATES)
+    assert hass.services.has_service(DOMAIN, ServiceName.DIAGNOSTICS)
+    assert hass.services.has_service(DOMAIN, ServiceName.SET_FALLBACK_AGENT)
 
     # 1. Rebuild index service
     rebuild_response = await hass.services.async_call(
         DOMAIN,
-        SERVICE_REBUILD_INDEX,
-        {ATTR_LANGUAGE: "en"},
+        ServiceName.REBUILD_INDEX,
+        {AttributeName.LANGUAGE: "en"},
         blocking=True,
         return_response=True,
     )
     assert isinstance(rebuild_response, dict)
-    assert rebuild_response[ATTR_LANGUAGE] == "en"
-    candidate_count = rebuild_response[ATTR_CANDIDATE_COUNT]
+    assert rebuild_response[AttributeName.LANGUAGE] == "en"
+    candidate_count = rebuild_response[AttributeName.CANDIDATE_COUNT]
     assert isinstance(candidate_count, int)
     assert candidate_count > 0
 
     # 2. Test match service
     test_match_response = await hass.services.async_call(
         DOMAIN,
-        SERVICE_TEST_MATCH,
-        {ATTR_TEXT: "turn on kitchen light", ATTR_LANGUAGE: "en"},
+        ServiceName.TEST_MATCH,
+        {AttributeName.TEXT: "turn on kitchen light", AttributeName.LANGUAGE: "en"},
         blocking=True,
         return_response=True,
     )
     assert isinstance(test_match_response, dict)
-    assert test_match_response[ATTR_LANGUAGE] == "en"
+    assert test_match_response[AttributeName.LANGUAGE] == "en"
     assert "confidence_gate" in test_match_response
     assert "top_candidates" in test_match_response
 
     # 3. Dump candidates service
     dump_response = await hass.services.async_call(
         DOMAIN,
-        SERVICE_DUMP_CANDIDATES,
-        {ATTR_LANGUAGE: "en"},
+        ServiceName.DUMP_CANDIDATES,
+        {AttributeName.LANGUAGE: "en"},
         blocking=True,
         return_response=True,
     )
     assert isinstance(dump_response, dict)
-    assert dump_response[ATTR_LANGUAGE] == "en"
+    assert dump_response[AttributeName.LANGUAGE] == "en"
     assert "candidate_sample" in dump_response
 
     # 4. Set fallback agent service
     fallback_response = await hass.services.async_call(
         DOMAIN,
-        SERVICE_SET_FALLBACK_AGENT,
-        {ATTR_AGENT_ID: HOME_ASSISTANT_AGENT},
+        ServiceName.SET_FALLBACK_AGENT,
+        {AttributeName.AGENT_ID: HOME_ASSISTANT_AGENT},
         blocking=True,
         return_response=True,
     )
@@ -169,7 +160,7 @@ async def test_home_assistant_functional_contract(
     # 6. Diagnostics service
     diagnostics = await hass.services.async_call(
         DOMAIN,
-        SERVICE_DIAGNOSTICS,
+        ServiceName.DIAGNOSTICS,
         {},
         blocking=True,
         return_response=True,
@@ -182,24 +173,24 @@ async def test_home_assistant_functional_contract(
     # 7. Clear index service
     clear_response = await hass.services.async_call(
         DOMAIN,
-        SERVICE_CLEAR_INDEX,
-        {ATTR_LANGUAGE: "en"},
+        ServiceName.CLEAR_INDEX,
+        {AttributeName.LANGUAGE: "en"},
         blocking=True,
         return_response=True,
     )
     assert isinstance(clear_response, dict)
-    assert clear_response[ATTR_LANGUAGE] == "en"
+    assert clear_response[AttributeName.LANGUAGE] == "en"
     assert "cleared_cached_languages" in clear_response
 
     # 8. Unload entry
     assert await hass.config_entries.async_unload(entry.entry_id)
     assert conversation.async_get_agent_info(hass, entry.entry_id) is None
-    assert not hass.services.has_service(DOMAIN, SERVICE_REBUILD_INDEX)
-    assert not hass.services.has_service(DOMAIN, SERVICE_TEST_MATCH)
-    assert not hass.services.has_service(DOMAIN, SERVICE_CLEAR_INDEX)
-    assert not hass.services.has_service(DOMAIN, SERVICE_DUMP_CANDIDATES)
-    assert not hass.services.has_service(DOMAIN, SERVICE_DIAGNOSTICS)
-    assert not hass.services.has_service(DOMAIN, SERVICE_SET_FALLBACK_AGENT)
+    assert not hass.services.has_service(DOMAIN, ServiceName.REBUILD_INDEX)
+    assert not hass.services.has_service(DOMAIN, ServiceName.TEST_MATCH)
+    assert not hass.services.has_service(DOMAIN, ServiceName.CLEAR_INDEX)
+    assert not hass.services.has_service(DOMAIN, ServiceName.DUMP_CANDIDATES)
+    assert not hass.services.has_service(DOMAIN, ServiceName.DIAGNOSTICS)
+    assert not hass.services.has_service(DOMAIN, ServiceName.SET_FALLBACK_AGENT)
 
 
 @pytest.mark.asyncio
@@ -354,8 +345,8 @@ async def test_config_and_options_flow_framework_contract(hass: HomeAssistant) -
         form["flow_id"],
         {
             "fallback_agent_id": HOME_ASSISTANT_AGENT,
-            CONF_MIN_CONFIDENCE: DEFAULT_MIN_CONFIDENCE,
-            CONF_MIN_MARGIN: DEFAULT_MIN_MARGIN,
+            ConfigKey.MIN_CONFIDENCE: DEFAULT_MIN_CONFIDENCE,
+            ConfigKey.MIN_MARGIN: DEFAULT_MIN_MARGIN,
         },
     )
     assert created.get("type") is FlowResultType.CREATE_ENTRY
@@ -372,13 +363,13 @@ async def test_config_and_options_flow_framework_contract(hass: HomeAssistant) -
         options_form["flow_id"],
         {
             "fallback_agent_id": HOME_ASSISTANT_AGENT,
-            CONF_MIN_CONFIDENCE: 0.7,
-            CONF_MIN_MARGIN: 0.08,
+            ConfigKey.MIN_CONFIDENCE: 0.7,
+            ConfigKey.MIN_MARGIN: 0.08,
         },
     )
     assert options_created.get("type") is FlowResultType.CREATE_ENTRY
-    assert entry.options[CONF_MIN_CONFIDENCE] == 0.7
-    assert entry.options[CONF_MIN_MARGIN] == 0.08
+    assert entry.options[ConfigKey.MIN_CONFIDENCE] == 0.7
+    assert entry.options[ConfigKey.MIN_MARGIN] == 0.08
 
     duplicate = await hass.config_entries.flow.async_init(
         DOMAIN,
