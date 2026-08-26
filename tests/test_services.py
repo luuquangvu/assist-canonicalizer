@@ -13,18 +13,11 @@ from voluptuous import Invalid
 
 from custom_components.assist_canonicalizer.candidate import Candidate
 from custom_components.assist_canonicalizer.const import (
-    ATTR_AGENT_ID,
-    CONF_FALLBACK_AGENT_ID,
-    CONF_MIN_CONFIDENCE,
-    CONF_MIN_MARGIN,
     DATA_RUNTIME,
     DOMAIN,
-    SERVICE_CLEAR_INDEX,
-    SERVICE_DIAGNOSTICS,
-    SERVICE_DUMP_CANDIDATES,
-    SERVICE_REBUILD_INDEX,
-    SERVICE_SET_FALLBACK_AGENT,
-    SERVICE_TEST_MATCH,
+    AttributeName,
+    ConfigKey,
+    ServiceName,
 )
 from custom_components.assist_canonicalizer.indexer import build_index
 from custom_components.assist_canonicalizer.ranking import RankedCandidate, ScoreBreakdown
@@ -57,20 +50,20 @@ def _as_hass(value: object) -> HomeAssistant:
 
 
 _EXPECTED_SERVICE_SCHEMAS = {
-    SERVICE_SET_FALLBACK_AGENT: SET_FALLBACK_AGENT_SCHEMA,
-    SERVICE_TEST_MATCH: TEST_MATCH_SCHEMA,
-    SERVICE_REBUILD_INDEX: REBUILD_INDEX_SCHEMA,
-    SERVICE_CLEAR_INDEX: CLEAR_INDEX_SCHEMA,
-    SERVICE_DIAGNOSTICS: DIAGNOSTICS_SCHEMA,
-    SERVICE_DUMP_CANDIDATES: DUMP_CANDIDATES_SCHEMA,
+    ServiceName.SET_FALLBACK_AGENT: SET_FALLBACK_AGENT_SCHEMA,
+    ServiceName.TEST_MATCH: TEST_MATCH_SCHEMA,
+    ServiceName.REBUILD_INDEX: REBUILD_INDEX_SCHEMA,
+    ServiceName.CLEAR_INDEX: CLEAR_INDEX_SCHEMA,
+    ServiceName.DIAGNOSTICS: DIAGNOSTICS_SCHEMA,
+    ServiceName.DUMP_CANDIDATES: DUMP_CANDIDATES_SCHEMA,
 }
 _EXPECTED_SERVICE_RESPONSE_SUPPORT = {
-    SERVICE_SET_FALLBACK_AGENT: SupportsResponse.OPTIONAL,
-    SERVICE_TEST_MATCH: SupportsResponse.ONLY,
-    SERVICE_REBUILD_INDEX: SupportsResponse.ONLY,
-    SERVICE_CLEAR_INDEX: SupportsResponse.ONLY,
-    SERVICE_DIAGNOSTICS: SupportsResponse.ONLY,
-    SERVICE_DUMP_CANDIDATES: SupportsResponse.ONLY,
+    ServiceName.SET_FALLBACK_AGENT: SupportsResponse.OPTIONAL,
+    ServiceName.TEST_MATCH: SupportsResponse.ONLY,
+    ServiceName.REBUILD_INDEX: SupportsResponse.ONLY,
+    ServiceName.CLEAR_INDEX: SupportsResponse.ONLY,
+    ServiceName.DIAGNOSTICS: SupportsResponse.ONLY,
+    ServiceName.DUMP_CANDIDATES: SupportsResponse.ONLY,
 }
 
 
@@ -126,21 +119,22 @@ class _ServiceRegistrationRecorder:
 
     def __init__(self) -> None:
         """Initialize service callback storage."""
-        self.registered_services: dict[str, Any] = {}
-        self.registration_kwargs: dict[str, dict[str, Any]] = {}
+        self.registered_services: dict[ServiceName | str, Any] = {}
+        self.registration_kwargs: dict[ServiceName | str, dict[str, Any]] = {}
 
     def __call__(
         self,
         domain: str,
-        service: str,
+        service: ServiceName | str,
         callback: Any,
         *args: Any,
         **kwargs: Any,
     ) -> None:
         """Mock service registration callback."""
         assert domain == DOMAIN, f"Expected domain {DOMAIN}, got {domain}"
-        assert kwargs.get("schema") is _EXPECTED_SERVICE_SCHEMAS[service]
-        assert kwargs.get("supports_response") is _EXPECTED_SERVICE_RESPONSE_SUPPORT[service]
+        service_name = ServiceName(service)
+        assert kwargs.get("schema") is _EXPECTED_SERVICE_SCHEMAS[service_name]
+        assert kwargs.get("supports_response") is _EXPECTED_SERVICE_RESPONSE_SUPPORT[service_name]
         self.registered_services[service] = callback
         self.registration_kwargs[service] = dict(kwargs)
 
@@ -162,8 +156,8 @@ async def test_set_fallback_agent_service_reports_config_entry_change(
     runtime = CanonicalizerRuntime()
     entry = HassMockConfigEntry(
         domain=DOMAIN,
-        options={CONF_MIN_CONFIDENCE: 0.7},
-        data={CONF_FALLBACK_AGENT_ID: "old_agent"},
+        options={ConfigKey.MIN_CONFIDENCE: 0.7},
+        data={ConfigKey.FALLBACK_AGENT_ID: "old_agent"},
     )
     entry.add_to_hass(hass)
     hass.data[DOMAIN] = {
@@ -172,7 +166,7 @@ async def test_set_fallback_agent_service_reports_config_entry_change(
             "entry": entry,
         }
     }
-    call = MockServiceCall({ATTR_AGENT_ID: "new_agent"})
+    call = MockServiceCall({AttributeName.AGENT_ID: "new_agent"})
 
     with patch(
         "custom_components.assist_canonicalizer.services.async_get_agent",
@@ -182,16 +176,16 @@ async def test_set_fallback_agent_service_reports_config_entry_change(
         unchanged_result = await _handle_set_fallback_agent(_as_hass(hass), cast(ServiceCall, call))
 
     assert result == {
-        CONF_FALLBACK_AGENT_ID: "new_agent",
+        ConfigKey.FALLBACK_AGENT_ID: "new_agent",
         "previous_fallback_agent_id": "old_agent",
         "changed": True,
     }
     assert dict(entry.options) == {
-        CONF_MIN_CONFIDENCE: 0.7,
-        CONF_FALLBACK_AGENT_ID: "new_agent",
+        ConfigKey.MIN_CONFIDENCE: 0.7,
+        ConfigKey.FALLBACK_AGENT_ID: "new_agent",
     }
     assert unchanged_result == {
-        CONF_FALLBACK_AGENT_ID: "new_agent",
+        ConfigKey.FALLBACK_AGENT_ID: "new_agent",
         "previous_fallback_agent_id": "new_agent",
         "changed": False,
     }
@@ -230,7 +224,7 @@ async def test_set_fallback_agent_service_rejects_invalid_targets(
     ):
         await _handle_set_fallback_agent(
             _as_hass(hass),
-            cast(ServiceCall, MockServiceCall({ATTR_AGENT_ID: agent_id})),
+            cast(ServiceCall, MockServiceCall({AttributeName.AGENT_ID: agent_id})),
         )
 
     hass.config_entries.async_update_entry.assert_not_called()
@@ -238,9 +232,11 @@ async def test_set_fallback_agent_service_rejects_invalid_targets(
 
 def test_set_fallback_agent_schema_trims_and_rejects_empty_ids() -> None:
     """Normalize hand-authored action data before resolving an agent."""
-    assert SET_FALLBACK_AGENT_SCHEMA({ATTR_AGENT_ID: "  agent-id  "}) == {ATTR_AGENT_ID: "agent-id"}
+    assert SET_FALLBACK_AGENT_SCHEMA({AttributeName.AGENT_ID: "  agent-id  "}) == {
+        AttributeName.AGENT_ID: "agent-id"
+    }
     with pytest.raises(Invalid):
-        SET_FALLBACK_AGENT_SCHEMA({ATTR_AGENT_ID: "  "})
+        SET_FALLBACK_AGENT_SCHEMA({AttributeName.AGENT_ID: "  "})
 
 
 @pytest.mark.asyncio
@@ -288,7 +284,7 @@ async def test_handle_test_match_entry_none_and_data_fallback() -> None:
 
     # Case 2: entry is not None, options is empty, fallback to data
     entry_data = MockConfigEntry(
-        options={}, data={CONF_MIN_CONFIDENCE: 0.10, CONF_MIN_MARGIN: 0.01}
+        options={}, data={ConfigKey.MIN_CONFIDENCE: 0.10, ConfigKey.MIN_MARGIN: 0.01}
     )
     hass_data = MockHass(runtime, entry=entry_data)
     result_data = await _handle_test_match(_as_hass(hass_data), cast(ServiceCall, call))
@@ -657,31 +653,31 @@ async def test_async_services_dispatch() -> None:
 
         call = MockServiceCall({})
 
-        res_set_fallback = await recorder.registered_services[SERVICE_SET_FALLBACK_AGENT](call)
+        res_set_fallback = await recorder.registered_services[ServiceName.SET_FALLBACK_AGENT](call)
         assert res_set_fallback == {"status": "updated"}
         mock_set_fallback.assert_called_once_with(hass, call)
 
         # Test handle_test_match
-        res_test = await recorder.registered_services[SERVICE_TEST_MATCH](call)
+        res_test = await recorder.registered_services[ServiceName.TEST_MATCH](call)
         assert res_test == {"status": "tested"}
         mock_test.assert_called_once_with(hass, call)
 
         # Test handle_rebuild_index
-        res_rebuild = await recorder.registered_services[SERVICE_REBUILD_INDEX](call)
+        res_rebuild = await recorder.registered_services[ServiceName.REBUILD_INDEX](call)
         assert res_rebuild == {"status": "rebuilt"}
         mock_rebuild.assert_called_once_with(hass, call)
 
-        res_clear = await recorder.registered_services[SERVICE_CLEAR_INDEX](call)
+        res_clear = await recorder.registered_services[ServiceName.CLEAR_INDEX](call)
         assert res_clear == {"status": "cleared"}
         mock_clear.assert_called_once_with(hass, call)
 
         # Test handle_dump_candidates
-        res_dump = await recorder.registered_services[SERVICE_DUMP_CANDIDATES](call)
+        res_dump = await recorder.registered_services[ServiceName.DUMP_CANDIDATES](call)
         assert res_dump == {"status": "dumped"}
         mock_dump.assert_called_once_with(hass, call)
 
         # Test handle_diagnostics
-        res_diagnostics = await recorder.registered_services[SERVICE_DIAGNOSTICS](call)
+        res_diagnostics = await recorder.registered_services[ServiceName.DIAGNOSTICS](call)
         assert res_diagnostics == {"status": "diagnosed"}
         mock_diagnostics.assert_called_once_with(hass, call)
 
@@ -733,7 +729,7 @@ async def test_services_exception_wrapping() -> None:
     ):
         await _handle_set_fallback_agent(
             _as_hass(hass),
-            cast(ServiceCall, MockServiceCall({ATTR_AGENT_ID: "other_agent"})),
+            cast(ServiceCall, MockServiceCall({AttributeName.AGENT_ID: "other_agent"})),
         )
 
     # 3. _handle_rebuild_index raising error

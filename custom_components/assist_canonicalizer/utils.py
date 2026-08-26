@@ -17,17 +17,13 @@ from homeassistant.config_entries import ConfigEntry
 
 from .builtin_intents import language_variant_for
 from .const import (
-    CONF_ENABLE_HOTWORD,
-    CONF_HOTWORD,
-    CONF_HOTWORD_MIN_CONFIDENCE,
-    CONF_MIN_CONFIDENCE,
-    CONF_MIN_MARGIN,
     DEFAULT_ENABLE_HOTWORD,
     DEFAULT_HOTWORD,
     DEFAULT_HOTWORD_MIN_CONFIDENCE,
     DEFAULT_MIN_CONFIDENCE,
     DEFAULT_MIN_MARGIN,
     PRESERVED_UNIT_SUFFIXES,
+    ConfigKey,
 )
 from .normalization import normalize_text
 
@@ -69,12 +65,12 @@ def resolve_entry_thresholds(entry: ConfigEntry | None) -> tuple[float, float]:
     options = (getattr(entry, "options", {}) or {}) if entry is not None else {}
     data = (getattr(entry, "data", {}) or {}) if entry is not None else {}
     min_confidence = options.get(
-        CONF_MIN_CONFIDENCE,
-        data.get(CONF_MIN_CONFIDENCE, DEFAULT_MIN_CONFIDENCE),
+        ConfigKey.MIN_CONFIDENCE,
+        data.get(ConfigKey.MIN_CONFIDENCE, DEFAULT_MIN_CONFIDENCE),
     )
     min_margin = options.get(
-        CONF_MIN_MARGIN,
-        data.get(CONF_MIN_MARGIN, DEFAULT_MIN_MARGIN),
+        ConfigKey.MIN_MARGIN,
+        data.get(ConfigKey.MIN_MARGIN, DEFAULT_MIN_MARGIN),
     )
     return min_confidence, min_margin
 
@@ -126,18 +122,18 @@ def resolve_entry_hotword_options(
     data = (getattr(entry, "data", {}) or {}) if entry is not None else {}
     enable_hotword = bool(
         options.get(
-            CONF_ENABLE_HOTWORD,
-            data.get(CONF_ENABLE_HOTWORD, DEFAULT_ENABLE_HOTWORD),
+            ConfigKey.ENABLE_HOTWORD,
+            data.get(ConfigKey.ENABLE_HOTWORD, DEFAULT_ENABLE_HOTWORD),
         )
     )
     raw_hotword = options.get(
-        CONF_HOTWORD,
-        data.get(CONF_HOTWORD, DEFAULT_HOTWORD),
+        ConfigKey.HOTWORD,
+        data.get(ConfigKey.HOTWORD, DEFAULT_HOTWORD),
     )
     hotwords = tuple(normalize_hotword_list(raw_hotword))
     raw_min_confidence = options.get(
-        CONF_HOTWORD_MIN_CONFIDENCE,
-        data.get(CONF_HOTWORD_MIN_CONFIDENCE, DEFAULT_HOTWORD_MIN_CONFIDENCE),
+        ConfigKey.HOTWORD_MIN_CONFIDENCE,
+        data.get(ConfigKey.HOTWORD_MIN_CONFIDENCE, DEFAULT_HOTWORD_MIN_CONFIDENCE),
     )
     min_confidence: float
     if isinstance(raw_min_confidence, (int, float)):

@@ -13,16 +13,8 @@ from homeassistant.components.conversation.models import ConversationInput
 from homeassistant.core import Context, HomeAssistant
 
 from custom_components.assist_canonicalizer.const import (
-    CONVERSATION_INPUT_AGENT_ID_FIELD,
-    CONVERSATION_INPUT_AREA_CONTEXT_FIELD,
-    CONVERSATION_INPUT_CONTEXT_FIELD,
-    CONVERSATION_INPUT_CONVERSATION_ID_FIELD,
-    CONVERSATION_INPUT_DEVICE_ID_FIELD,
-    CONVERSATION_INPUT_EXTRA_SYSTEM_PROMPT_FIELD,
-    CONVERSATION_INPUT_LANGUAGE_FIELD,
     CONVERSATION_INPUT_OPTIONAL_FIELDS,
-    CONVERSATION_INPUT_SATELLITE_ID_FIELD,
-    CONVERSATION_INPUT_TEXT_FIELD,
+    ConversationInputField,
 )
 from custom_components.assist_canonicalizer.recognition import (
     _MAX_OBSERVED_VALUE_LENGTH,
@@ -37,16 +29,16 @@ def _conversation_input() -> ConversationInput:
     """Return a request populated with every supported context field."""
     signature = inspect.signature(ConversationInput)
     kwargs: dict[str, Any] = {
-        CONVERSATION_INPUT_TEXT_FIELD: "turn teh lamp on",
-        CONVERSATION_INPUT_CONTEXT_FIELD: Context(user_id="benchmark-user"),
-        CONVERSATION_INPUT_CONVERSATION_ID_FIELD: "recognition-request",
-        CONVERSATION_INPUT_DEVICE_ID_FIELD: "device-kitchen",
-        CONVERSATION_INPUT_LANGUAGE_FIELD: "en-US",
+        ConversationInputField.TEXT: "turn teh lamp on",
+        ConversationInputField.CONTEXT: Context(user_id="benchmark-user"),
+        ConversationInputField.CONVERSATION_ID: "recognition-request",
+        ConversationInputField.DEVICE_ID: "device-kitchen",
+        ConversationInputField.LANGUAGE: "en-US",
     }
     optional = {
-        CONVERSATION_INPUT_AGENT_ID_FIELD: "conversation.assist_canonicalizer",
-        CONVERSATION_INPUT_SATELLITE_ID_FIELD: "assist_satellite.kitchen",
-        CONVERSATION_INPUT_EXTRA_SYSTEM_PROMPT_FIELD: "stay local",
+        ConversationInputField.AGENT_ID: "conversation.assist_canonicalizer",
+        ConversationInputField.SATELLITE_ID: "assist_satellite.kitchen",
+        ConversationInputField.EXTRA_SYSTEM_PROMPT: "stay local",
     }
     kwargs |= {name: value for name, value in optional.items() if name in signature.parameters}
     return ConversationInput(**kwargs)
@@ -91,11 +83,11 @@ async def test_recognition_forwards_context_and_observes_intent_without_executio
     assert observation.required_context == ("domain",)
     assert observation.excluded_context == ("state",)
     assert set(observation.forwarded_context) >= {
-        CONVERSATION_INPUT_CONTEXT_FIELD,
-        CONVERSATION_INPUT_CONVERSATION_ID_FIELD,
-        CONVERSATION_INPUT_DEVICE_ID_FIELD,
-        CONVERSATION_INPUT_LANGUAGE_FIELD,
-        CONVERSATION_INPUT_AREA_CONTEXT_FIELD,
+        ConversationInputField.CONTEXT,
+        ConversationInputField.CONVERSATION_ID,
+        ConversationInputField.DEVICE_ID,
+        ConversationInputField.LANGUAGE,
+        ConversationInputField.AREA_CONTEXT,
     }
     recognize_trigger.assert_awaited_once()
     recognize_intent.assert_awaited_once()

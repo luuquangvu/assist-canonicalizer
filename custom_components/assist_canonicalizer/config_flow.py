@@ -24,12 +24,6 @@ from homeassistant.helpers.selector import (
 )
 
 from .const import (
-    CONF_ENABLE_HOTWORD,
-    CONF_FALLBACK_AGENT_ID,
-    CONF_HOTWORD,
-    CONF_HOTWORD_MIN_CONFIDENCE,
-    CONF_MIN_CONFIDENCE,
-    CONF_MIN_MARGIN,
     DEFAULT_ENABLE_HOTWORD,
     DEFAULT_HOTWORD,
     DEFAULT_HOTWORD_MIN_CONFIDENCE,
@@ -37,6 +31,7 @@ from .const import (
     DEFAULT_MIN_MARGIN,
     DOMAIN,
     NAME,
+    ConfigKey,
 )
 from .utils import normalize_hotword_list
 
@@ -96,15 +91,15 @@ def _config_schema(
 ) -> vol.Schema:
     """Return config schema for fallback agent and confidence options."""
     defaults = defaults or {}
-    fallback_default = str(defaults.get(CONF_FALLBACK_AGENT_ID, ""))
+    fallback_default = str(defaults.get(ConfigKey.FALLBACK_AGENT_ID, ""))
     if not fallback_default and HOME_ASSISTANT_AGENT:
         fallback_default = HOME_ASSISTANT_AGENT
-    raw_hotword = defaults.get(CONF_HOTWORD, DEFAULT_HOTWORD)
+    raw_hotword = defaults.get(ConfigKey.HOTWORD, DEFAULT_HOTWORD)
     hotword_default = normalize_hotword_list(raw_hotword)
     return vol.Schema(
         {
             vol.Optional(
-                CONF_FALLBACK_AGENT_ID,
+                ConfigKey.FALLBACK_AGENT_ID.value,
                 default=fallback_default,
             ): SelectSelector(
                 SelectSelectorConfig(
@@ -118,8 +113,8 @@ def _config_schema(
                 )
             ),
             vol.Optional(
-                CONF_MIN_CONFIDENCE,
-                default=defaults.get(CONF_MIN_CONFIDENCE, DEFAULT_MIN_CONFIDENCE),
+                ConfigKey.MIN_CONFIDENCE.value,
+                default=defaults.get(ConfigKey.MIN_CONFIDENCE, DEFAULT_MIN_CONFIDENCE),
             ): NumberSelector(
                 NumberSelectorConfig(
                     min=0.0,
@@ -129,8 +124,8 @@ def _config_schema(
                 )
             ),
             vol.Optional(
-                CONF_MIN_MARGIN,
-                default=defaults.get(CONF_MIN_MARGIN, DEFAULT_MIN_MARGIN),
+                ConfigKey.MIN_MARGIN.value,
+                default=defaults.get(ConfigKey.MIN_MARGIN, DEFAULT_MIN_MARGIN),
             ): NumberSelector(
                 NumberSelectorConfig(
                     min=0.0,
@@ -140,17 +135,17 @@ def _config_schema(
                 )
             ),
             vol.Optional(
-                CONF_ENABLE_HOTWORD,
-                default=defaults.get(CONF_ENABLE_HOTWORD, DEFAULT_ENABLE_HOTWORD),
+                ConfigKey.ENABLE_HOTWORD.value,
+                default=defaults.get(ConfigKey.ENABLE_HOTWORD, DEFAULT_ENABLE_HOTWORD),
             ): BooleanSelector(),
             vol.Optional(
-                CONF_HOTWORD,
+                ConfigKey.HOTWORD.value,
                 default=hotword_default,
             ): TextSelector(TextSelectorConfig(multiple=True)),
             vol.Optional(
-                CONF_HOTWORD_MIN_CONFIDENCE,
+                ConfigKey.HOTWORD_MIN_CONFIDENCE.value,
                 default=defaults.get(
-                    CONF_HOTWORD_MIN_CONFIDENCE,
+                    ConfigKey.HOTWORD_MIN_CONFIDENCE,
                     DEFAULT_HOTWORD_MIN_CONFIDENCE,
                 ),
             ): NumberSelector(

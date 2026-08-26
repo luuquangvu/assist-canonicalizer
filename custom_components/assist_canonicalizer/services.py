@@ -22,29 +22,15 @@ from homeassistant.util.json import JsonObjectType, JsonValueType
 from .builtin_intents import language_variant_for
 from .candidate import Candidate
 from .const import (
-    ATTR_ACCEPTED,
-    ATTR_AGENT_ID,
-    ATTR_CANDIDATE_COUNT,
-    ATTR_INTENT_NAME,
-    ATTR_LANGUAGE,
-    ATTR_NORMALIZED_TEXT,
-    ATTR_SELECTED_CANDIDATE,
-    ATTR_SOURCE,
-    ATTR_TEXT,
-    ATTR_TOP_CANDIDATES,
-    CONF_FALLBACK_AGENT_ID,
     DATA_RUNTIME,
     DEFAULT_MAX_DYNAMIC_CANDIDATES,
     DEFAULT_MAX_DYNAMIC_SLOT_VALUES,
     DEFAULT_MAX_REGISTRY_VALUES_NOMINATED,
     DEFAULT_MAX_REGISTRY_VALUES_SCORED_PER_QUERY,
     DOMAIN,
-    SERVICE_CLEAR_INDEX,
-    SERVICE_DIAGNOSTICS,
-    SERVICE_DUMP_CANDIDATES,
-    SERVICE_REBUILD_INDEX,
-    SERVICE_SET_FALLBACK_AGENT,
-    SERVICE_TEST_MATCH,
+    AttributeName,
+    ConfigKey,
+    ServiceName,
 )
 from .indexer import CanonicalIndex
 from .normalization import normalize_text
@@ -55,7 +41,6 @@ from .utils import elapsed_ms, normalize_language, resolve_entry_thresholds
 
 _LOGGER = logging.getLogger(__name__)
 
-ATTR_REBUILD = "rebuild"
 _CANDIDATE_SAMPLE_LIMIT = 50
 
 
@@ -192,23 +177,27 @@ def validate_supported_language(value: object) -> str:
 
 TEST_MATCH_SCHEMA = vol.Schema(
     {
-        vol.Required(ATTR_TEXT): cv.string,
-        vol.Optional(ATTR_LANGUAGE): validate_supported_language,
+        vol.Required(AttributeName.TEXT.value): cv.string,
+        vol.Optional(AttributeName.LANGUAGE.value): validate_supported_language,
     }
 )
 
-REBUILD_INDEX_SCHEMA = vol.Schema({vol.Optional(ATTR_LANGUAGE): validate_supported_language})
-CLEAR_INDEX_SCHEMA = vol.Schema({vol.Optional(ATTR_LANGUAGE): validate_supported_language})
+REBUILD_INDEX_SCHEMA = vol.Schema(
+    {vol.Optional(AttributeName.LANGUAGE.value): validate_supported_language}
+)
+CLEAR_INDEX_SCHEMA = vol.Schema(
+    {vol.Optional(AttributeName.LANGUAGE.value): validate_supported_language}
+)
 DIAGNOSTICS_SCHEMA = vol.Schema({})
 DUMP_CANDIDATES_SCHEMA = vol.Schema(
     {
-        vol.Optional(ATTR_LANGUAGE): validate_supported_language,
-        vol.Optional(ATTR_REBUILD, default=False): cv.boolean,
+        vol.Optional(AttributeName.LANGUAGE.value): validate_supported_language,
+        vol.Optional(AttributeName.REBUILD.value, default=False): cv.boolean,
     }
 )
 SET_FALLBACK_AGENT_SCHEMA = vol.Schema(
     {
-        vol.Required(ATTR_AGENT_ID): vol.All(
+        vol.Required(AttributeName.AGENT_ID.value): vol.All(
             cv.string,
             str.strip,
             vol.Length(min=1),
@@ -263,35 +252,35 @@ def async_setup_services(hass: HomeAssistant) -> None:
     """Register Assist Canonicalizer services."""
     hass.services.async_register(
         DOMAIN,
-        SERVICE_SET_FALLBACK_AGENT,
+        ServiceName.SET_FALLBACK_AGENT,
         _registered_service_handler(hass, _handle_set_fallback_agent),
         schema=SET_FALLBACK_AGENT_SCHEMA,
         supports_response=SupportsResponse.OPTIONAL,
     )
     hass.services.async_register(
         DOMAIN,
-        SERVICE_TEST_MATCH,
+        ServiceName.TEST_MATCH,
         _registered_service_handler(hass, _handle_test_match),
         schema=TEST_MATCH_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN,
-        SERVICE_REBUILD_INDEX,
+        ServiceName.REBUILD_INDEX,
         _registered_service_handler(hass, _handle_rebuild_index),
         schema=REBUILD_INDEX_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN,
-        SERVICE_CLEAR_INDEX,
+        ServiceName.CLEAR_INDEX,
         _registered_service_handler(hass, _handle_clear_index),
         schema=CLEAR_INDEX_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN,
-        SERVICE_DIAGNOSTICS,
+        ServiceName.DIAGNOSTICS,
         _registered_service_handler(hass, _handle_diagnostics),
         schema=DIAGNOSTICS_SCHEMA,
         supports_response=SupportsResponse.ONLY,
@@ -299,7 +288,7 @@ def async_setup_services(hass: HomeAssistant) -> None:
 
     hass.services.async_register(
         DOMAIN,
-        SERVICE_DUMP_CANDIDATES,
+        ServiceName.DUMP_CANDIDATES,
         _registered_service_handler(hass, _handle_dump_candidates),
         schema=DUMP_CANDIDATES_SCHEMA,
         supports_response=SupportsResponse.ONLY,
@@ -308,12 +297,12 @@ def async_setup_services(hass: HomeAssistant) -> None:
 
 def async_unload_services(hass: HomeAssistant) -> None:
     """Remove Assist Canonicalizer services."""
-    hass.services.async_remove(DOMAIN, SERVICE_SET_FALLBACK_AGENT)
-    hass.services.async_remove(DOMAIN, SERVICE_TEST_MATCH)
-    hass.services.async_remove(DOMAIN, SERVICE_REBUILD_INDEX)
-    hass.services.async_remove(DOMAIN, SERVICE_CLEAR_INDEX)
-    hass.services.async_remove(DOMAIN, SERVICE_DIAGNOSTICS)
-    hass.services.async_remove(DOMAIN, SERVICE_DUMP_CANDIDATES)
+    hass.services.async_remove(DOMAIN, ServiceName.SET_FALLBACK_AGENT)
+    hass.services.async_remove(DOMAIN, ServiceName.TEST_MATCH)
+    hass.services.async_remove(DOMAIN, ServiceName.REBUILD_INDEX)
+    hass.services.async_remove(DOMAIN, ServiceName.CLEAR_INDEX)
+    hass.services.async_remove(DOMAIN, ServiceName.DIAGNOSTICS)
+    hass.services.async_remove(DOMAIN, ServiceName.DUMP_CANDIDATES)
 
 
 def _wrap_service_errors[R](
@@ -359,7 +348,7 @@ async def _handle_set_fallback_agent(hass: HomeAssistant, call: ServiceCall) -> 
     if entry is None:
         raise HomeAssistantError("Assist Canonicalizer config entry is not available")
 
-    agent_id = call.data[ATTR_AGENT_ID]
+    agent_id = call.data[AttributeName.AGENT_ID]
     if agent_id == entry.entry_id:
         raise HomeAssistantError("Assist Canonicalizer cannot use itself as the fallback agent")
 
@@ -374,10 +363,10 @@ async def _handle_set_fallback_agent(hass: HomeAssistant, call: ServiceCall) -> 
 
     previous_agent_id = _configured_fallback_agent_id(entry)
     options = dict(getattr(entry, "options", {}) or {})
-    options[CONF_FALLBACK_AGENT_ID] = agent_id
+    options[ConfigKey.FALLBACK_AGENT_ID] = agent_id
     config_entry_changed = hass.config_entries.async_update_entry(entry, options=options)
     return {
-        CONF_FALLBACK_AGENT_ID: agent_id,
+        ConfigKey.FALLBACK_AGENT_ID: agent_id,
         "previous_fallback_agent_id": previous_agent_id,
         "changed": config_entry_changed,
     }
@@ -388,7 +377,7 @@ async def _handle_test_match(hass: HomeAssistant, call: ServiceCall) -> TestMatc
     """Return ranked candidates for a text input with lexical scoring and custom thresholds."""
     runtime, entry = _runtime_entry_from_hass(hass)
     language = _service_language(hass, call)
-    text = call.data[ATTR_TEXT]
+    text = call.data[AttributeName.TEXT]
     index = await _index_for_language(hass, runtime, language, rebuild_if_missing=True)
     if index is None:
         raise HomeAssistantError("Assist Canonicalizer index could not be built")
@@ -414,24 +403,22 @@ async def _handle_test_match(hass: HomeAssistant, call: ServiceCall) -> TestMatc
     )
     selected = decision.accepted_candidate
 
-    return {
-        ATTR_LANGUAGE: language,
-        ATTR_NORMALIZED_TEXT: normalize_text(text),
-        ATTR_CANDIDATE_COUNT: index.candidate_count,
-        "dynamic_candidate_count": runtime.diagnostics.dynamic_candidate_count,
-        "evaluation": {
+    return TestMatchPayload(
+        language=language,
+        normalized_text=normalize_text(text),
+        candidate_count=index.candidate_count,
+        dynamic_candidate_count=runtime.diagnostics.dynamic_candidate_count,
+        evaluation={
             "scope": "lexical",
             "candidate_metadata_authoritative": False,
             "live_recognition": "not_run",
             "production_decision_path": "/api/conversation/process",
         },
-        "confidence_gate": decision.as_dict(),
-        ATTR_ACCEPTED: selected is not None,
-        ATTR_SELECTED_CANDIDATE: (
-            _ranked_candidate_response(selected, query=text) if selected else None
-        ),
-        ATTR_TOP_CANDIDATES: [_ranked_candidate_response(item, query=text) for item in ranked],
-    }
+        confidence_gate=decision.as_dict(),
+        accepted=selected is not None,
+        selected_candidate=(_ranked_candidate_response(selected, query=text) if selected else None),
+        top_candidates=[_ranked_candidate_response(item, query=text) for item in ranked],
+    )
 
 
 @_wrap_service_errors("Index rebuild")
@@ -443,30 +430,30 @@ async def _handle_rebuild_index(hass: HomeAssistant, call: ServiceCall) -> Rebui
     index = await _rebuild_index(hass, runtime, language)
     if index is None:
         raise HomeAssistantError("Index rebuild failed or was cancelled")
-    return {
-        ATTR_LANGUAGE: language,
-        ATTR_CANDIDATE_COUNT: index.candidate_count,
-        "rebuild_latency_ms": elapsed_ms(started_at),
-    }
+    return RebuildPayload(
+        language=language,
+        candidate_count=index.candidate_count,
+        rebuild_latency_ms=elapsed_ms(started_at),
+    )
 
 
 @_wrap_service_errors("Clear index")
 async def _handle_clear_index(hass: HomeAssistant, call: ServiceCall) -> ClearIndexPayload:
     """Clear one language index or all indexes."""
     runtime = _runtime_from_hass(hass)
-    requested_language = call.data.get(ATTR_LANGUAGE)
+    requested_language = call.data.get(AttributeName.LANGUAGE)
     language = (
         normalize_language(requested_language) if isinstance(requested_language, str) else None
     )
     clear_result = await runtime.async_clear_index(hass, language)
-    return {
-        ATTR_LANGUAGE: language,
-        "scope": "all" if language is None else "language",
-        "cleared_cached_languages": list(clear_result.cleared_cached_languages),
-        "cleared_candidate_count": clear_result.cleared_candidate_count,
-        "remaining_candidate_count": clear_result.remaining_candidate_count,
-        "remaining_cached_languages": list(clear_result.remaining_cached_languages),
-    }
+    return ClearIndexPayload(
+        language=language,
+        scope="all" if language is None else "language",
+        cleared_cached_languages=list(clear_result.cleared_cached_languages),
+        cleared_candidate_count=clear_result.cleared_candidate_count,
+        remaining_candidate_count=clear_result.remaining_candidate_count,
+        remaining_cached_languages=list(clear_result.remaining_cached_languages),
+    )
 
 
 @_wrap_service_errors("Diagnostics")
@@ -474,12 +461,12 @@ async def _handle_diagnostics(hass: HomeAssistant, call: ServiceCall) -> JsonObj
     """Return runtime diagnostics."""
     runtime = _runtime_from_hass(hass)
     diagnostics = runtime.diagnostics.as_dict()
-    diagnostics.pop(ATTR_CANDIDATE_COUNT, None)
+    diagnostics.pop(AttributeName.CANDIDATE_COUNT, None)
     diagnostics.pop("index_version", None)
     cached_indexes: JsonObjectType = {}
     for language, index in sorted(runtime.indexes.items()):
         index_summary: JsonObjectType = {
-            ATTR_CANDIDATE_COUNT: index.candidate_count,
+            AttributeName.CANDIDATE_COUNT: index.candidate_count,
             "version": index.version,
         }
         cached_indexes[language] = index_summary
@@ -511,7 +498,7 @@ async def _handle_dump_candidates(hass: HomeAssistant, call: ServiceCall) -> Dum
     """Return candidate pool details for a language."""
     runtime = _runtime_from_hass(hass)
     language = _service_language(hass, call)
-    should_rebuild = bool(call.data.get(ATTR_REBUILD, False))
+    should_rebuild = bool(call.data.get(AttributeName.REBUILD, False))
     rebuild_latency_ms: float | None = None
     if should_rebuild:
         started_at = time.monotonic()
@@ -526,21 +513,21 @@ async def _handle_dump_candidates(hass: HomeAssistant, call: ServiceCall) -> Dum
 
     intent_source_counts = await hass.async_add_executor_job(runtime.source_counts, language)
     if index is None:
-        empty_sample: CandidateSamplePayload = {
-            "truncated": False,
-            "candidates": [],
-        }
-        return {
-            ATTR_LANGUAGE: language,
-            ATTR_CANDIDATE_COUNT: 0,
-            "index_status": index_status,
-            "rebuild_latency_ms": rebuild_latency_ms,
-            "intent_source_counts": intent_source_counts,
-            "candidate_source_counts": {},
-            "intent_counts": {},
-            "registry_slot_counts": _registry_slot_counts(runtime),
-            "candidate_sample": empty_sample,
-        }
+        empty_sample = CandidateSamplePayload(
+            truncated=False,
+            candidates=[],
+        )
+        return DumpCandidatesPayload(
+            language=language,
+            candidate_count=0,
+            index_status=index_status,
+            rebuild_latency_ms=rebuild_latency_ms,
+            intent_source_counts=intent_source_counts,
+            candidate_source_counts={},
+            intent_counts={},
+            registry_slot_counts=_registry_slot_counts(runtime),
+            candidate_sample=empty_sample,
+        )
 
     source_counts, intent_counts = await hass.async_add_executor_job(
         _count_candidate_sources_and_intents, index
@@ -549,21 +536,21 @@ async def _handle_dump_candidates(hass: HomeAssistant, call: ServiceCall) -> Dum
         _ranked_candidate_candidate_response(candidate)
         for candidate in index.candidates[:_CANDIDATE_SAMPLE_LIMIT]
     ]
-    candidate_sample: CandidateSamplePayload = {
-        "truncated": index.candidate_count > len(sample_candidates),
-        "candidates": sample_candidates,
-    }
-    return {
-        ATTR_LANGUAGE: language,
-        ATTR_CANDIDATE_COUNT: index.candidate_count,
-        "index_status": index_status,
-        "rebuild_latency_ms": rebuild_latency_ms,
-        "intent_source_counts": intent_source_counts,
-        "candidate_source_counts": source_counts,
-        "intent_counts": dict(sorted(intent_counts.items())),
-        "registry_slot_counts": _registry_slot_counts(runtime),
-        "candidate_sample": candidate_sample,
-    }
+    candidate_sample = CandidateSamplePayload(
+        truncated=index.candidate_count > len(sample_candidates),
+        candidates=sample_candidates,
+    )
+    return DumpCandidatesPayload(
+        language=language,
+        candidate_count=index.candidate_count,
+        index_status=index_status,
+        rebuild_latency_ms=rebuild_latency_ms,
+        intent_source_counts=intent_source_counts,
+        candidate_source_counts=source_counts,
+        intent_counts=dict(sorted(intent_counts.items())),
+        registry_slot_counts=_registry_slot_counts(runtime),
+        candidate_sample=candidate_sample,
+    )
 
 
 async def _index_for_language(
@@ -632,7 +619,7 @@ def _configured_fallback_agent_id(entry: ConfigEntry) -> str:
     """Return the effective fallback agent configured before a service update."""
     options = getattr(entry, "options", {}) or {}
     data = getattr(entry, "data", {}) or {}
-    configured = options.get(CONF_FALLBACK_AGENT_ID) or data.get(CONF_FALLBACK_AGENT_ID)
+    configured = options.get(ConfigKey.FALLBACK_AGENT_ID) or data.get(ConfigKey.FALLBACK_AGENT_ID)
     if not isinstance(configured, str) or configured == entry.entry_id:
         return HOME_ASSISTANT_AGENT
     return configured
@@ -640,7 +627,7 @@ def _configured_fallback_agent_id(entry: ConfigEntry) -> str:
 
 def _service_language(hass: HomeAssistant, call: ServiceCall) -> str:
     """Return the service language, falling back to Home Assistant config."""
-    language = call.data.get(ATTR_LANGUAGE) or hass.config.language
+    language = call.data.get(AttributeName.LANGUAGE) or hass.config.language
     return normalize_language(str(language))
 
 
@@ -654,15 +641,15 @@ def _registry_slot_counts(runtime: CanonicalizerRuntime) -> dict[str, int]:
 def _ranked_candidate_candidate_response(candidate: Candidate) -> CandidateMetadataPayload:
     """Return serializable candidate metadata without scores."""
     wildcard_slots = sorted({wildcard_name for _index, wildcard_name in candidate.wildcard_infos})
-    return {
-        ATTR_TEXT: candidate.text,
-        ATTR_INTENT_NAME: candidate.intent_name,
-        ATTR_SOURCE: candidate.source.value,
-        ATTR_NORMALIZED_TEXT: candidate.normalized_text,
-        "slots": candidate.parsed_slots,
-        "wildcard_slots": wildcard_slots,
-        "sentence_template": candidate.metadata.get("sentence_template"),
-    }
+    return CandidateMetadataPayload(
+        text=candidate.text,
+        intent_name=candidate.intent_name,
+        source=candidate.source.value,
+        normalized_text=candidate.normalized_text,
+        slots=candidate.parsed_slots,
+        wildcard_slots=wildcard_slots,
+        sentence_template=candidate.metadata.get("sentence_template"),
+    )
 
 
 def _ranked_candidate_response(
@@ -684,12 +671,12 @@ def _ranked_candidate_response(
         "penalty": ranked.scores.penalty,
         "final": ranked.scores.final_score,
     }
-    return {
-        ATTR_TEXT: text,
-        ATTR_INTENT_NAME: candidate.intent_name,
-        ATTR_SOURCE: candidate.source.value,
-        ATTR_NORMALIZED_TEXT: normalized_text,
-        "slots": candidate.parsed_slots,
-        "wildcard_replacements": replacements,
-        "scores": scores,
-    }
+    return RankedCandidatePayload(
+        text=text,
+        intent_name=candidate.intent_name,
+        source=candidate.source.value,
+        normalized_text=normalized_text,
+        slots=candidate.parsed_slots,
+        wildcard_replacements=replacements,
+        scores=scores,
+    )

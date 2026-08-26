@@ -33,15 +33,14 @@ if TYPE_CHECKING:
 from homeassistant.helpers import area_registry, device_registry, entity_registry
 
 from .const import (
-    CONF_FALLBACK_AGENT_ID,
-    CONVERSATION_INPUT_DEVICE_ID_FIELD,
     CONVERSATION_INPUT_OPTIONAL_FIELDS,
-    CONVERSATION_INPUT_SATELLITE_ID_FIELD,
     DATA_RUNTIME,
     DEFAULT_MAX_CANDIDATES,
     DEFAULT_MAX_PREFLIGHT_ATTEMPTS,
     DOMAIN,
     NAME,
+    ConfigKey,
+    ConversationInputField,
     FallbackReason,
 )
 from .indexer import CanonicalIndex
@@ -660,7 +659,7 @@ class AssistCanonicalizerConversationEntity(
 
         area_id: str | None = None
         device_id = user_input.device_id
-        satellite_id = getattr(user_input, CONVERSATION_INPUT_SATELLITE_ID_FIELD, None)
+        satellite_id = getattr(user_input, ConversationInputField.SATELLITE_ID, None)
 
         if (
             satellite_id is not None
@@ -669,7 +668,7 @@ class AssistCanonicalizerConversationEntity(
             area_id = getattr(entity_entry, "area_id", None)
             if satellite_device_id := getattr(
                 entity_entry,
-                CONVERSATION_INPUT_DEVICE_ID_FIELD,
+                ConversationInputField.DEVICE_ID,
                 None,
             ):
                 device_id = satellite_device_id
@@ -1251,7 +1250,9 @@ class AssistCanonicalizerConversationEntity(
         """Return a configured fallback agent without allowing self-forwarding."""
         options = getattr(self._entry, "options", {}) or {}
         data = getattr(self._entry, "data", {}) or {}
-        configured = options.get(CONF_FALLBACK_AGENT_ID) or data.get(CONF_FALLBACK_AGENT_ID)
+        configured = options.get(ConfigKey.FALLBACK_AGENT_ID) or data.get(
+            ConfigKey.FALLBACK_AGENT_ID
+        )
         if not isinstance(configured, str) or configured == self._entry.entry_id:
             return default_agent_id
         return configured
