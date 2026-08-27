@@ -103,8 +103,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          npx prettier --write custom_components/assist_canonicalizer/manifest.json
-          uv run taplo format pyproject.toml
+          npx prettier --write custom_components/assist_canonicalizer/manifest.json pyproject.toml
 
       - name: Update uv.lock
         run: uv lock
