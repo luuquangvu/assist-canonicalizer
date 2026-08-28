@@ -133,6 +133,8 @@ jobs:
               (if length == 0 then true else (length == (unique | length) and all(.[]; type == "string" and test("^[a-zA-Z0-9._\\[\\]-]+$"))) end)) and
             ($metadata.homeassistant_constraint_packages | type == "array" and
               (if length == 0 then true else (length == (unique | length) and all(.[]; type == "string" and test("^[a-zA-Z0-9._\\[\\]-]+$"))) end)) and
+            ($metadata.optional_homeassistant_constraint_packages | type == "array" and
+              (if length == 0 then true else (length == (unique | length) and all(.[]; type == "string" and test("^[a-zA-Z0-9._\\[\\]-]+$"))) end)) and
             ($metadata.test_harness_package | type == "string" and test("^[a-zA-Z0-9._\\[\\]-]+$")) and
             (($metadata.required_packages | index($metadata.test_harness_package)) != null) and
             (($metadata.homeassistant_constraint_packages | length) == 0 or all(
@@ -238,7 +240,8 @@ jobs:
             type == "object" and
             (.test_harness_package | type == "string") and
             (.required_packages | type == "array") and
-            (.homeassistant_constraint_packages | type == "array")
+            (.homeassistant_constraint_packages | type == "array") and
+            (.optional_homeassistant_constraint_packages | type == "array")
           ' <<< "$TEST_DEPENDENCY_METADATA_JSON" >/dev/null
 
           mapfile -t REQUIRED_TEST_PACKAGES < <(
@@ -247,13 +250,16 @@ jobs:
           mapfile -t HA_CONSTRAINED_TEST_PACKAGES < <(
             jq -r '.homeassistant_constraint_packages[]?' <<< "$TEST_DEPENDENCY_METADATA_JSON"
           )
+          mapfile -t OPTIONAL_HA_CONSTRAINED_TEST_PACKAGES < <(
+            jq -r '.optional_homeassistant_constraint_packages[]?' <<< "$TEST_DEPENDENCY_METADATA_JSON"
+          )
           TEST_HARNESS_PACKAGE=$(
             jq -e -r '.test_harness_package' <<< "$TEST_DEPENDENCY_METADATA_JSON"
           )
 
           declare -A HA_CONSTRAINT_SPECS=()
           HAS_CONSTRAINTS=0
-          for package in "${HA_CONSTRAINED_TEST_PACKAGES[@]-}"; do
+          for package in "${HA_CONSTRAINED_TEST_PACKAGES[@]-}" "${OPTIONAL_HA_CONSTRAINED_TEST_PACKAGES[@]-}"; do
             if [[ -n "$package" ]]; then
               HAS_CONSTRAINTS=1
               break
@@ -284,6 +290,20 @@ jobs:
               fi
               HA_CONSTRAINT_SPECS["$package"]="$package_spec"
             done
+
+            for package in "${OPTIONAL_HA_CONSTRAINED_TEST_PACKAGES[@]}"; do
+              if [[ -z "$package" ]]; then
+                continue
+              fi
+              if ! package_spec=$(uv run tools/validate_compatibility.py \
+                --parse-constraint-spec "$package" --allow-missing <<< "$HA_CONSTRAINTS"); then
+                echo "::error::Failed to parse optional constraint $package from package_constraints.txt"
+                exit 1
+              fi
+              if [[ -n "$package_spec" ]]; then
+                HA_CONSTRAINT_SPECS["$package"]="$package_spec"
+              fi
+            done
           fi
 
           REQUIRED_TEST_DEPS=()
@@ -294,6 +314,12 @@ jobs:
               REQUIRED_TEST_DEPS+=("${HA_CONSTRAINT_SPECS[$package]}")
             else
               REQUIRED_TEST_DEPS+=("$package")
+            fi
+          done
+
+          for package in "${OPTIONAL_HA_CONSTRAINED_TEST_PACKAGES[@]}"; do
+            if [[ -n "${HA_CONSTRAINT_SPECS[$package]-}" ]]; then
+              REQUIRED_TEST_DEPS+=("${HA_CONSTRAINT_SPECS[$package]}")
             fi
           done
           AIODNS_SPEC="${HA_CONSTRAINT_SPECS[aiodns]-}"

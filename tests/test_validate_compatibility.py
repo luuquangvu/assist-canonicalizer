@@ -1,5 +1,6 @@
 """Tests for the multi-version Home Assistant compatibility runner."""
 
+import io
 import subprocess
 from pathlib import Path
 
@@ -1063,6 +1064,9 @@ def test_main_outputs_required_test_dependency_metadata(
     assert validate_compatibility.orjson.loads(capsys.readouterr().out) == {
         "required_packages": list(validate_compatibility._REQUIRED_TEST_DEPS),
         "homeassistant_constraint_packages": list(validate_compatibility._HA_CONSTRAINED_TEST_DEPS),
+        "optional_homeassistant_constraint_packages": list(
+            validate_compatibility._OPTIONAL_HA_CONSTRAINED_TEST_DEPS
+        ),
         "test_harness_package": validate_compatibility._TEST_HARNESS_PACKAGE,
     }
 
@@ -1147,6 +1151,110 @@ def test_main_outputs_transitive_compatibility_specs(
     assert validate_compatibility.orjson.loads(capsys.readouterr().out) == expected
 
 
+def test_main_parse_constraint_spec_success(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Print parsed package spec when package is found in requirements."""
+    monkeypatch.setattr(
+        validate_compatibility.sys,
+        "stdin",
+        io.StringIO("home-assistant-intents==2026.6.1\n"),
+    )
+    monkeypatch.setattr(
+        validate_compatibility.sys,
+        "argv",
+        [
+            "validate_compatibility.py",
+            "--parse-constraint-spec",
+            "home-assistant-intents",
+        ],
+    )
+
+    validate_compatibility.main()
+    assert capsys.readouterr().out == "home-assistant-intents==2026.6.1\n"
+
+
+def test_main_parse_constraint_spec_missing_without_allow_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Exit with error when package is missing and --allow-missing is not specified."""
+    monkeypatch.setattr(
+        validate_compatibility.sys,
+        "stdin",
+        io.StringIO("other-package==1.0.0\n"),
+    )
+    monkeypatch.setattr(
+        validate_compatibility.sys,
+        "argv",
+        [
+            "validate_compatibility.py",
+            "--parse-constraint-spec",
+            "gazetteer-matcher",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as raised:
+        validate_compatibility.main()
+
+    assert raised.value.code == 1
+    assert "VALIDATION_ERROR: Could not find 'gazetteer-matcher'" in capsys.readouterr().out
+
+
+def test_main_parse_constraint_spec_missing_with_allow_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Exit cleanly with empty output when package is missing and --allow-missing is specified."""
+    monkeypatch.setattr(
+        validate_compatibility.sys,
+        "stdin",
+        io.StringIO("other-package==1.0.0\n"),
+    )
+    monkeypatch.setattr(
+        validate_compatibility.sys,
+        "argv",
+        [
+            "validate_compatibility.py",
+            "--parse-constraint-spec",
+            "gazetteer-matcher",
+            "--allow-missing",
+        ],
+    )
+
+    validate_compatibility.main()
+    assert capsys.readouterr().out == ""
+
+
+def test_main_parse_constraint_spec_malformed_with_allow_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Exit with error when requirements text is malformed even if --allow-missing is specified."""
+    monkeypatch.setattr(
+        validate_compatibility.sys,
+        "stdin",
+        io.StringIO("gazetteer-matcher>=1.0.0\n"),
+    )
+    monkeypatch.setattr(
+        validate_compatibility.sys,
+        "argv",
+        [
+            "validate_compatibility.py",
+            "--parse-constraint-spec",
+            "gazetteer-matcher",
+            "--allow-missing",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as raised:
+        validate_compatibility.main()
+
+    assert raised.value.code == 1
+    assert "VALIDATION_ERROR: Invalid 'gazetteer-matcher' requirement" in capsys.readouterr().out
+
+
 def test_verify_pair_requires_uv_before_inspection(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1227,11 +1335,43 @@ def test_parse_requirements_dependency_version_accepts_pep440_versions() -> None
 
 
 def test_parse_requirements_dependency_version_rejects_missing_version_token() -> None:
-    """Malformed requirement pins should raise ValueError instead of IndexError."""
+    """Malformed requirement pins without a version should raise ValueError."""
     with pytest.raises(ValueError, match="expected a version after '=='"):
+        validate_compatibility._parse_requirements_dependency_version(
+            "home-assistant-intents==\n",
+            "home-assistant-intents",
+        )
+
+
+def test_parse_requirements_dependency_version_rejects_malformed_requirement_entry() -> None:
+    """Malformed requirement entries for the target package should raise ValueError."""
+    with pytest.raises(ValueError, match="malformed requirement entry"):
         validate_compatibility._parse_requirements_dependency_version(
             "home-assistant-intents== ; python_version >= '3.14'\n",
             "home-assistant-intents",
+        )
+
+
+def test_parse_requirements_dependency_version_rejects_non_exact_version_pin() -> None:
+    """Non-exact version pins (>=, ==*, etc.) should raise ValueError."""
+    with pytest.raises(ValueError, match="expected an exact '==' version pin"):
+        validate_compatibility._parse_requirements_dependency_version(
+            "home-assistant-intents>=2026.6.1\n",
+            "home-assistant-intents",
+        )
+    with pytest.raises(ValueError, match="expected an exact '==' version pin"):
+        validate_compatibility._parse_requirements_dependency_version(
+            "home-assistant-intents==2026.6.*\n",
+            "home-assistant-intents",
+        )
+
+
+def test_parse_requirements_dependency_version_rejects_invalid_package_name() -> None:
+    """Invalid package name queries should raise ValueError."""
+    with pytest.raises(ValueError, match="Invalid package_name"):
+        validate_compatibility._parse_requirements_dependency_version(
+            "home-assistant-intents==2026.6.1\n",
+            "invalid$package",
         )
 
 
@@ -1249,10 +1389,16 @@ def test_resolve_test_dependency_versions_uses_ha_requirements(
         "_get_hassil_version",
         lambda _ha_ver: "2.0.5",
     )
+
+    def fake_required_version(_ha_ver: str, package: str) -> str:
+        if package in ASSIST_RUNTIME_VERSIONS:
+            return ASSIST_RUNTIME_VERSIONS[package]
+        raise validate_compatibility.PackageConstraintNotFoundError(package)
+
     monkeypatch.setattr(
         validate_compatibility,
         "_get_required_package_version",
-        lambda _ha_ver, package: ASSIST_RUNTIME_VERSIONS[package],
+        fake_required_version,
     )
 
     assert validate_compatibility._resolve_test_dependency_versions(
@@ -1264,6 +1410,99 @@ def test_resolve_test_dependency_versions_uses_ha_requirements(
         "pytest-homeassistant-custom-component": "0.13.190",
         **ASSIST_RUNTIME_VERSIONS,
     }
+
+
+def test_resolve_test_dependency_versions_includes_gazetteer_when_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The compatibility runner should include gazetteer-matcher when present in constraints."""
+    versions_with_gazetteer = {
+        **ASSIST_RUNTIME_VERSIONS,
+        "gazetteer-matcher": "1.0.0",
+    }
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_get_home_assistant_intents_version",
+        lambda _ha_ver: "2026.8.25",
+    )
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_get_hassil_version",
+        lambda _ha_ver: "3.12.0",
+    )
+
+    def fake_required_version_with_gazetteer(_ha_ver: str, package: str) -> str:
+        if package in versions_with_gazetteer:
+            return versions_with_gazetteer[package]
+        raise validate_compatibility.PackageConstraintNotFoundError(package)
+
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_get_required_package_version",
+        fake_required_version_with_gazetteer,
+    )
+
+    assert validate_compatibility._resolve_test_dependency_versions(
+        "2026.9.0b0",
+        "0.13.358",
+    ) == {
+        "home-assistant-intents": "2026.8.25",
+        "hassil": "3.12.0",
+        "pytest-homeassistant-custom-component": "0.13.358",
+        **ASSIST_RUNTIME_VERSIONS,
+        "gazetteer-matcher": "1.0.0",
+    }
+
+
+def test_get_optional_package_version_handles_missing_package(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Return None when an optional package is not in requirements."""
+
+    def raise_not_found(_ha_ver: str, _pkg: str) -> str:
+        raise validate_compatibility.PackageConstraintNotFoundError("not found")
+
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_get_required_package_version",
+        raise_not_found,
+    )
+    result = validate_compatibility._get_optional_package_version("2024.12.0", "gazetteer-matcher")
+    assert result is None
+
+
+def test_get_optional_package_version_propagates_fetch_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Propagate fetch failures instead of treating them as absent packages."""
+
+    def raise_fetch_error(_ha_ver: str, _pkg: str) -> str:
+        raise RuntimeError("Fetch failed from all endpoints")
+
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_get_required_package_version",
+        raise_fetch_error,
+    )
+    with pytest.raises(RuntimeError, match="Fetch failed from all endpoints"):
+        validate_compatibility._get_optional_package_version("2026.9.0b0", "gazetteer-matcher")
+
+
+def test_get_optional_package_version_propagates_malformed_constraint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Propagate malformed constraint syntax errors instead of treating them as absent packages."""
+
+    def raise_syntax_error(_ha_ver: str, _pkg: str) -> str:
+        raise ValueError("Invalid requirement syntax")
+
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_get_required_package_version",
+        raise_syntax_error,
+    )
+    with pytest.raises(ValueError, match="Invalid requirement syntax"):
+        validate_compatibility._get_optional_package_version("2026.9.0b0", "gazetteer-matcher")
 
 
 def test_verify_python_version_compatibility_satisfied(
@@ -1318,3 +1557,38 @@ def test_verify_python_version_compatibility_raises_fetch_failure(
             Path("python"),
             "2026.3.0",
         )
+
+
+def test_fetch_home_assistant_package_constraints_cdn_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fallback to GitHub when CDN fetch fails."""
+    calls: list[str] = []
+
+    def fake_fetch(url: str) -> str:
+        calls.append(url)
+        if "jsdelivr" in url:
+            raise OSError("CDN timeout")
+        return "fake-package==1.0.0\n"
+
+    monkeypatch.setattr(validate_compatibility, "_fetch_remote_text", fake_fetch)
+    result = validate_compatibility._fetch_home_assistant_package_constraints("2026.9.0b0")
+    assert result == "fake-package==1.0.0\n"
+    assert len(calls) == 2
+
+
+def test_fetch_home_assistant_package_constraints_raises_on_all_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Raise RuntimeError when all endpoints fail to fetch constraints."""
+
+    def raise_connection_error(_url: str) -> str:
+        raise OSError("Connection refused")
+
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_fetch_remote_text",
+        raise_connection_error,
+    )
+    with pytest.raises(RuntimeError, match="Failed to fetch Home Assistant package constraints"):
+        validate_compatibility._fetch_home_assistant_package_constraints("2026.9.0b0")
