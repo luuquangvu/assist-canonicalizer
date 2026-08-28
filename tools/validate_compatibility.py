@@ -45,12 +45,17 @@ except ImportError:
     )
 
 
+class PackageConstraintNotFoundError(ValueError):
+    """Raised when a package is genuinely not found in Home Assistant package constraints."""
+
+
 _REPO_ROOT = str(Path(__file__).resolve().parent.parent)
 
 _VENVS_ROOT = os.path.join(_REPO_ROOT, ".venvs")
 
 _VENV_DEPENDENCY_MARKER = ".assist_canonicalizer_test_dependencies.json"
 
+_GAZETTEER_PACKAGE = "gazetteer-matcher"
 _HASSIL_PACKAGE = "hassil"
 _INTENTS_PACKAGE = "home-assistant-intents"
 _TEST_HARNESS_PACKAGE = "pytest-homeassistant-custom-component"
@@ -66,6 +71,7 @@ _HA_CONSTRAINED_TEST_DEPS = (
     _INTENTS_PACKAGE,
     *_ASSIST_RUNTIME_PACKAGES,
 )
+_OPTIONAL_HA_CONSTRAINED_TEST_DEPS = (_GAZETTEER_PACKAGE,)
 _REQUIRED_TEST_DEPS = (
     *_HA_CONSTRAINED_TEST_DEPS,
     "pytest",
@@ -126,6 +132,7 @@ class RequiredTestDependencyMetadata(TypedDict):
 
     required_packages: Sequence[str]
     homeassistant_constraint_packages: Sequence[str]
+    optional_homeassistant_constraint_packages: Sequence[str]
     test_harness_package: str
 
 
@@ -134,6 +141,7 @@ def _required_test_dependency_metadata() -> RequiredTestDependencyMetadata:
     return {
         "required_packages": _REQUIRED_TEST_DEPS,
         "homeassistant_constraint_packages": _HA_CONSTRAINED_TEST_DEPS,
+        "optional_homeassistant_constraint_packages": _OPTIONAL_HA_CONSTRAINED_TEST_DEPS,
         "test_harness_package": _TEST_HARNESS_PACKAGE,
     }
 
@@ -240,48 +248,51 @@ def _write_venv_dependency_marker(
     )
 
 
-def _extract_requirement_base_name(spec: str) -> str:
-    """Extract base package name from a requirement specifier."""
-    try:
-        return Requirement(spec).name
-    except InvalidRequirement:
-        return spec.split("[", 1)[0].split(";", 1)[0].split("=", 1)[0].strip()
-
-
 def _parse_requirements_dependency_version(
     requirements_text: str,
     package_name: str,
     source_name: str = "package_constraints.txt",
 ) -> str:
     """Return the exact package version from a requirements file."""
-    base_name = _extract_requirement_base_name(package_name)
-    package = _validate_package_name("package_name", base_name)
+    package = _validate_package_name("package_name", normalize_package_name(package_name))
+
     for raw_line in requirements_text.splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
-        requirement_name, separator, version_text = line.partition("==")
-        if separator != "==":
-            continue
+
         try:
-            req_base = _extract_requirement_base_name(requirement_name.strip())
-            requirement_package = _validate_package_name(
-                "requirements_package_name",
-                req_base,
-            )
-        except ValueError:
+            req = Requirement(line)
+        except InvalidRequirement as err:
+            raw_target = normalize_package_name(line.split("==")[0])
+            if raw_target == package:
+                if line.partition("==")[1] == "==" and not line.partition("==")[2].strip():
+                    raise ValueError(
+                        f"Invalid {package!r} requirement in Home Assistant {source_name}; "
+                        "expected a version after '=='."
+                    ) from err
+                raise ValueError(
+                    f"Invalid {package!r} requirement in Home Assistant {source_name}; "
+                    f"malformed requirement entry {line!r}: {err}"
+                ) from err
             continue
-        if requirement_package != package:
-            continue
-        version_tokens = version_text.split(";", 1)[0].strip().split()
-        if not version_tokens:
-            raise ValueError(
-                f"Invalid {package!r} requirement in Home Assistant {source_name}; "
-                "expected a version after '=='."
-            )
-        version = version_tokens[0]
-        return _validate_package_version(f"{package}_version", version)
-    raise ValueError(f"Could not find {package!r} in Home Assistant {source_name}")
+
+        if normalize_package_name(req.name) == package:
+            specifiers = list(req.specifier)
+            if (
+                len(specifiers) != 1
+                or specifiers[0].operator != "=="
+                or "*" in specifiers[0].version
+            ):
+                raise ValueError(
+                    f"Invalid {package!r} requirement in Home Assistant {source_name}; "
+                    f"expected an exact '==' version pin, got {line!r}."
+                )
+            return _validate_package_version(f"{package}_version", specifiers[0].version)
+
+    raise PackageConstraintNotFoundError(
+        f"Could not find {package!r} in Home Assistant {source_name}"
+    )
 
 
 def _fetch_remote_text(url: str) -> str:
@@ -293,6 +304,24 @@ def _fetch_remote_text(url: str) -> str:
         return response.read().decode("utf-8")
 
 
+def _fetch_home_assistant_package_constraints(ha_ver: str) -> str:
+    """Fetch Home Assistant package_constraints.txt from CDN or GitHub."""
+    version = _validate_version_label("ha_ver", ha_ver)
+    cdn_url = _HA_CONSTRAINTS_CDN_URL_TEMPLATE.format(ha_version=version)
+    github_url = _HA_CONSTRAINTS_GITHUB_URL_TEMPLATE.format(ha_version=version)
+    last_err: Exception | None = None
+
+    for url in (cdn_url, github_url):
+        try:
+            return _fetch_remote_text(url)
+        except (urllib.error.URLError, OSError, UnicodeDecodeError) as err:
+            last_err = err
+
+    raise RuntimeError(
+        f"Failed to fetch Home Assistant package constraints for {version}: {last_err}"
+    ) from last_err
+
+
 def _get_required_package_version(ha_ver: str, package_name: str) -> str:
     """Fetch the version for a package required by a Home Assistant tag constraints.
 
@@ -300,22 +329,8 @@ def _get_required_package_version(ha_ver: str, package_name: str) -> str:
     """
     version = _validate_version_label("ha_ver", ha_ver)
     package = _validate_package_name("package_name", package_name)
-
-    cdn_url = _HA_CONSTRAINTS_CDN_URL_TEMPLATE.format(ha_version=version)
-    github_url = _HA_CONSTRAINTS_GITHUB_URL_TEMPLATE.format(ha_version=version)
-    last_err: Exception | None = None
-
-    for url in (cdn_url, github_url):
-        try:
-            requirements_text = _fetch_remote_text(url)
-            return _parse_requirements_dependency_version(requirements_text, package)
-        except (urllib.error.URLError, OSError, ValueError) as err:
-            last_err = err
-
-    raise ValueError(
-        f"Failed to fetch Home Assistant package constraints for {version} "
-        f"and package {package}: {last_err}"
-    ) from last_err
+    requirements_text = _fetch_home_assistant_package_constraints(version)
+    return _parse_requirements_dependency_version(requirements_text, package)
 
 
 def _get_home_assistant_intents_version(ha_ver: str) -> str:
@@ -328,12 +343,24 @@ def _get_hassil_version(ha_ver: str) -> str:
     return _get_required_package_version(ha_ver, _HASSIL_PACKAGE)
 
 
+def _get_optional_package_version(ha_ver: str, package_name: str) -> str | None:
+    """Fetch the version for a package if present in Home Assistant tag constraints.
+
+    Returns None only if the package is genuinely absent from package_constraints.txt.
+    Propagates fetch failures and malformed constraint errors.
+    """
+    try:
+        return _get_required_package_version(ha_ver, package_name)
+    except PackageConstraintNotFoundError:
+        return None
+
+
 def _resolve_test_dependency_versions(
     ha_ver: str,
     harness_ver: str,
 ) -> dict[str, str]:
     """Return Home Assistant test dependency versions."""
-    return {
+    versions = {
         _INTENTS_PACKAGE: _get_home_assistant_intents_version(ha_ver),
         _HASSIL_PACKAGE: _get_hassil_version(ha_ver),
         _TEST_HARNESS_PACKAGE: _validate_version_label(
@@ -345,6 +372,9 @@ def _resolve_test_dependency_versions(
             for package in _ASSIST_RUNTIME_PACKAGES
         },
     }
+    if gazetteer_version := _get_optional_package_version(ha_ver, _GAZETTEER_PACKAGE):
+        versions[_GAZETTEER_PACKAGE] = gazetteer_version
+    return versions
 
 
 def _test_dep_packages(test_dependency_versions: dict[str, str]) -> tuple[str, ...]:
@@ -1445,6 +1475,11 @@ def main() -> None:
         help="Parse exact constraint spec for a package from requirements text on stdin",
     )
     parser.add_argument(
+        "--allow-missing",
+        action="store_true",
+        help="Exit successfully with no output if the package constraint is missing",
+    )
+    parser.add_argument(
         "--verify-pair-python",
         type=Path,
         help="Verify an installed harness pair using this Python executable",
@@ -1496,6 +1531,11 @@ def main() -> None:
                 constraints_text, args.parse_constraint_spec
             )
             print(f"{args.parse_constraint_spec}=={version}", flush=True)
+        except PackageConstraintNotFoundError as err:
+            if args.allow_missing:
+                return
+            print(f"VALIDATION_ERROR: {err}", flush=True)
+            sys.exit(1)
         except (ValueError, OSError) as err:
             print(f"VALIDATION_ERROR: {err}", flush=True)
             sys.exit(1)

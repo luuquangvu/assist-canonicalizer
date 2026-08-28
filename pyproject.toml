@@ -8,6 +8,7 @@ dependencies = ["rapidfuzz>=3.14.2"]
 
 [dependency-groups]
 dev = [
+  "gazetteer-matcher",
   "hassil",
   "home-assistant-intents",
   "homeassistant",
@@ -28,6 +29,7 @@ dev = [
 ]
 ha-benchmark = [
   "colorlog",
+  "gazetteer-matcher",
   "ha-ffmpeg",
   "hassil",
   "home-assistant-frontend",
