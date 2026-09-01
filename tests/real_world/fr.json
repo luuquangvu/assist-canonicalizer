@@ -682,7 +682,7 @@
       }
     },
     {
-      "query": "éteins le ballon d'eau chaude",
+      "query": "éteins l'alimentation du chauffe-eau",
       "language": "fr",
       "expected_intent": "HassTurnOff",
       "expected_canonical": "éteins le chauffe-eau",
@@ -692,7 +692,7 @@
       }
     },
     {
-      "query": "lance l'aspiration",
+      "query": "lance le robot aspirateur",
       "language": "fr",
       "expected_intent": "HassVacuumStart",
       "expected_canonical": "démarre l'aspirateur",
@@ -702,10 +702,10 @@
       }
     },
     {
-      "query": "allume la télé",
+      "query": "allume ma télévision",
       "language": "fr",
       "expected_intent": "HassTurnOn",
-      "expected_canonical": "allume télévision",
+      "expected_canonical": "allume la télévision",
       "category": "synonym_paraphrase",
       "expected_slots": {
         "name": "télévision"
@@ -722,7 +722,7 @@
       }
     },
     {
-      "query": "mets en marche l'aspirateur",
+      "query": "démarre le nettoyage de l'aspirateur",
       "language": "fr",
       "expected_intent": "HassVacuumStart",
       "expected_canonical": "démarre l'aspirateur",
@@ -766,7 +766,7 @@
       }
     },
     {
-      "query": "eteins la television",
+      "query": "etein la television",
       "language": "fr",
       "expected_intent": "HassTurnOff",
       "expected_canonical": "éteins la télévision",

@@ -350,7 +350,7 @@ def _context_satellite_id(value: object, context: str) -> str | None:
     if set(value) != {"area"} or not isinstance(area, str):
         raise BenchmarkError(f"{context}.context is not supported by the managed fixture")
     normalized_area = _normalized_text(area)
-    if normalized_area not in {"living room", "wohnzimmer", "salon", "woonkamer"}:
+    if normalized_area not in {"living room", "wohnzimmer", "salon", "woonkamer", "phòng khách"}:
         raise BenchmarkError(f"{context}.context area {area!r} is not represented by the fixture")
     return CONTEXT_SATELLITE_ID
 

@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
 from pytest_homeassistant_custom_component.common import MockConfigEntry as HassMockConfigEntry
-from voluptuous import Invalid
+
+if TYPE_CHECKING:
+    from voluptuous import Invalid
+else:
+    try:
+        from probatio import Invalid
+    except ImportError:
+        from voluptuous import Invalid
 
 from custom_components.assist_canonicalizer.candidate import Candidate
 from custom_components.assist_canonicalizer.const import (

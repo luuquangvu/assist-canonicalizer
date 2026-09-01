@@ -105,120 +105,88 @@
       }
     },
     {
-      "query": "bặt đèn phòng khách",
+      "query": "bây giờ là mấy giờ",
       "language": "vi",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "bật đèn phòng khách",
-      "category": "spelling_mistake",
+      "expected_intent": "HassGetCurrentTime",
+      "expected_canonical": "bây giờ là mấy giờ",
+      "category": "exact_match",
+      "expected_slots": {}
+    },
+    {
+      "query": "mấy giờ rồi",
+      "language": "vi",
+      "expected_intent": "HassGetCurrentTime",
+      "expected_canonical": "mấy giờ rồi",
+      "category": "exact_match",
+      "expected_slots": {}
+    },
+    {
+      "query": "hôm nay là ngày mấy",
+      "language": "vi",
+      "expected_intent": "HassGetCurrentDate",
+      "expected_canonical": "hôm nay là ngày mấy",
+      "category": "exact_match",
+      "expected_slots": {}
+    },
+    {
+      "query": "hẹn giờ 5 phút",
+      "language": "vi",
+      "expected_intent": "HassStartTimer",
+      "expected_canonical": "hẹn giờ 5 phút",
+      "category": "exact_match",
       "expected_slots": {
-        "area": "phòng khách",
-        "domain": "light"
+        "minutes": "5"
       }
     },
     {
-      "query": "tát quạt phòng tắm",
+      "query": "đặt hẹn giờ 10 phút",
       "language": "vi",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "tắt quạt phòng tắm",
-      "category": "spelling_mistake",
+      "expected_intent": "HassStartTimer",
+      "expected_canonical": "đặt hẹn giờ 10 phút",
+      "category": "exact_match",
       "expected_slots": {
-        "name": "quạt",
-        "area": "phòng tắm"
+        "minutes": "10"
       }
     },
     {
-      "query": "mở của sổ phòng ngủ",
+      "query": "tạm dừng hẹn giờ",
       "language": "vi",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "mở cửa sổ phòng ngủ",
-      "category": "spelling_mistake",
-      "expected_slots": {
-        "name": "cửa sổ phòng ngủ"
-      }
+      "expected_intent": "HassPauseTimer",
+      "expected_canonical": "tạm dừng hẹn giờ",
+      "category": "exact_match",
+      "expected_slots": {}
     },
     {
-      "query": "tắk bình nóng lạnh",
+      "query": "tiếp tục hẹn giờ",
       "language": "vi",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "tắt bình nóng lạnh",
-      "category": "spelling_mistake",
-      "expected_slots": {
-        "name": "bình nóng lạnh"
-      }
+      "expected_intent": "HassUnpauseTimer",
+      "expected_canonical": "tiếp tục hẹn giờ",
+      "category": "exact_match",
+      "expected_slots": {}
     },
     {
-      "query": "bặt đền",
+      "query": "hủy hẹn giờ",
       "language": "vi",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "bật đèn",
-      "category": "spelling_mistake",
-      "expected_slots": {
-        "name": "đèn"
-      }
+      "expected_intent": "HassCancelTimer",
+      "expected_canonical": "hủy hẹn giờ",
+      "category": "exact_match",
+      "expected_slots": {}
     },
     {
-      "query": "tắk quạt",
+      "query": "hủy tất cả hẹn giờ",
       "language": "vi",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "tắt quạt",
-      "category": "spelling_mistake",
-      "expected_slots": {
-        "name": "quạt"
-      }
+      "expected_intent": "HassCancelAllTimers",
+      "expected_canonical": "hủy tất cả hẹn giờ",
+      "category": "exact_match",
+      "expected_slots": {}
     },
     {
-      "query": "đómg cửa sổ phòng ngủ",
+      "query": "còn bao nhiêu thời gian",
       "language": "vi",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "đóng cửa sổ phòng ngủ",
-      "category": "spelling_mistake",
-      "expected_slots": {
-        "name": "cửa sổ phòng ngủ"
-      }
-    },
-    {
-      "query": "tắ bình nóng lạnh",
-      "language": "vi",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "tắt bình nóng lạnh",
-      "category": "spelling_mistake",
-      "expected_slots": {
-        "name": "bình nóng lạnh"
-      }
-    },
-    {
-      "query": "tát đèn phòng khách",
-      "language": "vi",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "tắt đèn phòng khách",
-      "category": "spelling_mistake",
-      "expected_slots": {
-        "name": "đèn",
-        "area": "phòng khách"
-      }
-    },
-    {
-      "query": "bặt quạt phòng tắm",
-      "language": "vi",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "bật quạt phòng tắm",
-      "category": "spelling_mistake",
-      "expected_slots": {
-        "area": "phòng tắm",
-        "domain": "fan",
-        "name": "tất cả"
-      }
-    },
-    {
-      "query": "bật đèn phòng khách lên nhé",
-      "language": "vi",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "bật đèn phòng khách lên",
-      "category": "extra_words",
-      "expected_slots": {
-        "area": "phòng khách",
-        "domain": "light"
-      }
+      "expected_intent": "HassTimerStatus",
+      "expected_canonical": "còn bao nhiêu thời gian",
+      "category": "exact_match",
+      "expected_slots": {}
     },
     {
       "query": "làm ơn tắt quạt phòng tắm đi",
@@ -232,299 +200,140 @@
       }
     },
     {
-      "query": "hộ cái mở cửa sổ phòng ngủ ra",
-      "language": "vi",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "mở cửa sổ phòng ngủ",
-      "category": "extra_words",
-      "expected_slots": {
-        "name": "cửa sổ phòng ngủ"
-      }
-    },
-    {
-      "query": "bật hộ tôi cái bình nóng lạnh với",
-      "language": "vi",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "bật bình nóng lạnh",
-      "category": "extra_words",
-      "expected_slots": {
-        "name": "bình nóng lạnh"
-      }
-    },
-    {
-      "query": "tắt cái đèn ngủ",
-      "language": "vi",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "tắt đèn",
-      "category": "extra_words",
-      "expected_slots": {
-        "name": "đèn"
-      }
-    },
-    {
-      "query": "vui lòng bật đèn phòng khách giùm",
+      "query": "làm ơn bật đèn phòng khách",
       "language": "vi",
       "expected_intent": "HassTurnOn",
       "expected_canonical": "bật đèn phòng khách",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "area": "phòng khách",
         "domain": "light"
       }
     },
     {
-      "query": "tắt giùm tôi cái quạt phòng tắm",
+      "query": "vui lòng tắt quạt phòng tắm",
       "language": "vi",
       "expected_intent": "HassTurnOff",
       "expected_canonical": "tắt quạt phòng tắm",
-      "category": "extra_words",
+      "category": "supported_filler",
       "expected_slots": {
         "name": "quạt",
         "area": "phòng tắm"
       }
     },
     {
-      "query": "mở cửa sổ phòng ngủ ra đi",
-      "language": "vi",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "mở cửa sổ phòng ngủ",
-      "category": "extra_words",
-      "expected_slots": {
-        "name": "cửa sổ phòng ngủ"
-      }
-    },
-    {
-      "query": "bật bình nóng lạnh lên hộ với",
-      "language": "vi",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "bật bình nóng lạnh",
-      "category": "extra_words",
-      "expected_slots": {
-        "name": "bình nóng lạnh"
-      }
-    },
-    {
-      "query": "tắt hộ cái quạt",
-      "language": "vi",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "tắt quạt",
-      "category": "extra_words",
-      "expected_slots": {
-        "name": "quạt"
-      }
-    },
-    {
-      "query": "bật đèn khách",
-      "language": "vi",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "bật đèn phòng khách",
-      "category": "missing_words",
-      "expected_slots": {
-        "area": "phòng khách",
-        "domain": "light"
-      }
-    },
-    {
-      "query": "tắt quạt tắm",
-      "language": "vi",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "tắt quạt phòng tắm",
-      "category": "missing_words",
-      "expected_slots": {
-        "name": "quạt",
-        "area": "phòng tắm"
-      }
-    },
-    {
-      "query": "mở cửa ngủ",
-      "language": "vi",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "mở cửa sổ phòng ngủ",
-      "category": "missing_words",
-      "expected_slots": {
-        "name": "cửa sổ phòng ngủ"
-      }
-    },
-    {
-      "query": "bật bình nóng",
-      "language": "vi",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "bật bình nóng lạnh",
-      "category": "missing_words",
-      "expected_slots": {
-        "name": "bình nóng lạnh"
-      }
-    },
-    {
-      "query": "tắt đèn khách",
-      "language": "vi",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "tắt đèn phòng khách",
-      "category": "missing_words",
-      "expected_slots": {
-        "name": "đèn",
-        "area": "phòng khách"
-      }
-    },
-    {
-      "query": "bật quạt tắm",
-      "language": "vi",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "bật quạt phòng tắm",
-      "category": "missing_words",
-      "expected_slots": {
-        "area": "phòng tắm",
-        "domain": "fan",
-        "name": "tất cả"
-      }
-    },
-    {
-      "query": "đóng cửa ngủ",
+      "query": "xin đóng cửa sổ phòng ngủ",
       "language": "vi",
       "expected_intent": "HassTurnOff",
       "expected_canonical": "đóng cửa sổ phòng ngủ",
-      "category": "missing_words",
+      "category": "supported_filler",
       "expected_slots": {
         "name": "cửa sổ phòng ngủ"
       }
     },
     {
-      "query": "tắt bình nóng",
+      "query": "hãy tắt bình nóng lạnh",
       "language": "vi",
       "expected_intent": "HassTurnOff",
       "expected_canonical": "tắt bình nóng lạnh",
-      "category": "missing_words",
+      "category": "supported_filler",
       "expected_slots": {
         "name": "bình nóng lạnh"
       }
     },
     {
-      "query": "bật khách",
+      "query": "làm ơn bật bình nóng lạnh",
       "language": "vi",
       "expected_intent": "HassTurnOn",
-      "expected_canonical": "bật đèn phòng khách",
-      "category": "missing_words",
-      "expected_slots": {
-        "area": "phòng khách",
-        "domain": "light"
-      }
-    },
-    {
-      "query": "tắt tắm",
-      "language": "vi",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "tắt quạt phòng tắm",
-      "category": "missing_words",
-      "expected_slots": {
-        "name": "quạt",
-        "area": "phòng tắm"
-      }
-    },
-    {
-      "query": "bặt giúp em cái đèn phòn khách với",
-      "language": "vi",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "bật đèn phòng khách",
-      "category": "complex_distortion",
-      "expected_slots": {
-        "area": "phòng khách",
-        "domain": "light"
-      }
-    },
-    {
-      "query": "tát dùm cái quạt phòg tắm đi",
-      "language": "vi",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "tắt quạt phòng tắm",
-      "category": "complex_distortion",
-      "expected_slots": {
-        "name": "quạt",
-        "area": "phòng tắm"
-      }
-    },
-    {
-      "query": "mỡ hộ cửa sỗ phòg ngủ cái",
-      "language": "vi",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "mở cửa sổ phòng ngủ",
-      "category": "complex_distortion",
-      "expected_slots": {
-        "name": "cửa sổ phòng ngủ"
-      }
-    },
-    {
-      "query": "tắk dùm em bìh nón lạnh nhé",
-      "language": "vi",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "tắt bình nóng lạnh",
-      "category": "complex_distortion",
+      "expected_canonical": "bật bình nóng lạnh",
+      "category": "supported_filler",
       "expected_slots": {
         "name": "bình nóng lạnh"
       }
     },
     {
-      "query": "bặt hộ e cái đền phòg kháh lên",
-      "language": "vi",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "bật đèn phòng khách lên",
-      "category": "complex_distortion",
-      "expected_slots": {
-        "area": "phòng khách",
-        "domain": "light"
-      }
-    },
-    {
-      "query": "tát hộ e cái quạt phòg tắh đi",
-      "language": "vi",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "tắt quạt phòng tắm đi",
-      "category": "complex_distortion",
-      "expected_slots": {
-        "name": "quạt",
-        "area": "phòng tắm"
-      }
-    },
-    {
-      "query": "mở hộ cửa sổ phòg ngủ giùm cái",
-      "language": "vi",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "mở cửa sổ phòng ngủ",
-      "category": "complex_distortion",
-      "expected_slots": {
-        "name": "cửa sổ phòng ngủ"
-      }
-    },
-    {
-      "query": "tắ dùm e bình nóng lạnh với",
-      "language": "vi",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "tắt bình nóng lạnh",
-      "category": "complex_distortion",
-      "expected_slots": {
-        "name": "bình nóng lạnh"
-      }
-    },
-    {
-      "query": "tắk dùm e cái đền khách đi",
+      "query": "vui lòng tắt đèn phòng khách",
       "language": "vi",
       "expected_intent": "HassTurnOff",
       "expected_canonical": "tắt đèn phòng khách",
-      "category": "complex_distortion",
+      "category": "supported_filler",
       "expected_slots": {
         "name": "đèn",
         "area": "phòng khách"
       }
     },
     {
-      "query": "bặt dùm e cái quạt tắm với",
+      "query": "hãy bật đèn phòng ngủ",
       "language": "vi",
       "expected_intent": "HassTurnOn",
-      "expected_canonical": "bật quạt phòng tắm",
-      "category": "complex_distortion",
+      "expected_canonical": "bật đèn phòng ngủ",
+      "category": "supported_filler",
       "expected_slots": {
-        "area": "phòng tắm",
-        "domain": "fan",
-        "name": "tất cả"
+        "area": "phòng ngủ",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "làm ơn hẹn giờ 5 phút",
+      "language": "vi",
+      "expected_intent": "HassStartTimer",
+      "expected_canonical": "hẹn giờ 5 phút",
+      "category": "supported_filler",
+      "expected_slots": {
+        "minutes": "5"
+      }
+    },
+    {
+      "query": "làm ơn tạm dừng hẹn giờ",
+      "language": "vi",
+      "expected_intent": "HassPauseTimer",
+      "expected_canonical": "tạm dừng hẹn giờ",
+      "category": "supported_filler",
+      "expected_slots": {}
+    },
+    {
+      "query": "làm ơn tiếp tục hẹn giờ",
+      "language": "vi",
+      "expected_intent": "HassUnpauseTimer",
+      "expected_canonical": "tiếp tục hẹn giờ",
+      "category": "supported_filler",
+      "expected_slots": {}
+    },
+    {
+      "query": "làm ơn hủy hẹn giờ",
+      "language": "vi",
+      "expected_intent": "HassCancelTimer",
+      "expected_canonical": "hủy hẹn giờ",
+      "category": "supported_filler",
+      "expected_slots": {}
+    },
+    {
+      "query": "làm ơn hủy tất cả hẹn giờ",
+      "language": "vi",
+      "expected_intent": "HassCancelAllTimers",
+      "expected_canonical": "hủy tất cả hẹn giờ",
+      "category": "supported_filler",
+      "expected_slots": {}
+    },
+    {
+      "query": "vui lòng bật đèn phòng ngủ",
+      "language": "vi",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "bật đèn phòng ngủ",
+      "category": "supported_filler",
+      "expected_slots": {
+        "area": "phòng ngủ",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "xin hãy tắt bình nóng lạnh",
+      "language": "vi",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "tắt bình nóng lạnh",
+      "category": "supported_filler",
+      "expected_slots": {
+        "name": "bình nóng lạnh"
       }
     },
     {
@@ -700,14 +509,400 @@
       }
     },
     {
-      "query": "thắp đèn phòng khách",
+      "query": "robot hút bụi về sạc",
+      "language": "vi",
+      "expected_intent": "HassVacuumReturnToBase",
+      "expected_canonical": "robot hút bụi về sạc",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "name": "robot hút bụi"
+      }
+    },
+    {
+      "query": "robot hút bụi dọn dẹp",
+      "language": "vi",
+      "expected_intent": "HassVacuumStart",
+      "expected_canonical": "robot hút bụi dọn dẹp",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "name": "robot hút bụi"
+      }
+    },
+    {
+      "query": "thời tiết hôm nay thế nào",
+      "language": "vi",
+      "expected_intent": "HassGetWeather",
+      "expected_canonical": "thời tiết hôm nay thế nào",
+      "category": "intent_coverage",
+      "expected_slots": {}
+    },
+    {
+      "query": "mở cửa sổ phòng ngủ",
       "language": "vi",
       "expected_intent": "HassTurnOn",
-      "expected_canonical": "bật đèn phòng khách",
-      "category": "synonym_paraphrase",
+      "expected_canonical": "mở cửa sổ phòng ngủ",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "name": "cửa sổ phòng ngủ"
+      }
+    },
+    {
+      "query": "tắt điều hòa phòng khách",
+      "language": "vi",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "tắt điều hòa phòng khách",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "name": "điều hòa phòng khách"
+      }
+    },
+    {
+      "query": "bật điều hòa phòng khách",
+      "language": "vi",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "bật điều hòa phòng khách",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "name": "điều hòa phòng khách"
+      }
+    },
+    {
+      "query": "tắt đèn phòng ngủ",
+      "language": "vi",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "tắt đèn phòng ngủ",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "area": "phòng ngủ",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "bật đèn bếp",
+      "language": "vi",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "bật đèn bếp",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "area": "bếp",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "bật đèn phòng khách lên nhé",
+      "language": "vi",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "bật đèn phòng khách lên",
+      "category": "extra_words",
       "expected_slots": {
         "area": "phòng khách",
         "domain": "light"
+      }
+    },
+    {
+      "query": "hộ cái mở cửa sổ phòng ngủ ra",
+      "language": "vi",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "mở cửa sổ phòng ngủ",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "cửa sổ phòng ngủ"
+      }
+    },
+    {
+      "query": "bật hộ tôi cái bình nóng lạnh với",
+      "language": "vi",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "bật bình nóng lạnh",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "bình nóng lạnh"
+      }
+    },
+    {
+      "query": "vui lòng bật đèn phòng khách giùm",
+      "language": "vi",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "bật đèn phòng khách",
+      "category": "extra_words",
+      "expected_slots": {
+        "area": "phòng khách",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "tắt giùm tôi cái quạt phòng tắm",
+      "language": "vi",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "tắt quạt phòng tắm",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "quạt",
+        "area": "phòng tắm"
+      }
+    },
+    {
+      "query": "mở cửa sổ phòng ngủ ra đi",
+      "language": "vi",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "mở cửa sổ phòng ngủ",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "cửa sổ phòng ngủ"
+      }
+    },
+    {
+      "query": "bật bình nóng lạnh lên hộ với",
+      "language": "vi",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "bật bình nóng lạnh",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "bình nóng lạnh"
+      }
+    },
+    {
+      "query": "tắt hộ cái quạt",
+      "language": "vi",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "tắt quạt",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "quạt"
+      }
+    },
+    {
+      "query": "làm ơn bật đèn hành lang giúp tôi",
+      "language": "vi",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "bật đèn hành lang",
+      "category": "extra_words",
+      "expected_slots": {
+        "area": "hành lang",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "tắt cái đèn phòng khách đi nha",
+      "language": "vi",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "tắt đèn phòng khách đi",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "đèn",
+        "area": "phòng khách"
+      }
+    },
+    {
+      "query": "bật đèn khách",
+      "language": "vi",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "bật đèn phòng khách",
+      "category": "missing_words",
+      "expected_slots": {
+        "area": "phòng khách",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "tắt quạt tắm",
+      "language": "vi",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "tắt quạt phòng tắm",
+      "category": "missing_words",
+      "expected_slots": {
+        "name": "quạt",
+        "area": "phòng tắm"
+      }
+    },
+    {
+      "query": "mở cửa ngủ",
+      "language": "vi",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "mở cửa sổ phòng ngủ",
+      "category": "missing_words",
+      "expected_slots": {
+        "name": "cửa sổ phòng ngủ"
+      }
+    },
+    {
+      "query": "bật bình nóng",
+      "language": "vi",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "bật bình nóng lạnh",
+      "category": "missing_words",
+      "expected_slots": {
+        "name": "bình nóng lạnh"
+      }
+    },
+    {
+      "query": "tắt đèn khách",
+      "language": "vi",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "tắt đèn phòng khách",
+      "category": "missing_words",
+      "expected_slots": {
+        "name": "đèn",
+        "area": "phòng khách"
+      }
+    },
+    {
+      "query": "bật quạt tắm",
+      "language": "vi",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "bật quạt phòng tắm",
+      "category": "missing_words",
+      "expected_slots": {
+        "area": "phòng tắm",
+        "domain": "fan",
+        "name": "tất cả"
+      }
+    },
+    {
+      "query": "đóng cửa ngủ",
+      "language": "vi",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "đóng cửa sổ phòng ngủ",
+      "category": "missing_words",
+      "expected_slots": {
+        "name": "cửa sổ phòng ngủ"
+      }
+    },
+    {
+      "query": "tắt bình nóng",
+      "language": "vi",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "tắt bình nóng lạnh",
+      "category": "missing_words",
+      "expected_slots": {
+        "name": "bình nóng lạnh"
+      }
+    },
+    {
+      "query": "bật khách",
+      "language": "vi",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "bật đèn phòng khách",
+      "category": "missing_words",
+      "expected_slots": {
+        "area": "phòng khách",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "tắt tắm",
+      "language": "vi",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "tắt quạt phòng tắm",
+      "category": "missing_words",
+      "expected_slots": {
+        "name": "quạt",
+        "area": "phòng tắm"
+      }
+    },
+    {
+      "query": "bặt đèn phòng khách",
+      "language": "vi",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "bật đèn phòng khách",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "area": "phòng khách",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "tát quạt phòng tắm",
+      "language": "vi",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "tắt quạt phòng tắm",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "name": "quạt",
+        "area": "phòng tắm"
+      }
+    },
+    {
+      "query": "mở của sổ phòng ngủ",
+      "language": "vi",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "mở cửa sổ phòng ngủ",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "name": "cửa sổ phòng ngủ"
+      }
+    },
+    {
+      "query": "tắk bình nóng lạnh",
+      "language": "vi",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "tắt bình nóng lạnh",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "name": "bình nóng lạnh"
+      }
+    },
+    {
+      "query": "tắk quạt",
+      "language": "vi",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "tắt quạt",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "name": "quạt"
+      }
+    },
+    {
+      "query": "đómg cửa sổ phòng ngủ",
+      "language": "vi",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "đóng cửa sổ phòng ngủ",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "name": "cửa sổ phòng ngủ"
+      }
+    },
+    {
+      "query": "tắ bình nóng lạnh",
+      "language": "vi",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "tắt bình nóng lạnh",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "name": "bình nóng lạnh"
+      }
+    },
+    {
+      "query": "tát đèn phòng khách",
+      "language": "vi",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "tắt đèn phòng khách",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "name": "đèn",
+        "area": "phòng khách"
+      }
+    },
+    {
+      "query": "bật đèn phogn khách",
+      "language": "vi",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "bật đèn phòng khách",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "area": "phòng khách",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "tắt quat phòng tắm",
+      "language": "vi",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "tắt quạt phòng tắm",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "name": "quạt",
+        "area": "phòng tắm"
       }
     },
     {
@@ -762,7 +957,49 @@
       }
     },
     {
-      "query": "mở đèn phòng khách",
+      "query": "cho đèn hành lang sáng lên",
+      "language": "vi",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "bật đèn hành lang",
+      "category": "synonym_paraphrase",
+      "expected_slots": {
+        "area": "hành lang",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "bật sáng đèn phòng ngủ",
+      "language": "vi",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "bật đèn phòng ngủ",
+      "category": "synonym_paraphrase",
+      "expected_slots": {
+        "area": "phòng ngủ",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "ngắt nguồn bình nóng lạnh",
+      "language": "vi",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "tắt bình nóng lạnh",
+      "category": "synonym_paraphrase",
+      "expected_slots": {
+        "name": "bình nóng lạnh"
+      }
+    },
+    {
+      "query": "cho robot hút bụi bắt đầu dọn",
+      "language": "vi",
+      "expected_intent": "HassVacuumStart",
+      "expected_canonical": "robot hút bụi dọn dẹp",
+      "category": "synonym_paraphrase",
+      "expected_slots": {
+        "name": "robot hút bụi"
+      }
+    },
+    {
+      "query": "bật sáng bóng đèn phòng khách",
       "language": "vi",
       "expected_intent": "HassTurnOn",
       "expected_canonical": "bật đèn phòng khách",
@@ -803,49 +1040,6 @@
       }
     },
     {
-      "query": "khởi động đèn phòng khách",
-      "language": "vi",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "bật đèn phòng khách",
-      "category": "semantic_challenge",
-      "expected_slots": {
-        "area": "phòng khách",
-        "domain": "light"
-      }
-    },
-    {
-      "query": "cấp nguồn đèn phòng khách",
-      "language": "vi",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "bật đèn phòng khách",
-      "category": "semantic_challenge",
-      "expected_slots": {
-        "area": "phòng khách",
-        "domain": "light"
-      }
-    },
-    {
-      "query": "kéo rèm phòng khách",
-      "language": "vi",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "mở rèm phòng khách",
-      "category": "synonym_paraphrase",
-      "expected_slots": {
-        "name": "rèm phòng khách"
-      }
-    },
-    {
-      "query": "thắp đèn phòng khách lên",
-      "language": "vi",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "bật đèn phòng khách lên",
-      "category": "semantic_challenge",
-      "expected_slots": {
-        "area": "phòng khách",
-        "domain": "light"
-      }
-    },
-    {
       "query": "dừng quạt phòng tắm lại",
       "language": "vi",
       "expected_intent": "HassTurnOff",
@@ -854,72 +1048,6 @@
       "expected_slots": {
         "name": "quạt",
         "area": "phòng tắm"
-      }
-    },
-    {
-      "query": "mở đèn hành lang",
-      "language": "vi",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "bật đèn hành lang",
-      "category": "synonym_paraphrase",
-      "expected_slots": {
-        "area": "hành lang",
-        "domain": "light"
-      }
-    },
-    {
-      "query": "làm ơn bật đèn hành lang giúp tôi",
-      "language": "vi",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "bật đèn hành lang",
-      "category": "extra_words",
-      "expected_slots": {
-        "area": "hành lang",
-        "domain": "light"
-      }
-    },
-    {
-      "query": "bật đèn phogn khách",
-      "language": "vi",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "bật đèn phòng khách",
-      "category": "spelling_mistake",
-      "expected_slots": {
-        "area": "phòng khách",
-        "domain": "light"
-      }
-    },
-    {
-      "query": "cho đèn hành lang sáng lên",
-      "language": "vi",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "bật đèn hành lang",
-      "category": "synonym_paraphrase",
-      "expected_slots": {
-        "area": "hành lang",
-        "domain": "light"
-      }
-    },
-    {
-      "query": "tắt quat phòng tắm",
-      "language": "vi",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "tắt quạt phòng tắm",
-      "category": "spelling_mistake",
-      "expected_slots": {
-        "name": "quạt",
-        "area": "phòng tắm"
-      }
-    },
-    {
-      "query": "phòng khách tối quá bật đèn",
-      "language": "vi",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "bật đèn phòng khách",
-      "category": "complex_distortion",
-      "expected_slots": {
-        "area": "phòng khách",
-        "domain": "light"
       }
     },
     {
@@ -954,96 +1082,141 @@
       }
     },
     {
-      "query": "làm ơn bật đèn phòng khách",
+      "query": "cho máy hút bụi hoạt động",
+      "language": "vi",
+      "expected_intent": "HassVacuumStart",
+      "expected_canonical": "máy hút bụi dọn dẹp",
+      "category": "semantic_challenge",
+      "expected_slots": {
+        "name": "máy hút bụi"
+      }
+    },
+    {
+      "query": "bật sáng đèn phòng khách",
       "language": "vi",
       "expected_intent": "HassTurnOn",
       "expected_canonical": "bật đèn phòng khách",
-      "category": "supported_filler",
+      "category": "semantic_challenge",
       "expected_slots": {
         "area": "phòng khách",
         "domain": "light"
       }
     },
     {
-      "query": "vui lòng tắt quạt phòng tắm",
+      "query": "dừng điều hòa phòng khách",
+      "language": "vi",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "tắt điều hòa phòng khách",
+      "category": "semantic_challenge",
+      "expected_slots": {
+        "name": "điều hòa phòng khách"
+      }
+    },
+    {
+      "query": "bặt giúp em cái đèn phòn khách với",
+      "language": "vi",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "bật đèn phòng khách",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "area": "phòng khách",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "tát dùm cái quạt phòg tắm đi",
       "language": "vi",
       "expected_intent": "HassTurnOff",
       "expected_canonical": "tắt quạt phòng tắm",
-      "category": "supported_filler",
+      "category": "complex_distortion",
       "expected_slots": {
         "name": "quạt",
         "area": "phòng tắm"
       }
     },
     {
-      "query": "xin đóng cửa sổ phòng ngủ",
+      "query": "mỡ hộ cửa sỗ phòg ngủ cái",
       "language": "vi",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "đóng cửa sổ phòng ngủ",
-      "category": "supported_filler",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "mở cửa sổ phòng ngủ",
+      "category": "complex_distortion",
       "expected_slots": {
         "name": "cửa sổ phòng ngủ"
       }
     },
     {
-      "query": "hãy tắt bình nóng lạnh",
+      "query": "bặt hộ e cái đền phòg kháh lên",
+      "language": "vi",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "bật đèn phòng khách lên",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "area": "phòng khách",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "tát hộ e cái quạt phòg tắh đi",
+      "language": "vi",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "tắt quạt phòng tắm đi",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "name": "quạt",
+        "area": "phòng tắm"
+      }
+    },
+    {
+      "query": "mở hộ cửa sổ phòg ngủ giùm cái",
+      "language": "vi",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "mở cửa sổ phòng ngủ",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "name": "cửa sổ phòng ngủ"
+      }
+    },
+    {
+      "query": "tắ dùm e bình nóng lạnh với",
       "language": "vi",
       "expected_intent": "HassTurnOff",
       "expected_canonical": "tắt bình nóng lạnh",
-      "category": "supported_filler",
+      "category": "complex_distortion",
       "expected_slots": {
         "name": "bình nóng lạnh"
       }
     },
     {
-      "query": "bạn có thể bật đèn",
-      "language": "vi",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "bật đèn",
-      "category": "supported_filler",
-      "expected_slots": {
-        "name": "đèn"
-      }
-    },
-    {
-      "query": "xin hãy tắt quạt",
-      "language": "vi",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "tắt quạt",
-      "category": "supported_filler",
-      "expected_slots": {
-        "name": "quạt"
-      }
-    },
-    {
-      "query": "làm ơn bật bình nóng lạnh",
-      "language": "vi",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "bật bình nóng lạnh",
-      "category": "supported_filler",
-      "expected_slots": {
-        "name": "bình nóng lạnh"
-      }
-    },
-    {
-      "query": "vui lòng tắt đèn phòng khách",
+      "query": "tắk dùm e cái đền khách đi",
       "language": "vi",
       "expected_intent": "HassTurnOff",
       "expected_canonical": "tắt đèn phòng khách",
-      "category": "supported_filler",
+      "category": "complex_distortion",
       "expected_slots": {
         "name": "đèn",
         "area": "phòng khách"
       }
     },
     {
-      "query": "hãy bật đèn phòng ngủ",
+      "query": "bặt dùm e cái quạt tắm với",
       "language": "vi",
       "expected_intent": "HassTurnOn",
-      "expected_canonical": "bật đèn phòng ngủ",
-      "category": "supported_filler",
+      "expected_canonical": "bật quạt phòng tắm",
+      "category": "complex_distortion",
       "expected_slots": {
-        "area": "phòng ngủ",
+        "area": "phòng tắm",
+        "domain": "fan",
+        "name": "tất cả"
+      }
+    },
+    {
+      "query": "phòng khách tối quá bật đèn",
+      "language": "vi",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "bật đèn phòng khách",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "area": "phòng khách",
         "domain": "light"
       }
     }

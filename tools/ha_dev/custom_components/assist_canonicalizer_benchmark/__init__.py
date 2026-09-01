@@ -9,9 +9,18 @@ import time
 from collections import Counter
 from collections.abc import Mapping
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import orjson
-import voluptuous as vol
+
+if TYPE_CHECKING:
+    import voluptuous as vol
+else:
+    try:
+        import probatio as vol
+    except ImportError:
+        import voluptuous as vol
+
 from homeassistant.components.conversation.agent_manager import async_get_agent
 from homeassistant.components.conversation.const import HOME_ASSISTANT_AGENT
 from homeassistant.components.conversation.models import ConversationInput

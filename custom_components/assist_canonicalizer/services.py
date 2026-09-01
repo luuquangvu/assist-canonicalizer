@@ -8,9 +8,16 @@ import logging
 import time
 from collections.abc import Callable, Coroutine, Iterable, Mapping, Sequence
 from functools import partial
-from typing import TypedDict
+from typing import TYPE_CHECKING, TypedDict
 
-import voluptuous as vol
+if TYPE_CHECKING:
+    import voluptuous as vol
+else:
+    try:
+        import probatio as vol
+    except ImportError:
+        import voluptuous as vol
+
 from homeassistant.components.conversation.agent_manager import async_get_agent
 from homeassistant.components.conversation.const import HOME_ASSISTANT_AGENT
 from homeassistant.config_entries import ConfigEntry
