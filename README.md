@@ -175,11 +175,11 @@ The managed-live benchmark runs every query twice against the same Home Assistan
 
 <!-- BENCHMARK_OVERALL_START -->
 
-> Benchmark dependency versions: `Python` 3.14.6, `homeassistant` 2026.8.0, `hassil` 3.11.0, `home-assistant-intents` 2026.7.30.
+> Benchmark dependency versions: `Python` 3.14.6, `homeassistant` 2026.9.0b4, `hassil` 3.12.0, `home-assistant-intents` 2026.8.28.
 
 | Mode           | Assist Canonicalizer | Direct HassIL | Uplift (%p) | Recovered | Regressions prevented | Mismatch | Fallback | P50 ms | P95 ms |
 | :------------- | -------------------: | ------------: | ----------: | --------: | --------------------: | -------: | -------: | -----: | -----: |
-| `managed_live` |            **90.3%** |         47.9% |       +42.4 |       254 |                     5 |     1.2% |     8.5% |   95.5 |  283.6 |
+| `managed_live` |            **93.6%** |         50.2% |       +43.4 |       265 |                     3 |     0.3% |     6.1% |   89.1 |  279.5 |
 
 <!-- BENCHMARK_OVERALL_END -->
 
@@ -191,11 +191,11 @@ The managed-live benchmark runs every query twice against the same Home Assistan
 
 | Language | Assist Canonicalizer | Direct HassIL | Uplift (%p) | Recovered | Regressions prevented | Mismatch | Fallback | P50 ms | P95 ms |
 | :------- | -------------------: | ------------: | ----------: | --------: | --------------------: | -------: | -------: | -----: | -----: |
-| EN       |            **92.2%** |         52.7% |       +39.5 |        51 |                     0 |     0.0% |     7.8% |   69.2 |  292.3 |
-| DE       |            **91.0%** |         48.4% |       +42.6 |        52 |                     1 |     0.8% |     8.2% |  155.6 |  294.2 |
-| FR       |            **89.9%** |         50.4% |       +39.5 |        47 |                     1 |     2.5% |     7.6% |   98.6 |  309.0 |
-| NL       |            **89.9%** |         48.8% |       +41.1 |        53 |                     1 |     0.8% |     9.3% |   91.1 |  252.7 |
-| VI       |            **88.0%** |         37.0% |       +51.0 |        51 |                     2 |     2.0% |    10.0% |   72.4 |  177.7 |
+| EN       |            **97.5%** |         54.2% |       +43.3 |        52 |                     0 |     0.0% |     2.5% |   68.2 |  258.9 |
+| DE       |            **91.0%** |         48.4% |       +42.6 |        52 |                     1 |     0.8% |     8.2% |  126.6 |  304.8 |
+| FR       |            **92.4%** |         49.6% |       +42.9 |        51 |                     1 |     0.0% |     7.6% |  104.9 |  332.1 |
+| NL       |            **89.9%** |         48.8% |       +41.1 |        53 |                     1 |     0.8% |     9.3% |   70.2 |  240.0 |
+| VI       |            **97.5%** |         50.0% |       +47.5 |        57 |                     0 |     0.0% |     2.5% |   55.7 |  221.2 |
 
 <!-- BENCHMARK_LANGS_END -->
 

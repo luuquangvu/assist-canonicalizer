@@ -75,10 +75,10 @@ jobs:
       - name: Run Managed-Live Benchmark Gate
         run: >-
           uv run tools/benchmark.py
-          --min-intent-slot-accuracy 90.00
-          --max-mismatch-rate 1.50
-          --min-language-intent-slot-accuracy 87.00
-          --max-language-mismatch-rate 2.75
+          --min-intent-slot-accuracy 93.0
+          --max-mismatch-rate 0.5
+          --min-language-intent-slot-accuracy 89.5
+          --max-language-mismatch-rate 1.0
 
   setup-matrix:
     runs-on: ubuntu-latest

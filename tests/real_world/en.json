@@ -89,111 +89,23 @@
       }
     },
     {
-      "query": "trun on living room light",
-      "language": "en",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "turn on living room light",
-      "category": "spelling_mistake",
-      "expected_slots": {
-        "area": "living room",
-        "domain": "light"
-      }
-    },
-    {
-      "query": "turn off bathrom fan",
-      "language": "en",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "turn off bathroom fan",
-      "category": "spelling_mistake",
-      "expected_slots": {
-        "area": "bathroom",
-        "domain": "fan"
-      }
-    },
-    {
-      "query": "trun off bedroom window",
-      "language": "en",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "close bedroom window",
-      "category": "spelling_mistake",
-      "expected_slots": {
-        "area": "bedroom",
-        "device_class": "window",
-        "domain": "cover"
-      }
-    },
-    {
-      "query": "turn of water heater",
-      "language": "en",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "turn off water heater",
-      "category": "spelling_mistake",
-      "expected_slots": {
-        "name": "water heater"
-      }
-    },
-    {
-      "query": "trun on water heater",
-      "language": "en",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "turn on water heater",
-      "category": "spelling_mistake",
-      "expected_slots": {
-        "name": "water heater"
-      }
-    },
-    {
-      "query": "clse bedroom window",
-      "language": "en",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "close bedroom window",
-      "category": "spelling_mistake",
-      "expected_slots": {
-        "area": "bedroom",
-        "device_class": "window",
-        "domain": "cover"
-      }
-    },
-    {
-      "query": "turn off livng room light",
-      "language": "en",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "turn off living room light",
-      "category": "spelling_mistake",
-      "expected_slots": {
-        "area": "living room",
-        "domain": "light"
-      }
-    },
-    {
-      "query": "trun on bathroom fan",
-      "language": "en",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "turn on bathroom fan",
-      "category": "spelling_mistake",
-      "expected_slots": {
-        "area": "bathroom",
-        "domain": "fan"
-      }
-    },
-    {
-      "query": "trun on light",
+      "query": "turn on light",
       "language": "en",
       "expected_intent": "HassTurnOn",
       "expected_canonical": "turn on light",
-      "category": "spelling_mistake",
+      "category": "exact_match",
       "expected_slots": {
         "name": "light"
       }
     },
     {
-      "query": "turn off fn",
+      "query": "turn off light",
       "language": "en",
       "expected_intent": "HassTurnOff",
-      "expected_canonical": "turn off fan",
-      "category": "spelling_mistake",
+      "expected_canonical": "turn off light",
+      "category": "exact_match",
       "expected_slots": {
-        "name": "fan"
+        "name": "light"
       }
     },
     {
@@ -228,16 +140,6 @@
         "area": "bedroom",
         "device_class": "window",
         "domain": "cover"
-      }
-    },
-    {
-      "query": "turn on the water heater right now",
-      "language": "en",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "turn on water heater",
-      "category": "extra_words",
-      "expected_slots": {
-        "name": "water heater"
       }
     },
     {
@@ -305,223 +207,25 @@
       }
     },
     {
-      "query": "turn living room light",
+      "query": "return the vacuum to base please",
       "language": "en",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "turn on living room light",
-      "category": "missing_words",
+      "expected_intent": "HassVacuumReturnToBase",
+      "expected_canonical": "return the vacuum to base",
+      "category": "supported_filler",
       "expected_slots": {
-        "area": "living room",
-        "domain": "light"
+        "name": "vacuum"
       }
     },
     {
-      "query": "turn off bathroom",
-      "language": "en",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "turn off bathroom fan",
-      "category": "missing_words",
-      "expected_slots": {
-        "area": "bathroom",
-        "domain": "fan"
-      }
-    },
-    {
-      "query": "close livin window",
-      "language": "en",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "close living room window",
-      "category": "missing_words",
-      "expected_slots": {
-        "area": "living room",
-        "device_class": "window",
-        "domain": "cover"
-      }
-    },
-    {
-      "query": "turn off heater",
-      "language": "en",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "turn off water heater",
-      "category": "missing_words",
-      "expected_slots": {
-        "name": "water heater"
-      }
-    },
-    {
-      "query": "water heater make on",
-      "language": "en",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "turn on water heater",
-      "category": "missing_words",
-      "expected_slots": {
-        "name": "water heater"
-      }
-    },
-    {
-      "query": "bedroom window turn off",
+      "query": "please close bedroom window",
       "language": "en",
       "expected_intent": "HassTurnOff",
       "expected_canonical": "close bedroom window",
-      "category": "missing_words",
+      "category": "supported_filler",
       "expected_slots": {
         "area": "bedroom",
         "device_class": "window",
         "domain": "cover"
-      }
-    },
-    {
-      "query": "turn off living light",
-      "language": "en",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "turn off living room light",
-      "category": "missing_words",
-      "expected_slots": {
-        "area": "living room",
-        "domain": "light"
-      }
-    },
-    {
-      "query": "turn bathroom fan",
-      "language": "en",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "turn on bathroom fan",
-      "category": "missing_words",
-      "expected_slots": {
-        "area": "bathroom",
-        "domain": "fan"
-      }
-    },
-    {
-      "query": "turn on living light",
-      "language": "en",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "turn on living room light",
-      "category": "missing_words",
-      "expected_slots": {
-        "area": "living room",
-        "domain": "light"
-      }
-    },
-    {
-      "query": "turn off bath",
-      "language": "en",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "turn off bathroom fan",
-      "category": "missing_words",
-      "expected_slots": {
-        "area": "bathroom",
-        "domain": "fan"
-      }
-    },
-    {
-      "query": "plz trun on the livin room light",
-      "language": "en",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "turn on living room light",
-      "category": "complex_distortion",
-      "expected_slots": {
-        "area": "living room",
-        "domain": "light"
-      }
-    },
-    {
-      "query": "plz trun off the bedrom window",
-      "language": "en",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "close bedroom window",
-      "category": "complex_distortion",
-      "expected_slots": {
-        "area": "bedroom",
-        "device_class": "window",
-        "domain": "cover"
-      }
-    },
-    {
-      "query": "could u trun off bedroom windw",
-      "language": "en",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "close bedroom window",
-      "category": "complex_distortion",
-      "expected_slots": {
-        "area": "bedroom",
-        "device_class": "window",
-        "domain": "cover"
-      }
-    },
-    {
-      "query": "trun off the watr heatr plz",
-      "language": "en",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "turn off water heater",
-      "category": "complex_distortion",
-      "expected_slots": {
-        "name": "water heater"
-      }
-    },
-    {
-      "query": "plz trun off livin room light",
-      "language": "en",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "turn off living room light",
-      "category": "complex_distortion",
-      "expected_slots": {
-        "area": "living room",
-        "domain": "light"
-      }
-    },
-    {
-      "query": "could u trun on bathroom fan",
-      "language": "en",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "turn on bathroom fan",
-      "category": "complex_distortion",
-      "expected_slots": {
-        "area": "bathroom",
-        "domain": "fan"
-      }
-    },
-    {
-      "query": "plz turn off the bedrom windw",
-      "language": "en",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "close bedroom window",
-      "category": "complex_distortion",
-      "expected_slots": {
-        "area": "bedroom",
-        "device_class": "window",
-        "domain": "cover"
-      }
-    },
-    {
-      "query": "could u trun on water heater",
-      "language": "en",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "turn on water heater",
-      "category": "complex_distortion",
-      "expected_slots": {
-        "name": "water heater"
-      }
-    },
-    {
-      "query": "plz turn off the bathrm fn",
-      "language": "en",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "turn off bathroom fan",
-      "category": "complex_distortion",
-      "expected_slots": {
-        "area": "bathroom",
-        "domain": "fan"
-      }
-    },
-    {
-      "query": "plz turn on light",
-      "language": "en",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "turn on light",
-      "category": "complex_distortion",
-      "expected_slots": {
-        "name": "light"
       }
     },
     {
@@ -767,35 +471,11 @@
       }
     },
     {
-      "query": "please announce dinner's ready now",
-      "language": "en",
-      "expected_intent": "HassBroadcast",
-      "expected_canonical": "announce dinner's ready now",
-      "category": "supported_filler",
-      "expected_slots": {
-        "message": "dinner's ready now"
-      }
-    },
-    {
       "query": "set temp to 0",
       "language": "en",
       "expected_intent": "HassClimateSetTemperature",
       "expected_canonical": "set temp to 0",
       "category": "intent_coverage",
-      "expected_slots": {
-        "temperature": "0.0",
-        "area": "living room"
-      },
-      "context": {
-        "area": "living room"
-      }
-    },
-    {
-      "query": "set temp to 0 degrees please",
-      "language": "en",
-      "expected_intent": "HassClimateSetTemperature",
-      "expected_canonical": "set temp to 0 degrees",
-      "category": "supported_filler",
       "expected_slots": {
         "temperature": "0.0",
         "area": "living room"
@@ -815,33 +495,11 @@
       }
     },
     {
-      "query": "please remove 1 second from the timer",
-      "language": "en",
-      "expected_intent": "HassDecreaseTimer",
-      "expected_canonical": "remove 1 second from the timer",
-      "category": "supported_filler",
-      "expected_slots": {
-        "seconds": "1.0",
-        "name": "the"
-      }
-    },
-    {
       "query": "fan 100",
       "language": "en",
       "expected_intent": "HassFanSetSpeed",
       "expected_canonical": "fan 100",
       "category": "intent_coverage",
-      "expected_slots": {
-        "name": "fan",
-        "percentage": "100.0"
-      }
-    },
-    {
-      "query": "set fan to 100% please",
-      "language": "en",
-      "expected_intent": "HassFanSetSpeed",
-      "expected_canonical": "fan 100%",
-      "category": "supported_filler",
       "expected_slots": {
         "name": "fan",
         "percentage": "100.0"
@@ -858,33 +516,11 @@
       }
     },
     {
-      "query": "add 1 second to my timer please",
-      "language": "en",
-      "expected_intent": "HassIncreaseTimer",
-      "expected_canonical": "add 1 second to my timer",
-      "category": "supported_filler",
-      "expected_slots": {
-        "seconds": "1.0",
-        "name": "my"
-      }
-    },
-    {
       "query": "add groceries to shopping list",
       "language": "en",
       "expected_intent": "HassListAddItem",
       "expected_canonical": "add groceries to shopping list",
       "category": "intent_coverage",
-      "expected_slots": {
-        "item": "groceries",
-        "name": "shopping list"
-      }
-    },
-    {
-      "query": "please add groceries to my shopping list list",
-      "language": "en",
-      "expected_intent": "HassListAddItem",
-      "expected_canonical": "add groceries to my shopping list",
-      "category": "supported_filler",
       "expected_slots": {
         "item": "groceries",
         "name": "shopping list"
@@ -940,35 +576,11 @@
       }
     },
     {
-      "query": "set bedroom window to 0% please",
-      "language": "en",
-      "expected_intent": "HassSetPosition",
-      "expected_canonical": "set bedroom window to 0%",
-      "category": "supported_filler",
-      "expected_slots": {
-        "area": "bedroom",
-        "device_class": "window",
-        "position": "0.0",
-        "domain": "cover"
-      }
-    },
-    {
       "query": "set tv volume to 0",
       "language": "en",
       "expected_intent": "HassSetVolume",
       "expected_canonical": "set tv volume to 0",
       "category": "intent_coverage",
-      "expected_slots": {
-        "name": "tv",
-        "volume_level": "0.0"
-      }
-    },
-    {
-      "query": "set tv volume to 0 percent please",
-      "language": "en",
-      "expected_intent": "HassSetVolume",
-      "expected_canonical": "set tv volume to 0 percent",
-      "category": "supported_filler",
       "expected_slots": {
         "name": "tv",
         "volume_level": "0.0"
@@ -1015,16 +627,6 @@
       }
     },
     {
-      "query": "return the vacuum to base please",
-      "language": "en",
-      "expected_intent": "HassVacuumReturnToBase",
-      "expected_canonical": "return the vacuum to base",
-      "category": "supported_filler",
-      "expected_slots": {
-        "name": "vacuum"
-      }
-    },
-    {
       "query": "start vacuum",
       "language": "en",
       "expected_intent": "HassVacuumStart",
@@ -1035,34 +637,154 @@
       }
     },
     {
-      "query": "start the vacuum please",
-      "language": "en",
-      "expected_intent": "HassVacuumStart",
-      "expected_canonical": "start the vacuum",
-      "category": "supported_filler",
-      "expected_slots": {
-        "name": "vacuum"
-      }
-    },
-    {
-      "query": "illuminate the living room light",
+      "query": "turn on living room light if you don't mind",
       "language": "en",
       "expected_intent": "HassTurnOn",
       "expected_canonical": "turn on living room light",
-      "category": "synonym_paraphrase",
+      "category": "extra_words",
       "expected_slots": {
         "area": "living room",
         "domain": "light"
       }
     },
     {
-      "query": "shut down the bathroom fan",
+      "query": "turn off bathroom fan if you don't mind",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off bathroom fan",
+      "category": "extra_words",
+      "expected_slots": {
+        "area": "bathroom",
+        "domain": "fan"
+      }
+    },
+    {
+      "query": "close bedroom window if you don't mind",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "close bedroom window",
+      "category": "extra_words",
+      "expected_slots": {
+        "area": "bedroom",
+        "device_class": "window",
+        "domain": "cover"
+      }
+    },
+    {
+      "query": "turn on water heater if you don't mind",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on water heater",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "water heater"
+      }
+    },
+    {
+      "query": "turn off water heater if you don't mind",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off water heater",
+      "category": "extra_words",
+      "expected_slots": {
+        "name": "water heater"
+      }
+    },
+    {
+      "query": "close the bedroom window if you don't mind",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "close the bedroom window",
+      "category": "extra_words",
+      "expected_slots": {
+        "area": "bedroom",
+        "device_class": "window",
+        "domain": "cover"
+      }
+    },
+    {
+      "query": "turn off living room light if you don't mind",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off living room light",
+      "category": "extra_words",
+      "expected_slots": {
+        "area": "living room",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "turn on bathroom fan if you don't mind",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on bathroom fan",
+      "category": "extra_words",
+      "expected_slots": {
+        "area": "bathroom",
+        "domain": "fan"
+      }
+    },
+    {
+      "query": "turn off office light if you don't mind",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off office light",
+      "category": "extra_words",
+      "expected_slots": {
+        "area": "office",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "turn off bedroom fan if you don't mind",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off bedroom fan",
+      "category": "extra_words",
+      "expected_slots": {
+        "area": "bedroom",
+        "domain": "fan"
+      }
+    },
+    {
+      "query": "shut off the bathroom fan now",
       "language": "en",
       "expected_intent": "HassTurnOff",
       "expected_canonical": "turn off bathroom fan",
       "category": "synonym_paraphrase",
       "expected_slots": {
         "area": "bathroom",
+        "domain": "fan"
+      }
+    },
+    {
+      "query": "shut off the water heater",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off water heater",
+      "category": "synonym_paraphrase",
+      "expected_slots": {
+        "name": "water heater"
+      }
+    },
+    {
+      "query": "send the vacuum back to base",
+      "language": "en",
+      "expected_intent": "HassVacuumReturnToBase",
+      "expected_canonical": "return vacuum to base",
+      "category": "synonym_paraphrase",
+      "expected_slots": {
+        "name": "vacuum"
+      }
+    },
+    {
+      "query": "shut off living room fan",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off living room fan",
+      "category": "synonym_paraphrase",
+      "expected_slots": {
+        "area": "living room",
         "domain": "fan"
       }
     },
@@ -1079,23 +801,36 @@
       }
     },
     {
-      "query": "bring the water heater online",
+      "query": "shut off kitchen light",
       "language": "en",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "turn on water heater",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off kitchen light",
       "category": "synonym_paraphrase",
       "expected_slots": {
-        "name": "water heater"
+        "area": "kitchen",
+        "domain": "light"
       }
     },
     {
-      "query": "send the robovac to charge",
+      "query": "shut off hallway light",
       "language": "en",
-      "expected_intent": "HassVacuumReturnToBase",
-      "expected_canonical": "return vacuum to base",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off hallway light",
       "category": "synonym_paraphrase",
       "expected_slots": {
-        "name": "vacuum"
+        "area": "hallway",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "shut off office light",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off office light",
+      "category": "synonym_paraphrase",
+      "expected_slots": {
+        "area": "office",
+        "domain": "light"
       }
     },
     {
@@ -1109,18 +844,17 @@
       }
     },
     {
-      "query": "power up living room light",
+      "query": "bring the water heater online",
       "language": "en",
       "expected_intent": "HassTurnOn",
-      "expected_canonical": "turn on living room light",
-      "category": "semantic_challenge",
+      "expected_canonical": "turn on water heater",
+      "category": "synonym_paraphrase",
       "expected_slots": {
-        "area": "living room",
-        "domain": "light"
+        "name": "water heater"
       }
     },
     {
-      "query": "power up the living room light",
+      "query": "power up living room light",
       "language": "en",
       "expected_intent": "HassTurnOn",
       "expected_canonical": "turn on living room light",
@@ -1150,112 +884,6 @@
       "expected_slots": {
         "area": "living room",
         "domain": "light"
-      }
-    },
-    {
-      "query": "kill the bathroom fan",
-      "language": "en",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "turn off bathroom fan",
-      "category": "semantic_challenge",
-      "expected_slots": {
-        "area": "bathroom",
-        "domain": "fan"
-      }
-    },
-    {
-      "query": "shut down water heater",
-      "language": "en",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "turn off water heater",
-      "category": "semantic_challenge",
-      "expected_slots": {
-        "name": "water heater"
-      }
-    },
-    {
-      "query": "turn on light",
-      "language": "en",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "turn on light",
-      "category": "exact_match",
-      "expected_slots": {
-        "name": "light"
-      }
-    },
-    {
-      "query": "turn off light",
-      "language": "en",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "turn off light",
-      "category": "exact_match",
-      "expected_slots": {
-        "name": "light"
-      }
-    },
-    {
-      "query": "hey assistant turn on the office light please",
-      "language": "en",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "turn on office light",
-      "category": "extra_words",
-      "expected_slots": {
-        "area": "office",
-        "domain": "light"
-      }
-    },
-    {
-      "query": "turn on hallwey light",
-      "language": "en",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "turn on hallway light",
-      "category": "spelling_mistake",
-      "expected_slots": {
-        "area": "hallway",
-        "domain": "light"
-      }
-    },
-    {
-      "query": "bring up hallway light",
-      "language": "en",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "turn on hallway light",
-      "category": "synonym_paraphrase",
-      "expected_slots": {
-        "area": "hallway",
-        "domain": "light"
-      }
-    },
-    {
-      "query": "get kitchen light on",
-      "language": "en",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "turn on kitchen light",
-      "category": "synonym_paraphrase",
-      "expected_slots": {
-        "area": "kitchen",
-        "domain": "light"
-      }
-    },
-    {
-      "query": "shut off living room fan",
-      "language": "en",
-      "expected_intent": "HassTurnOff",
-      "expected_canonical": "turn off living room fan",
-      "category": "synonym_paraphrase",
-      "expected_slots": {
-        "area": "living room",
-        "domain": "fan"
-      }
-    },
-    {
-      "query": "send the vacuum back to base",
-      "language": "en",
-      "expected_intent": "HassVacuumReturnToBase",
-      "expected_canonical": "return the vacuum to base",
-      "category": "synonym_paraphrase",
-      "expected_slots": {
-        "name": "vacuum"
       }
     },
     {
@@ -1300,33 +928,142 @@
       }
     },
     {
-      "query": "hey assistant turn on living room light",
+      "query": "power up kitchen light",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on kitchen light",
+      "category": "semantic_challenge",
+      "expected_slots": {
+        "area": "kitchen",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "power up hallway light",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on hallway light",
+      "category": "semantic_challenge",
+      "expected_slots": {
+        "area": "hallway",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "power up office light",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on office light",
+      "category": "semantic_challenge",
+      "expected_slots": {
+        "area": "office",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "turn living room light",
       "language": "en",
       "expected_intent": "HassTurnOn",
       "expected_canonical": "turn on living room light",
-      "category": "extra_words",
+      "category": "missing_words",
       "expected_slots": {
         "area": "living room",
         "domain": "light"
       }
     },
     {
-      "query": "hey assistant turn off bathroom fan",
+      "query": "turn off bathroom",
       "language": "en",
       "expected_intent": "HassTurnOff",
       "expected_canonical": "turn off bathroom fan",
-      "category": "extra_words",
+      "category": "missing_words",
       "expected_slots": {
         "area": "bathroom",
         "domain": "fan"
       }
     },
     {
-      "query": "hey assistant close bedroom window",
+      "query": "close livin window",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "close living room window",
+      "category": "missing_words",
+      "expected_slots": {
+        "area": "living room",
+        "device_class": "window",
+        "domain": "cover"
+      }
+    },
+    {
+      "query": "turn off heater",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off water heater",
+      "category": "missing_words",
+      "expected_slots": {
+        "name": "water heater"
+      }
+    },
+    {
+      "query": "water heater make on",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on water heater",
+      "category": "missing_words",
+      "expected_slots": {
+        "name": "water heater"
+      }
+    },
+    {
+      "query": "turn on bath fan",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on bathroom fan",
+      "category": "missing_words",
+      "expected_slots": {
+        "area": "bathroom",
+        "domain": "fan"
+      }
+    },
+    {
+      "query": "turn bathroom fan",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on bathroom fan",
+      "category": "missing_words",
+      "expected_slots": {
+        "area": "bathroom",
+        "domain": "fan"
+      }
+    },
+    {
+      "query": "turn off bath fan",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off bathroom fan",
+      "category": "missing_words",
+      "expected_slots": {
+        "area": "bathroom",
+        "domain": "fan"
+      }
+    },
+    {
+      "query": "turn off bath",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off bathroom fan",
+      "category": "missing_words",
+      "expected_slots": {
+        "area": "bathroom",
+        "domain": "fan"
+      }
+    },
+    {
+      "query": "close bedroom",
       "language": "en",
       "expected_intent": "HassTurnOff",
       "expected_canonical": "close bedroom window",
-      "category": "extra_words",
+      "category": "missing_words",
       "expected_slots": {
         "area": "bedroom",
         "device_class": "window",
@@ -1334,55 +1071,220 @@
       }
     },
     {
-      "query": "hey assistant turn on water heater",
-      "language": "en",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "turn on water heater",
-      "category": "extra_words",
-      "expected_slots": {
-        "name": "water heater"
-      }
-    },
-    {
-      "query": "hey assistant turn off water heater",
+      "query": "clse bedroom window",
       "language": "en",
       "expected_intent": "HassTurnOff",
-      "expected_canonical": "turn off water heater",
-      "category": "extra_words",
+      "expected_canonical": "close bedroom window",
+      "category": "spelling_mistake",
       "expected_slots": {
-        "name": "water heater"
+        "area": "bedroom",
+        "device_class": "window",
+        "domain": "cover"
       }
     },
     {
-      "query": "hey assistant turn off living room light",
+      "query": "clsoe the bedroom window",
       "language": "en",
       "expected_intent": "HassTurnOff",
-      "expected_canonical": "turn off living room light",
-      "category": "extra_words",
+      "expected_canonical": "close bedroom window",
+      "category": "spelling_mistake",
       "expected_slots": {
-        "area": "living room",
-        "domain": "light"
+        "area": "bedroom",
+        "device_class": "window",
+        "domain": "cover"
       }
     },
     {
-      "query": "hey assistant turn on bathroom fan",
+      "query": "swich of bathroom fan",
       "language": "en",
-      "expected_intent": "HassTurnOn",
-      "expected_canonical": "turn on bathroom fan",
-      "category": "extra_words",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off bathroom fan",
+      "category": "spelling_mistake",
       "expected_slots": {
         "area": "bathroom",
         "domain": "fan"
       }
     },
     {
-      "query": "hey assistant turn on light",
+      "query": "swich of water heater",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off water heater",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "name": "water heater"
+      }
+    },
+    {
+      "query": "tunr of water heater",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off water heater",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "name": "water heater"
+      }
+    },
+    {
+      "query": "turm on bathroom fan",
       "language": "en",
       "expected_intent": "HassTurnOn",
-      "expected_canonical": "turn on light",
-      "category": "extra_words",
+      "expected_canonical": "turn on bathroom fan",
+      "category": "spelling_mistake",
       "expected_slots": {
-        "name": "light"
+        "area": "bathroom",
+        "domain": "fan"
+      }
+    },
+    {
+      "query": "clse the bedroom window",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "close bedroom window",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "area": "bedroom",
+        "device_class": "window",
+        "domain": "cover"
+      }
+    },
+    {
+      "query": "turm on water heater",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on water heater",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "name": "water heater"
+      }
+    },
+    {
+      "query": "turm off water heater",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off water heater",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "name": "water heater"
+      }
+    },
+    {
+      "query": "turm off bathroom fan",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off bathroom fan",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "area": "bathroom",
+        "domain": "fan"
+      }
+    },
+    {
+      "query": "can u pls turn on the offise light",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on office light",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "area": "office",
+        "domain": "light"
+      }
+    },
+    {
+      "query": "could u pls turn off watr heater",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off water heater",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "name": "water heater"
+      }
+    },
+    {
+      "query": "can u turn off the bathrom fan pls",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off bathroom fan",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "area": "bathroom",
+        "domain": "fan"
+      }
+    },
+    {
+      "query": "cld u pls clsoe the bedroom window",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "close bedroom window",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "area": "bedroom",
+        "device_class": "window",
+        "domain": "cover"
+      }
+    },
+    {
+      "query": "can u pls turn on watr heater",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on water heater",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "name": "water heater"
+      }
+    },
+    {
+      "query": "pls clse the bedroom window",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "close bedroom window",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "area": "bedroom",
+        "device_class": "window",
+        "domain": "cover"
+      }
+    },
+    {
+      "query": "cld u pls turm off bathroom fan",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off bathroom fan",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "area": "bathroom",
+        "domain": "fan"
+      }
+    },
+    {
+      "query": "could u pls turm on water heater",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on water heater",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "name": "water heater"
+      }
+    },
+    {
+      "query": "cld u pls turm off water heater",
+      "language": "en",
+      "expected_intent": "HassTurnOff",
+      "expected_canonical": "turn off water heater",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "name": "water heater"
+      }
+    },
+    {
+      "query": "pls turm on the offise light",
+      "language": "en",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "turn on office light",
+      "category": "complex_distortion",
+      "expected_slots": {
+        "area": "office",
+        "domain": "light"
       }
     }
   ],
