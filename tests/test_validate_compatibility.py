@@ -1,6 +1,7 @@
 """Tests for the multi-version Home Assistant compatibility runner."""
 
 import io
+import os
 import subprocess
 from pathlib import Path
 
@@ -351,11 +352,11 @@ def test_required_deps_pin_assist_runtime_packages() -> None:
 
 def test_transitive_compatibility_specs_cap_legacy_pycares() -> None:
     """Prevent future pycares majors from breaking historical aiodns releases."""
-    assert validate_compatibility._transitive_compatibility_specs({"aiodns": "3.5.0"}) == (
-        "pycares<5",
-    )
-    assert validate_compatibility._transitive_compatibility_specs({"aiodns": "4.0.0b1"}) == ()
-    assert validate_compatibility._transitive_compatibility_specs({"aiodns": "4.0.0"}) == ()
+    assert validate_compatibility._transitive_compatibility_specs({"aiodns": "3.5.0"}) == [
+        "pycares<5"
+    ]
+    assert validate_compatibility._transitive_compatibility_specs({"aiodns": "4.0.0b1"}) == []
+    assert validate_compatibility._transitive_compatibility_specs({"aiodns": "4.0.0"}) == []
 
 
 def test_refresh_dependencies_preserves_selection_and_legacy_transitive_cap(
@@ -602,6 +603,260 @@ def test_run_tests_resets_before_forced_reinstall(
     assert reset_flags == [True]
 
 
+def _create_mock_venv(tmp_path: Path) -> tuple[Path, Path]:
+    """Create a fake virtual environment directory structure and python binary."""
+    venv_path = tmp_path / "venv"
+    python_bin = venv_path / "bin" / "python"
+    python_bin.parent.mkdir(parents=True)
+    python_bin.write_text("", encoding="utf-8")
+    return venv_path, python_bin
+
+
+def test_prepare_venv_and_install_aborts_before_install_on_incompatible_python(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Incompatible python versions should abort before dependency installation."""
+    venv_path, python_bin = _create_mock_venv(tmp_path)
+
+    monkeypatch.setattr(validate_compatibility, "_ensure_venv", lambda _path, _py: True)
+
+    def fail_compat(_bin: Path, _ha: str) -> None:
+        raise ValueError("Python 3.12 does not satisfy Home Assistant 2026.6.0 constraint '>=3.13'")
+
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_verify_python_version_compatibility",
+        fail_compat,
+    )
+
+    def fail_if_install_called(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("_install_dependencies should not be called when Python is incompatible")
+
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_install_dependencies",
+        fail_if_install_called,
+    )
+
+    success = validate_compatibility._prepare_venv_and_install(
+        venv_path=venv_path,
+        python_bin=python_bin,
+        ha_ver="2026.6.0",
+        ha_ver_to_install="2026.6.0",
+        py_ver="3.12",
+        reinstall=False,
+        test_dependency_versions={},
+    )
+
+    assert not success
+    assert "VALIDATION_ERROR: Python 3.12 does not satisfy" in capsys.readouterr().out
+
+
+def test_prepare_venv_and_install_warns_on_stale_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Stale dependency markers should emit a warning and reinstall dependencies."""
+    venv_path, python_bin = _create_mock_venv(tmp_path)
+
+    monkeypatch.setattr(validate_compatibility, "_ensure_venv", lambda _path, _py: False)
+    monkeypatch.setattr(validate_compatibility, "_get_installed_ha_version", lambda _py: "2026.6.0")
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_dependency_marker_requires_reinstall",
+        lambda _created, _path, _pins: True,
+    )
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_verify_python_version_compatibility",
+        lambda _bin, _ha: None,
+    )
+    install_calls: list[dict[str, object]] = []
+
+    def fake_install(
+        _venv: Path,
+        _bin: Path,
+        _ha: str,
+        needs_install: bool,
+        _refresh: tuple[str, ...],
+        _pins: dict[str, str],
+        *,
+        py_ver: str,
+        reset_before_install: bool = False,
+    ) -> None:
+        install_calls.append(
+            {
+                "needs_install": needs_install,
+                "py_ver": py_ver,
+                "reset_before_install": reset_before_install,
+            }
+        )
+
+    monkeypatch.setattr(validate_compatibility, "_install_dependencies", fake_install)
+
+    success = validate_compatibility._prepare_venv_and_install(
+        venv_path=venv_path,
+        python_bin=python_bin,
+        ha_ver="2026.6.0",
+        ha_ver_to_install="2026.6.0",
+        py_ver="3.14",
+        reinstall=False,
+        test_dependency_versions={"aiodns": "3.2.0"},
+    )
+
+    assert success
+    captured = capsys.readouterr().out
+    assert "STEP_WARNING: Virtual environment at" in captured
+    assert "test dependency marker mismatch" in captured
+    assert "--reinstall" in captured
+    assert len(install_calls) == 1
+    assert install_calls[0]["reset_before_install"] is True
+
+
+@pytest.mark.parametrize(
+    (
+        "fail_attempts",
+        "expected_success",
+        "expected_warning",
+        "expected_error",
+    ),
+    [
+        (
+            1,
+            True,
+            "STEP_WARNING: Python verification failed for existing virtual environment at",
+            None,
+        ),
+        (2, False, None, "VALIDATION_ERROR: Python 3.12 does not satisfy"),
+    ],
+)
+def test_prepare_venv_and_install_stale_venv_compat_handling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    fail_attempts: int,
+    expected_success: bool,
+    expected_warning: str | None,
+    expected_error: str | None,
+) -> None:
+    """Handle virtual environments failing python compatibility checks before or after reset."""
+    venv_path, python_bin = _create_mock_venv(tmp_path)
+
+    monkeypatch.setattr(validate_compatibility, "_ensure_venv", lambda _path, _py: False)
+    monkeypatch.setattr(validate_compatibility, "_get_installed_ha_version", lambda _py: "2026.6.0")
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_dependency_marker_requires_reinstall",
+        lambda _created, _path, _pins: False,
+    )
+
+    reset_calls: list[tuple[Path, str]] = []
+
+    def fake_reset(path: Path, py: str) -> bool:
+        reset_calls.append((path, py))
+        return True
+
+    monkeypatch.setattr(validate_compatibility, "_reset_venv", fake_reset)
+
+    compat_calls = 0
+
+    def fake_compat(_bin: Path, _ha: str) -> None:
+        nonlocal compat_calls
+        compat_calls += 1
+        if compat_calls <= fail_attempts:
+            raise validate_compatibility.PythonVersionIncompatibilityError(
+                "Python 3.12 does not satisfy constraint '>=3.14'"
+            )
+
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_verify_python_version_compatibility",
+        fake_compat,
+    )
+
+    install_called = False
+
+    def fake_install(*_args: object, **_kwargs: object) -> None:
+        nonlocal install_called
+        if not expected_success:
+            pytest.fail(
+                "_install_dependencies should not be called when Python remains incompatible"
+            )
+        install_called = True
+
+    monkeypatch.setattr(validate_compatibility, "_install_dependencies", fake_install)
+
+    success = validate_compatibility._prepare_venv_and_install(
+        venv_path=venv_path,
+        python_bin=python_bin,
+        ha_ver="2026.6.0",
+        ha_ver_to_install="2026.6.0",
+        py_ver="3.14",
+        reinstall=False,
+        test_dependency_versions={},
+    )
+
+    assert success is expected_success
+    assert compat_calls == 2
+    assert reset_calls == [(venv_path, "3.14")]
+    captured = capsys.readouterr().out
+    if expected_warning is not None:
+        assert expected_warning in captured
+        assert "--reinstall" in captured
+        assert install_called
+    if expected_error is not None:
+        assert expected_error in captured
+        assert not install_called
+
+
+def test_prepare_venv_and_install_generic_verification_error_does_not_reset_venv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Generic verification errors should report failure without resetting existing venv."""
+    venv_path, python_bin = _create_mock_venv(tmp_path)
+
+    monkeypatch.setattr(validate_compatibility, "_ensure_venv", lambda _path, _py: False)
+    monkeypatch.setattr(validate_compatibility, "_get_installed_ha_version", lambda _py: "2026.6.0")
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_dependency_marker_requires_reinstall",
+        lambda _created, _path, _pins: False,
+    )
+
+    reset_called = False
+
+    def fail_reset(_path: Path, _py: str) -> bool:
+        nonlocal reset_called
+        reset_called = True
+        return True
+
+    monkeypatch.setattr(validate_compatibility, "_reset_venv", fail_reset)
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_verify_python_version_compatibility",
+        lambda _bin, _ha: (_ for _ in ()).throw(ValueError("PyPI network timeout")),
+    )
+
+    success = validate_compatibility._prepare_venv_and_install(
+        venv_path=venv_path,
+        python_bin=python_bin,
+        ha_ver="2026.6.0",
+        ha_ver_to_install="2026.6.0",
+        py_ver="3.14",
+        reinstall=False,
+        test_dependency_versions={},
+    )
+
+    assert not success
+    assert not reset_called
+    assert "VALIDATION_ERROR: PyPI network timeout" in capsys.readouterr().out
+
+
 def test_run_tests_reports_latest_lookup_error_as_row_failure(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -789,6 +1044,11 @@ def test_get_installed_harness_pair_reports_probe_output(
         validate_compatibility.subprocess,
         "run",
         fail_probe,
+    )
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_validate_python_bin",
+        lambda path: Path(str(path)),
     )
 
     with pytest.raises(ValueError, match="could not inspect installed test harness") as raised:
@@ -1592,3 +1852,285 @@ def test_fetch_home_assistant_package_constraints_raises_on_all_failures(
     )
     with pytest.raises(RuntimeError, match="Failed to fetch Home Assistant package constraints"):
         validate_compatibility._fetch_home_assistant_package_constraints("2026.9.0b0")
+
+
+def _setup_repo_venv_python(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    executable: bool = True,
+) -> Path:
+    """Configure repo root and create a mock virtual environment python binary."""
+    python_file = tmp_path / ".venv" / "bin" / "python"
+    python_file.parent.mkdir(parents=True)
+    python_file.write_text("#!/bin/sh\nexit 0\n")
+    python_file.chmod(0o755 if executable else 0o644)
+    monkeypatch.setattr(validate_compatibility, "_REPO_ROOT", str(tmp_path))
+    return python_file
+
+
+def _setup_repo_symlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target: Path,
+) -> Path:
+    """Configure repo root with a virtualenv python symlink pointing to target."""
+    repo_dir = tmp_path / "repo"
+    symlink_python = repo_dir / ".venv" / "bin" / "python"
+    symlink_python.parent.mkdir(parents=True)
+    symlink_python.symlink_to(target)
+    monkeypatch.setattr(validate_compatibility, "_REPO_ROOT", str(repo_dir))
+    return symlink_python
+
+
+def test_validate_python_bin_accepts_valid_virtualenv_python(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Accept valid Python binary paths located inside the workspace."""
+    _setup_repo_venv_python(tmp_path, monkeypatch)
+    valid_path = Path(".venv/bin/python")
+    assert validate_compatibility._validate_python_bin(valid_path) == valid_path
+    assert validate_compatibility._validate_python_bin(str(valid_path)) == valid_path
+
+
+def test_validate_python_bin_rejects_symlink_to_untrusted_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject virtualenv symlinks pointing to unauthorized target directories."""
+    untrusted_python = tmp_path / "untrusted" / "bin" / "python"
+    untrusted_python.parent.mkdir(parents=True)
+    untrusted_python.write_text("#!/bin/sh\nexit 0\n")
+    untrusted_python.chmod(0o755)
+
+    _setup_repo_symlink(tmp_path, monkeypatch, untrusted_python)
+    with pytest.raises(ValueError, match="outside permitted toolchain directories"):
+        validate_compatibility._validate_python_bin(Path(".venv/bin/python"))
+
+
+@pytest.mark.parametrize(
+    ("invalid_input", "expected_err"),
+    [
+        (123, "expected a Path or str"),
+        (None, "expected a Path or str"),
+        ("", "cannot be empty"),
+        ("   ", "cannot be empty"),
+        ("--version", "cannot start with '-'"),
+        (".venv/bin/python;rm", "character ';' is not allowed"),
+        ("../../usr/bin/python3", "directory traversal"),
+        (".venv/bin/sh", "must be a python executable"),
+        (".venv/bin/pytest", "must be a python executable"),
+        (".venv/bin/python.exe", "must be a python executable"),
+        ("/usr/bin/python3", "escapes allowed repository root"),
+    ],
+)
+def test_validate_python_bin_rejects_unsafe_or_invalid_paths(
+    invalid_input: object,
+    expected_err: str,
+) -> None:
+    """Reject invalid types, flags, command injection, path traversal, or escaping paths."""
+    with pytest.raises(ValueError, match=expected_err):
+        validate_compatibility._validate_python_bin(invalid_input)
+
+
+def test_validate_python_bin_rejects_missing_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject non-existent Python binary paths within the repository root."""
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    monkeypatch.setattr(validate_compatibility, "_REPO_ROOT", str(repo_dir))
+
+    with pytest.raises(ValueError, match="Python executable not found"):
+        validate_compatibility._validate_python_bin(Path(".venv/bin/python3"))
+
+
+@pytest.mark.parametrize(
+    ("target_rel_path", "expected_err"),
+    [
+        (Path("lib") / "python3", r"must reside in a 'bin' directory"),
+        (Path("bin") / "not_python", "must be a python executable"),
+    ],
+)
+def test_validate_python_bin_rejects_invalid_target_structure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target_rel_path: Path,
+    expected_err: str,
+) -> None:
+    """Reject symlinks pointing to non-bin directories or non-python binaries."""
+    target_file = tmp_path / "repo" / target_rel_path
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_text("#!/bin/sh\nexit 0\n")
+    target_file.chmod(0o755)
+
+    _setup_repo_symlink(tmp_path, monkeypatch, target_file)
+    with pytest.raises(ValueError, match=expected_err):
+        validate_compatibility._validate_python_bin(Path(".venv/bin/python"))
+
+
+@pytest.mark.parametrize(
+    ("root_env_var", "root_sys_attr"),
+    [
+        (None, "base_prefix"),
+        (None, "prefix"),
+        ("UV_PYTHON_INSTALL_DIR", None),
+        ("XDG_DATA_HOME", None),
+        ("RUNNER_TOOL_CACHE", None),
+    ],
+)
+def test_validate_python_bin_accepts_symlink_to_permitted_target_roots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    root_env_var: str | None,
+    root_sys_attr: str | None,
+) -> None:
+    """Accept virtualenv symlinks pointing to authorized toolchain roots."""
+    target_root = tmp_path / "toolchain_root"
+    target_bin = (
+        target_root / "uv" / "python" / "bin"
+        if root_env_var == "XDG_DATA_HOME"
+        else target_root / "bin"
+    )
+    target_bin.mkdir(parents=True)
+    target_python = target_bin / "python3"
+    target_python.write_text("#!/bin/sh\nexit 0\n")
+    target_python.chmod(0o755)
+
+    if root_env_var is not None:
+        monkeypatch.setenv(root_env_var, str(target_root))
+    if root_sys_attr is not None:
+        monkeypatch.setattr(validate_compatibility.sys, root_sys_attr, str(target_root))
+
+    _setup_repo_symlink(tmp_path, monkeypatch, target_python)
+    valid_path = Path(".venv/bin/python")
+    assert validate_compatibility._validate_python_bin(valid_path) == valid_path
+
+
+def test_validate_python_bin_rejects_non_executable_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject Python binary that lacks execute permission."""
+    _setup_repo_venv_python(tmp_path, monkeypatch, executable=False)
+    with pytest.raises(ValueError, match="is not executable"):
+        validate_compatibility._validate_python_bin(Path(".venv/bin/python"))
+
+
+def test_validate_python_bin_rejects_broken_symlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject Python symlinks whose target file does not exist."""
+    fake_bin = tmp_path / ".venv" / "bin"
+    fake_bin.mkdir(parents=True)
+    (fake_bin / "python").symlink_to(tmp_path / "nonexistent" / "python")
+
+    monkeypatch.setattr(validate_compatibility, "_REPO_ROOT", str(tmp_path))
+    with pytest.raises(ValueError, match="Python executable not found at"):
+        validate_compatibility._validate_python_bin(Path(".venv/bin/python"))
+
+
+@pytest.mark.parametrize(
+    ("probe_attr", "expected_err"),
+    [
+        ("access", r"Resolved Python binary for .* is not executable"),
+        ("isfile", "Resolved Python executable not found for"),
+    ],
+)
+def test_validate_python_bin_rejects_invalid_resolved_target_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe_attr: str,
+    expected_err: str,
+) -> None:
+    """Reject Python binary when resolved target fails executable or isfile probes."""
+    python_file = _setup_repo_venv_python(tmp_path, monkeypatch)
+    target_path_str = str(python_file.resolve())
+    check_count = 0
+
+    if probe_attr == "access":
+        real_access = validate_compatibility.os.access
+
+        def fake_access(path: str | os.PathLike[str] | int, mode: int) -> bool:
+            nonlocal check_count
+            if str(path) == target_path_str and mode == validate_compatibility.os.X_OK:
+                check_count += 1
+                return check_count <= 1
+            return real_access(path, mode)
+
+        monkeypatch.setattr(validate_compatibility.os, "access", fake_access)
+    else:
+        real_isfile = validate_compatibility.os.path.isfile
+
+        def fake_isfile(path: str | bytes | os.PathLike[str] | os.PathLike[bytes]) -> bool:
+            nonlocal check_count
+            if str(path) == target_path_str:
+                check_count += 1
+                return check_count <= 1
+            return real_isfile(path)
+
+        monkeypatch.setattr(validate_compatibility.os.path, "isfile", fake_isfile)
+
+    with pytest.raises(ValueError, match=expected_err):
+        validate_compatibility._validate_python_bin(Path(".venv/bin/python"))
+
+
+@pytest.mark.parametrize(
+    "run_action",
+    [
+        "venv",
+        "pip",
+        "pytest",
+    ],
+)
+def test_subprocess_commands_set_uv_managed_python(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    run_action: str,
+) -> None:
+    """Ensure subprocess invocations set UV_MANAGED_PYTHON in their environment."""
+    captured_env: dict[str, str] = {}
+
+    def fake_subprocess_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        nonlocal captured_env
+        if "env" in kwargs and isinstance(kwargs["env"], dict):
+            captured_env = kwargs["env"]
+        if run_action == "venv":
+            venv_path = Path(cmd[6])
+            (venv_path / "bin").mkdir(parents=True)
+            (venv_path / "bin" / "python").write_text("", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(validate_compatibility.subprocess, "run", fake_subprocess_run)
+    if run_action == "venv":
+        assert validate_compatibility._ensure_venv(tmp_path / "test_venv", "3.14")
+    elif run_action == "pip":
+        validate_compatibility._run_uv_pip_install(
+            Path("python"),
+            ["homeassistant==2026.6.0"],
+            "homeassistant",
+        )
+    else:
+        validate_compatibility._run_pytest(Path("python"), "2026.6.0", ["-k", "test"])
+
+    assert captured_env.get("UV_MANAGED_PYTHON") == "1"
+
+
+def test_main_sets_uv_managed_python(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Ensure main entry point sets UV_MANAGED_PYTHON in os.environ."""
+    monkeypatch.delenv("UV_MANAGED_PYTHON", raising=False)
+    monkeypatch.setattr(
+        validate_compatibility.sys,
+        "argv",
+        ["validate_compatibility.py", "--validate-matrix"],
+    )
+    validate_compatibility.main()
+    capsys.readouterr()
+
+    assert validate_compatibility.os.environ.get("UV_MANAGED_PYTHON") == "1"

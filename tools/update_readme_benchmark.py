@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 import traceback
 from collections.abc import Mapping
 from pathlib import Path
+from string import ascii_letters, digits
 from typing import Final, TypeGuard
 
 import orjson
@@ -22,6 +24,10 @@ def _is_str_mapping(val: object) -> TypeGuard[Mapping[str, object]]:
     return isinstance(val, Mapping)
 
 
+_ALNUM_CHARS: Final[str] = ascii_letters + digits
+_ALLOWED_PATH_CHARS: Final[str] = f"{_ALNUM_CHARS}._-+/@ "
+
+
 REPO_ROOT: Final[Path] = Path(__file__).resolve().parent.parent
 REPORT_JSON_PATH: Final[Path] = REPO_ROOT / "scratch" / "benchmark" / "managed_live_report.json"
 README_EN_PATH: Final[Path] = REPO_ROOT / "README.md"
@@ -33,6 +39,37 @@ BENCHMARK_DEPENDENCIES: Final[tuple[str, ...]] = (
     "python",
 )
 MANAGED_REPORT_SCHEMA_VERSION: Final[int] = BENCHMARK_SCHEMA_VERSION
+_HEADER_ASSIST_CANONICALIZER: Final[str] = "Assist Canonicalizer"
+_HEADER_P50_MS: Final[str] = "P50 ms"
+_HEADER_P95_MS: Final[str] = "P95 ms"
+
+_COMMON_METRIC_HEADERS_EN: Final[tuple[str, ...]] = (
+    _HEADER_ASSIST_CANONICALIZER,
+    "Direct HassIL",
+    "Uplift (%p)",
+    "Recovered",
+    "Regressions prevented",
+    "Mismatch",
+    "Fallback",
+    _HEADER_P50_MS,
+    _HEADER_P95_MS,
+)
+_COMMON_METRIC_HEADERS_VI: Final[tuple[str, ...]] = (
+    _HEADER_ASSIST_CANONICALIZER,
+    "HassIL trực tiếp",
+    "Mức tăng (%p)",
+    "Khôi phục",
+    "Ngăn hồi quy",
+    "Nhận diện sai",
+    "Dự phòng",
+    _HEADER_P50_MS,
+    _HEADER_P95_MS,
+)
+
+_OVERALL_HEADERS_EN: Final[tuple[str, ...]] = ("Mode", *_COMMON_METRIC_HEADERS_EN)
+_OVERALL_HEADERS_VI: Final[tuple[str, ...]] = ("Chế độ", *_COMMON_METRIC_HEADERS_VI)
+_LANGS_HEADERS_EN: Final[tuple[str, ...]] = ("Language", *_COMMON_METRIC_HEADERS_EN)
+_LANGS_HEADERS_VI: Final[tuple[str, ...]] = ("Ngôn ngữ", *_COMMON_METRIC_HEADERS_VI)
 
 OVERALL_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"(<!-- BENCHMARK_OVERALL_START -->)(.*?)(<!-- BENCHMARK_OVERALL_END -->)", re.DOTALL
@@ -102,7 +139,145 @@ def _render_md_table(
     return "\n".join([hdr, sep, *data])
 
 
-def _load_report(report_path: Path) -> dict[str, object]:
+def _sanitize_path_string(
+    file_path: object,
+    *,
+    expected_suffix: str,
+    label: str,
+) -> Path:
+    """Sanitize and validate path string syntax, allowed characters, and extension.
+
+    SECURITY NOTE:
+    - Reconstructs path characters via indexed mapping to `_ALLOWED_PATH_CHARS`
+      to sever static analysis taint chains.
+    - Disallows empty paths, flag-like arguments, and directory traversal components ('..').
+    - Verifies the required file extension.
+
+    Args:
+        file_path: Input file path or string.
+        expected_suffix: Required file extension (e.g., '.json' or '.md').
+        label: Descriptive label for error messages.
+
+    Returns:
+        Path object constructed from sanitized characters.
+
+    Raises:
+        ValueError: If file_path is invalid, empty, contains disallowed characters,
+            traversal elements, or wrong suffix.
+    """
+    if not isinstance(file_path, (str, Path)):
+        raise ValueError(f"Invalid {label} path {file_path!r}; expected a Path or str.")
+
+    raw_path = str(file_path).strip()
+    if not raw_path:
+        raise ValueError(f"Invalid {label} path; path cannot be empty.")
+
+    if raw_path.startswith("-"):
+        raise ValueError(f"Invalid {label} path {raw_path!r}; cannot start with '-'.")
+
+    safe_chars: list[str] = []
+    for char in raw_path:
+        idx = _ALLOWED_PATH_CHARS.find(char)
+        if idx == -1:
+            raise ValueError(
+                f"Invalid {label} path {raw_path!r}; character {char!r} is not allowed."
+            )
+        safe_chars.append(_ALLOWED_PATH_CHARS[idx])
+
+    safe_path_str = "".join(safe_chars)
+    path_obj = Path(safe_path_str)
+
+    if ".." in path_obj.parts:
+        raise ValueError(
+            f"Invalid {label} path {raw_path!r}; directory traversal ('..') is not allowed."
+        )
+
+    if expected_suffix and path_obj.suffix.lower() != expected_suffix.lower():
+        raise ValueError(f"Invalid {label} path {raw_path!r}; expected a '{expected_suffix}' file.")
+
+    return path_obj
+
+
+def _validate_repo_file_path(
+    file_path: object,
+    *,
+    expected_suffix: str,
+    label: str = "file",
+) -> Path:
+    """Validate and sanitize a file path to prevent repository sandbox escape.
+
+    SECURITY NOTE:
+    - Verifies that untrusted CLI arguments or paths cannot escape the repository sandbox.
+    - Enforces repository root containment both before and after resolving symlinks.
+
+    Args:
+        file_path: Path or string to validate.
+        expected_suffix: Required file extension (e.g. '.json' or '.md').
+        label: Descriptive label for error messages.
+
+    Returns:
+        Validated Path within the repository root.
+
+    Raises:
+        ValueError: If the path is empty, malformed, invalid, or escapes the repository.
+        FileNotFoundError: If the file does not exist on disk.
+    """
+    path_obj = _sanitize_path_string(file_path, expected_suffix=expected_suffix, label=label)
+    repo_root_str = os.path.realpath(str(REPO_ROOT))
+    safe_path_str = str(path_obj)
+
+    if os.path.isabs(safe_path_str):
+        normalized_path = os.path.normpath(safe_path_str)
+    else:
+        normalized_path = os.path.normpath(os.path.join(repo_root_str, safe_path_str))
+
+    if normalized_path != repo_root_str and not normalized_path.startswith(repo_root_str + os.sep):
+        raise ValueError(
+            f"Invalid {label} path {safe_path_str!r}; "
+            f"escapes allowed repository root {repo_root_str!r}."
+        )
+
+    if not os.path.isfile(normalized_path):
+        raise FileNotFoundError(f"{label.capitalize()} file not found: {path_obj}")
+
+    resolved_target = os.path.realpath(normalized_path)
+    if not os.path.isfile(resolved_target):
+        raise FileNotFoundError(f"Resolved {label} file not found: {path_obj}")
+
+    if resolved_target != repo_root_str and not resolved_target.startswith(repo_root_str + os.sep):
+        raise ValueError(
+            f"Resolved {label} file {resolved_target!r} "
+            f"escapes allowed repository root {repo_root_str!r}."
+        )
+
+    return Path(resolved_target)
+
+
+def _validate_report_path(report_path: object) -> Path:
+    """Validate and sanitize a benchmark report path to prevent sandbox escape.
+
+    Args:
+        report_path: Candidate report file path.
+
+    Returns:
+        Validated Path to the benchmark report.
+    """
+    return _validate_repo_file_path(report_path, expected_suffix=".json", label="report")
+
+
+def _validate_readme_path(file_path: object) -> Path:
+    """Validate and sanitize a target README file path within the repository root.
+
+    Args:
+        file_path: Candidate README file path.
+
+    Returns:
+        Validated Path to the README file.
+    """
+    return _validate_repo_file_path(file_path, expected_suffix=".md", label="target file")
+
+
+def _load_report(report_path: Path | str) -> dict[str, object]:
     """Load and parse the JSON benchmark performance report.
 
     Args:
@@ -113,12 +288,10 @@ def _load_report(report_path: Path) -> dict[str, object]:
 
     Raises:
         FileNotFoundError: If the report file does not exist.
-        ValueError: If the file is not a valid JSON dictionary.
+        ValueError: If the file is not a valid JSON dictionary or escapes the repository.
     """
-    if not report_path.is_file():
-        raise FileNotFoundError(f"Report file not found: {report_path}")
-
-    data = orjson.loads(report_path.read_bytes())
+    safe_report_path = _validate_report_path(report_path)
+    data = orjson.loads(safe_report_path.read_bytes())
 
     if not isinstance(data, dict):
         raise ValueError("Report file must contain a top-level JSON object")
@@ -242,32 +415,7 @@ def _generate_overall_section(report: Mapping[str, object], is_vi: bool) -> str:
         )
     ]
 
-    if is_vi:
-        headers = (
-            "Chế độ",
-            "Assist Canonicalizer",
-            "HassIL trực tiếp",
-            "Mức tăng (%p)",
-            "Khôi phục",
-            "Ngăn hồi quy",
-            "Nhận diện sai",
-            "Dự phòng",
-            "P50 ms",
-            "P95 ms",
-        )
-    else:
-        headers = (
-            "Mode",
-            "Assist Canonicalizer",
-            "Direct HassIL",
-            "Uplift (%p)",
-            "Recovered",
-            "Regressions prevented",
-            "Mismatch",
-            "Fallback",
-            "P50 ms",
-            "P95 ms",
-        )
+    headers = _OVERALL_HEADERS_VI if is_vi else _OVERALL_HEADERS_EN
 
     table = _render_md_table(headers, data_rows, alignments="<>>>>>>>>>")
     versions_note = _generate_versions_note(report, is_vi=is_vi)
@@ -276,32 +424,7 @@ def _generate_overall_section(report: Mapping[str, object], is_vi: bool) -> str:
 
 def _generate_langs_section(report: Mapping[str, object], is_vi: bool) -> str:
     """Generate shortcut-aware per-language benchmark rows."""
-    if is_vi:
-        headers = (
-            "Ngôn ngữ",
-            "Assist Canonicalizer",
-            "HassIL trực tiếp",
-            "Mức tăng (%p)",
-            "Khôi phục",
-            "Ngăn hồi quy",
-            "Nhận diện sai",
-            "Dự phòng",
-            "P50 ms",
-            "P95 ms",
-        )
-    else:
-        headers = (
-            "Language",
-            "Assist Canonicalizer",
-            "Direct HassIL",
-            "Uplift (%p)",
-            "Recovered",
-            "Regressions prevented",
-            "Mismatch",
-            "Fallback",
-            "P50 ms",
-            "P95 ms",
-        )
+    headers = _LANGS_HEADERS_VI if is_vi else _LANGS_HEADERS_EN
 
     data_rows: list[tuple[str, ...]] = []
 
@@ -337,7 +460,7 @@ def _generate_langs_section(report: Mapping[str, object], is_vi: bool) -> str:
     return "\n\n" + table + "\n\n"
 
 
-def _update_file(file_path: Path, overall_content: str, langs_content: str) -> None:
+def _update_file(file_path: Path | str, overall_content: str, langs_content: str) -> None:
     """Update comment blocks in the target README file with new benchmark results.
 
     Args:
@@ -347,27 +470,25 @@ def _update_file(file_path: Path, overall_content: str, langs_content: str) -> N
 
     Raises:
         FileNotFoundError: If the target file doesn't exist.
-        ValueError: If comment markers are missing from the file.
+        ValueError: If comment markers are missing from the file or path escapes the repository.
     """
-    if not file_path.is_file():
-        raise FileNotFoundError(f"Target file not found: {file_path}")
-
-    content = file_path.read_text(encoding="utf-8")
+    safe_file_path = _validate_readme_path(file_path)
+    content = safe_file_path.read_text(encoding="utf-8")
 
     match_overall = OVERALL_PATTERN.search(content)
     if not match_overall:
-        raise ValueError(f"Could not find overall comment markers in {file_path.name}")
+        raise ValueError(f"Could not find overall comment markers in {safe_file_path.name}")
 
     content = content[: match_overall.start(2)] + overall_content + content[match_overall.end(2) :]
 
     match_langs = LANGS_PATTERN.search(content)
     if not match_langs:
-        raise ValueError(f"Could not find language comment markers in {file_path.name}")
+        raise ValueError(f"Could not find language comment markers in {safe_file_path.name}")
 
     content = content[: match_langs.start(2)] + langs_content + content[match_langs.end(2) :]
 
-    file_path.write_text(content, encoding="utf-8")
-    print(f"Successfully updated benchmark results in {file_path.name}")
+    safe_file_path.write_text(content, encoding="utf-8")
+    print(f"Successfully updated benchmark results in {safe_file_path.name}")
 
 
 def main() -> None:

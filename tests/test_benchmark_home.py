@@ -544,3 +544,223 @@ def test_baseline_regressions_invalid_passed_cases(tmp_path: Path, invalid_count
             max_p95_regression_pct=10.0,
             allow_homeassistant_upgrade=False,
         )
+
+
+def test_validate_report_path_valid(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Accept valid report json files within the repository root."""
+    from tools import update_readme_benchmark
+
+    monkeypatch.setattr(update_readme_benchmark, "REPO_ROOT", tmp_path)
+    report_file = tmp_path / "sample_report.json"
+    report_file.write_text("{}", encoding="utf-8")
+
+    assert update_readme_benchmark._validate_report_path(report_file) == report_file.resolve()
+    assert (
+        update_readme_benchmark._validate_report_path("sample_report.json") == report_file.resolve()
+    )
+
+
+def test_validate_readme_path_valid(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Accept valid README markdown files within the repository root."""
+    from tools import update_readme_benchmark
+
+    monkeypatch.setattr(update_readme_benchmark, "REPO_ROOT", tmp_path)
+    readme_file = tmp_path / "README.md"
+    readme_file.write_text("# Title", encoding="utf-8")
+
+    assert update_readme_benchmark._validate_readme_path(readme_file) == readme_file.resolve()
+    assert update_readme_benchmark._validate_readme_path("README.md") == readme_file.resolve()
+
+
+@pytest.mark.parametrize("bad_val", [None, 123, [], {}, True, False])
+def test_validate_path_rejects_non_string_path(bad_val: Any) -> None:
+    """Reject non-string, non-Path objects with ValueError."""
+    from tools.update_readme_benchmark import _validate_report_path
+
+    with pytest.raises(ValueError, match="expected a Path or str"):
+        _validate_report_path(bad_val)
+
+
+@pytest.mark.parametrize("empty_val", ["", "   ", "\t\n"])
+def test_validate_path_rejects_empty(empty_val: str) -> None:
+    """Reject empty or whitespace-only paths with ValueError."""
+    from tools.update_readme_benchmark import _validate_report_path
+
+    with pytest.raises(ValueError, match="cannot be empty"):
+        _validate_report_path(empty_val)
+
+
+@pytest.mark.parametrize("flag", ["-h", "--help", "-f", "--report.json"])
+def test_validate_path_rejects_flags(flag: str) -> None:
+    """Reject CLI flags or arguments beginning with '-'."""
+    from tools.update_readme_benchmark import _validate_report_path
+
+    with pytest.raises(ValueError, match="cannot start with '-'"):
+        _validate_report_path(flag)
+
+
+@pytest.mark.parametrize(
+    "bad_char_path",
+    ["report;rm.json", "rep$ort.json", "rep`ort.json", "foo|bar.json"],
+)
+def test_validate_path_rejects_disallowed_characters(bad_char_path: str) -> None:
+    """Reject path inputs containing disallowed shell or filesystem characters."""
+    from tools.update_readme_benchmark import _validate_readme_path, _validate_report_path
+
+    with pytest.raises(ValueError, match="is not allowed"):
+        _validate_report_path(bad_char_path)
+
+    bad_readme_path = bad_char_path.replace(".json", ".md")
+    with pytest.raises(ValueError, match="is not allowed"):
+        _validate_readme_path(bad_readme_path)
+
+
+@pytest.mark.parametrize("traversal_path", ["../report.json", "sub/../../report.json", ".."])
+def test_validate_path_rejects_traversal(traversal_path: str) -> None:
+    """Reject paths containing directory traversal '..' parts."""
+    from tools.update_readme_benchmark import _validate_readme_path, _validate_report_path
+
+    with pytest.raises(ValueError, match="directory traversal"):
+        _validate_report_path(traversal_path)
+
+    bad_readme_traversal = traversal_path.replace(".json", ".md")
+    with pytest.raises(ValueError, match="directory traversal"):
+        _validate_readme_path(bad_readme_traversal)
+
+
+def test_validate_path_enforces_extension(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Enforce expected file extensions for reports (.json) and readme (.md)."""
+    from tools import update_readme_benchmark
+
+    monkeypatch.setattr(update_readme_benchmark, "REPO_ROOT", tmp_path)
+    wrong_report = tmp_path / "report.yaml"
+    wrong_report.write_text("{}", encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"expected a '\.json' file"):
+        update_readme_benchmark._validate_report_path(wrong_report)
+
+    wrong_readme = tmp_path / "README.txt"
+    wrong_readme.write_text("text", encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"expected a '\.md' file"):
+        update_readme_benchmark._validate_readme_path(wrong_readme)
+
+
+def test_validate_path_rejects_outside_repo_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reject absolute paths that target files outside the repository root."""
+    from tools import update_readme_benchmark
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    outside_file = outside_dir / "report.json"
+    outside_file.write_text("{}", encoding="utf-8")
+    outside_readme = outside_dir / "README.md"
+    outside_readme.write_text("text", encoding="utf-8")
+
+    monkeypatch.setattr(update_readme_benchmark, "REPO_ROOT", repo_dir)
+
+    with pytest.raises(ValueError, match="escapes allowed repository root"):
+        update_readme_benchmark._validate_report_path(outside_file)
+
+    with pytest.raises(ValueError, match="escapes allowed repository root"):
+        update_readme_benchmark._validate_readme_path(outside_readme)
+
+
+def test_validate_path_rejects_missing_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reject paths to non-existent files with FileNotFoundError."""
+    from tools import update_readme_benchmark
+
+    monkeypatch.setattr(update_readme_benchmark, "REPO_ROOT", tmp_path)
+
+    with pytest.raises(FileNotFoundError, match="file not found"):
+        update_readme_benchmark._validate_report_path(tmp_path / "missing.json")
+
+    with pytest.raises(FileNotFoundError, match="file not found"):
+        update_readme_benchmark._validate_readme_path(tmp_path / "missing.md")
+
+
+def test_validate_path_rejects_symlink_escaping_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reject symlinks pointing to targets outside the repository root."""
+    from tools import update_readme_benchmark
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    outside_file = tmp_path / "secret.json"
+    outside_file.write_text("{}", encoding="utf-8")
+
+    symlink_file = repo_dir / "link.json"
+    symlink_file.symlink_to(outside_file)
+
+    outside_readme = tmp_path / "secret.md"
+    outside_readme.write_text("text", encoding="utf-8")
+
+    symlink_readme = repo_dir / "link.md"
+    symlink_readme.symlink_to(outside_readme)
+
+    monkeypatch.setattr(update_readme_benchmark, "REPO_ROOT", repo_dir)
+
+    with pytest.raises(ValueError, match="escapes allowed repository root"):
+        update_readme_benchmark._validate_report_path(symlink_file)
+
+    with pytest.raises(ValueError, match="escapes allowed repository root"):
+        update_readme_benchmark._validate_readme_path(symlink_readme)
+
+
+def test_load_report_path_validation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify _load_report enforces path validation before opening."""
+    from tools import update_readme_benchmark
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    valid_report = repo_dir / "report.json"
+    valid_data: dict[str, object] = {
+        "report_schema_version": update_readme_benchmark.MANAGED_REPORT_SCHEMA_VERSION,
+        "authoritative": True,
+        "benchmark_mode": "managed_live",
+        "execution_tier": "managed_live",
+        "settings": {
+            "hassil_baseline": "paired_original_query_to_live_default_agent",
+        },
+        "summary": {},
+    }
+    valid_report.write_bytes(orjson.dumps(valid_data))
+
+    monkeypatch.setattr(update_readme_benchmark, "REPO_ROOT", repo_dir)
+
+    loaded = update_readme_benchmark._load_report(valid_report)
+    assert loaded == valid_data
+
+    with pytest.raises(ValueError, match="escapes allowed repository root"):
+        update_readme_benchmark._load_report("/etc/passwd.json")
+
+
+def test_update_file_path_validation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify _update_file enforces path validation before reading or writing."""
+    from tools import update_readme_benchmark
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    readme = repo_dir / "README.md"
+    readme.write_text(
+        "<!-- BENCHMARK_OVERALL_START -->old<!-- BENCHMARK_OVERALL_END -->\n"
+        "<!-- BENCHMARK_LANGS_START -->old<!-- BENCHMARK_LANGS_END -->\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(update_readme_benchmark, "REPO_ROOT", repo_dir)
+
+    update_readme_benchmark._update_file(readme, "new_overall", "new_langs")
+    content = readme.read_text(encoding="utf-8")
+    assert "new_overall" in content
+    assert "new_langs" in content
+
+    with pytest.raises(ValueError, match="escapes allowed repository root"):
+        update_readme_benchmark._update_file("/etc/passwd.md", "a", "b")

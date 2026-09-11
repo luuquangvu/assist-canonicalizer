@@ -52,7 +52,7 @@ The benchmark runner (`tools/benchmark.py`) manages the following lifecycle:
 From the repository root, prepare the environment and run the complete suite:
 
 ```bash
-uv sync --all-groups
+uv sync --locked --all-groups
 uv run tools/benchmark.py
 ```
 

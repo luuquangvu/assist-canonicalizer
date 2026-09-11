@@ -453,7 +453,8 @@ def verify_benchmark_dependencies() -> dict[str, Any]:
             installed_version = importlib.metadata.version(declared.name)
         except importlib.metadata.PackageNotFoundError as err:
             raise BenchmarkError(
-                f"Missing {BENCHMARK_GROUP} dependency {declared.name}; run uv sync --all-groups"
+                f"Missing {BENCHMARK_GROUP} dependency {declared.name}; run "
+                "uv sync --locked --all-groups"
             ) from err
 
         constraints = sorted(manifest_requirements.get(normalized_name, ()))
@@ -468,7 +469,7 @@ def verify_benchmark_dependencies() -> dict[str, Any]:
                 raise BenchmarkError(
                     f"{declared.name} {installed_version} does not match Home Assistant "
                     f"requirement {raw_constraint}; update the lockfile and run "
-                    "uv sync --all-groups"
+                    "uv sync --locked --all-groups"
                 )
         resolved[normalized_name] = {
             "version": installed_version,
