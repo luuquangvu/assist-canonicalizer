@@ -209,7 +209,7 @@ The managed-live benchmark runs every query twice against the same Home Assistan
 To reproduce the benchmark from [`tests/real_world/`](tests/real_world/), run:
 
 ```bash
-uv sync --all-groups
+uv sync --locked --all-groups
 uv run tools/benchmark.py
 ```
 

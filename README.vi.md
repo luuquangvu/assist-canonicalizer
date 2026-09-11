@@ -209,7 +209,7 @@ Benchmark `managed_live` chạy mỗi truy vấn hai lần trên cùng một mô
 Để tái tạo bài đo kiểm hiệu năng từ [`tests/real_world/`](tests/real_world/), chạy lệnh:
 
 ```bash
-uv sync --all-groups
+uv sync --locked --all-groups
 uv run tools/benchmark.py
 ```
 

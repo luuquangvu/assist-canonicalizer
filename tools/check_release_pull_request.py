@@ -9,7 +9,9 @@ from pathlib import Path
 
 import orjson
 
-VERSION_PATTERN = r"(([0-9]+\.[0-9]+\.[0-9]+)(?:-rc\.[0-9]+)?)"
+VERSION_CORE_PATTERN = r"\d+\.\d+\.\d+"
+VERSION_PRERELEASE_PATTERN = r"-rc\.\d+"
+VERSION_PATTERN = rf"({VERSION_CORE_PATTERN}(?:{VERSION_PRERELEASE_PATTERN})?)"
 
 
 @dataclass(frozen=True)
@@ -27,7 +29,7 @@ def _normalized_version(value: object) -> str | None:
     """Return a valid release version string or None."""
     if not isinstance(value, str):
         return None
-    match = re.fullmatch(VERSION_PATTERN, value)
+    match = re.fullmatch(VERSION_PATTERN, value, flags=re.ASCII)
     return match[1] if match else None
 
 
@@ -53,7 +55,7 @@ def _evaluate_release_gate(
     pyproject_path: Path,
 ) -> ReleaseGateResult:
     """Evaluate release PR labels, branch name, and metadata versions."""
-    branch_match = re.fullmatch(rf"release/{VERSION_PATTERN}", branch)
+    branch_match = re.fullmatch(rf"release/{VERSION_PATTERN}", branch, flags=re.ASCII)
     branch_version = branch_match[1] if branch_match else None
 
     manifest_version, manifest_version_full = _read_manifest_version(manifest_path)
@@ -74,7 +76,9 @@ def _evaluate_release_gate(
             message=message,
             version=manifest_version,
             tag=manifest_version,
-            prerelease="rc" in manifest_version,
+            prerelease=bool(
+                re.search(VERSION_PRERELEASE_PATTERN, manifest_version, flags=re.ASCII)
+            ),
         )
 
     message = (

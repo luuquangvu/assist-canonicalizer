@@ -43,6 +43,9 @@ ha-benchmark = [
   "rf-protocols",
 ]
 
+[tool.uv]
+python-preference = "only-managed"
+
 [tool.ruff]
 line-length = 100
 target-version = "py313"

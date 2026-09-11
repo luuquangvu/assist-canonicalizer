@@ -4,16 +4,16 @@ Thanks for contributing to Assist Canonicalizer, a Home Assistant custom integra
 
 ## Development setup
 
-Use a POSIX environment; Linux, or WSL are recommended. The project requires Python 3.14.2 or newer, [uv](https://docs.astral.sh/uv/), and Node.js/npm.
+Use a POSIX environment; Linux, or WSL are recommended. The project requires Python 3.14.2 or newer, [uv](https://docs.astral.sh/uv/), and Node.js 24 LTS.
 
 ```bash
 git clone https://github.com/luuquangvu/assist-canonicalizer.git
 cd assist-canonicalizer
-uv sync --all-groups
-npm ci
+uv sync --locked --all-groups
+npm ci --ignore-scripts --allow-git=none
 ```
 
-Use `uv run` for Python commands. Keep `uv.lock` synchronized with `pyproject.toml`, and keep `package-lock.json` synchronized with `package.json`.
+Use `uv run --locked` for Python commands. Keep `uv.lock` synchronized with `pyproject.toml`, and keep `package-lock.json` synchronized with `package.json`.
 
 Manage Python dependencies exclusively with uv; do not edit `uv.lock` manually.
 
@@ -31,13 +31,13 @@ Manage Python dependencies exclusively with uv; do not edit `uv.lock` manually.
 Run a focused test while developing, for example:
 
 ```bash
-uv run pytest tests/test_conversation.py
+uv run --locked pytest tests/test_conversation.py
 ```
 
 Run the full local gate before submitting:
 
 ```bash
-uv run tools/validate.py
+uv run --locked tools/validate.py
 ```
 
 Validation checks dependency alignment, Ruff, Ty, Pyright, Interrogate, Prettier, and the full pytest suite. It passes only when the output contains `VALIDATION_SUCCESS`; Ruff and Prettier may modify files, so review the diff afterward.
@@ -45,7 +45,7 @@ Validation checks dependency alignment, Ruff, Ty, Pyright, Interrogate, Prettier
 Run the compatibility matrix when changing Home Assistant API usage, compatibility code, dependencies, or `tools/compatibility_matrix.json`:
 
 ```bash
-uv run tools/validate_compatibility.py
+uv run --locked tools/validate_compatibility.py
 ```
 
 For user-facing changes, keep `strings.json` and the translation files aligned. Translation tests enforce their structure and key order.
@@ -53,7 +53,7 @@ For user-facing changes, keep `strings.json` and the translation files aligned. 
 Run the authoritative managed-live benchmark when changing recognition behavior, benchmark inputs, or performance-sensitive code:
 
 ```bash
-uv run tools/benchmark.py
+uv run --locked tools/benchmark.py
 ```
 
 `tools/benchmark_offline.py` is useful for lexical diagnostics and profiling, but is not managed-live accuracy evidence. See [`tools/ha_dev/README.md`](tools/ha_dev/README.md) before changing the tracked benchmark fixture or corpus.

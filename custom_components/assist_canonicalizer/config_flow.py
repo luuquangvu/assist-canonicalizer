@@ -99,9 +99,7 @@ def _config_schema(
 ) -> vol.Schema:
     """Return config schema for fallback agent and confidence options."""
     defaults = defaults or {}
-    fallback_default = str(defaults.get(ConfigKey.FALLBACK_AGENT_ID, ""))
-    if not fallback_default and HOME_ASSISTANT_AGENT:
-        fallback_default = HOME_ASSISTANT_AGENT
+    fallback_default = str(defaults.get(ConfigKey.FALLBACK_AGENT_ID, "") or HOME_ASSISTANT_AGENT)
     raw_hotword = defaults.get(ConfigKey.HOTWORD, DEFAULT_HOTWORD)
     hotword_default = normalize_hotword_list(raw_hotword)
     return vol.Schema(
