@@ -90,17 +90,18 @@ def test_language_variant_for_resolves_equal_scores_deterministically() -> None:
         ("zh-CN", "zh-HK", "zh-TW"),
     ]
 
-    with patch.dict(sys.modules, {"home_assistant_intents": mock_module}):
+    def assert_variant(language: str, expected: str) -> None:
+        """Clear cache and assert deterministic language variant."""
         # language_variant_for caches per language code; clear between calls
         # so each assertion exercises a fresh package enumeration order.
         language_variant_for.cache_clear()
-        assert language_variant_for("pt-AO") == "pt"
-        language_variant_for.cache_clear()
-        assert language_variant_for("pt-AO") == "pt"
-        language_variant_for.cache_clear()
-        assert language_variant_for("zh-SG") == "zh-CN"
-        language_variant_for.cache_clear()
-        assert language_variant_for("zh-SG") == "zh-CN"
+        assert language_variant_for(language) == expected
+
+    with patch.dict(sys.modules, {"home_assistant_intents": mock_module}):
+        assert_variant("pt-AO", "pt")
+        assert_variant("pt-AO", "pt")
+        assert_variant("zh-SG", "zh-CN")
+        assert_variant("zh-SG", "zh-CN")
     language_variant_for.cache_clear()
 
 
