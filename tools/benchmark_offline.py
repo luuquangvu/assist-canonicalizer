@@ -12,7 +12,6 @@ against a managed live Home Assistant instance.
 from __future__ import annotations
 
 import argparse
-import asyncio
 import cProfile
 import gc
 import importlib.metadata
@@ -3127,7 +3126,7 @@ def _print_evaluation_completion(
     print("\nEvaluation Complete.")
 
 
-async def run_evaluation(
+def run_evaluation(
     datasets: dict[str, str],
     failure_limit: int,
     output_json: str | None,
@@ -4785,7 +4784,16 @@ def _profile_evaluate(
         timer.start(label)
 
         if granularity == "coarse" or is_warmup:
-            asyncio.run(
+            run_evaluation(
+                datasets=dict(datasets),
+                failure_limit=0,
+                output_json=None if is_warmup else json_path,
+                output_md=None if is_warmup else md_path,
+                min_intent_slot_accuracy=None,
+                max_fallback_rate=None,
+            )
+        else:
+            with timer.phase("evaluate_total"):
                 run_evaluation(
                     datasets=dict(datasets),
                     failure_limit=0,
@@ -4793,19 +4801,6 @@ def _profile_evaluate(
                     output_md=None if is_warmup else md_path,
                     min_intent_slot_accuracy=None,
                     max_fallback_rate=None,
-                )
-            )
-        else:
-            with timer.phase("evaluate_total"):
-                asyncio.run(
-                    run_evaluation(
-                        datasets=dict(datasets),
-                        failure_limit=0,
-                        output_json=None if is_warmup else json_path,
-                        output_md=None if is_warmup else md_path,
-                        min_intent_slot_accuracy=None,
-                        max_fallback_rate=None,
-                    )
                 )
         timer.stop()
         if not is_warmup and label in timer.phases:
@@ -6447,23 +6442,21 @@ def _run_accuracy_benchmark(
         "For production accuracy measurement use: uv run tools/benchmark.py\n",
         file=sys.stderr,
     )
-    success = asyncio.run(
-        run_evaluation(
-            datasets=datasets,
-            failure_limit=args.failure_limit,
-            output_json=paths.output_json,
-            output_md=paths.output_md,
-            output_txt=paths.output_txt,
-            min_intent_slot_accuracy=args.min_intent_slot_accuracy,
-            max_fallback_rate=args.max_fallback_rate,
-            max_mismatch_rate=args.max_mismatch_rate,
-            min_language_intent_slot_accuracy=args.min_language_intent_slot_accuracy,
-            max_language_fallback_rate=args.max_language_fallback_rate,
-            max_language_mismatch_rate=args.max_language_mismatch_rate,
-            datasets_dir=str(Path(paths.datasets_dir).relative_to(_REPO_ROOT)),
-            skip_hassil=args.skip_hassil,
-            skip_ablations=args.skip_ablations,
-        )
+    success = run_evaluation(
+        datasets=datasets,
+        failure_limit=args.failure_limit,
+        output_json=paths.output_json,
+        output_md=paths.output_md,
+        output_txt=paths.output_txt,
+        min_intent_slot_accuracy=args.min_intent_slot_accuracy,
+        max_fallback_rate=args.max_fallback_rate,
+        max_mismatch_rate=args.max_mismatch_rate,
+        min_language_intent_slot_accuracy=args.min_language_intent_slot_accuracy,
+        max_language_fallback_rate=args.max_language_fallback_rate,
+        max_language_mismatch_rate=args.max_language_mismatch_rate,
+        datasets_dir=str(Path(paths.datasets_dir).relative_to(_REPO_ROOT)),
+        skip_hassil=args.skip_hassil,
+        skip_ablations=args.skip_ablations,
     )
     raise SystemExit(0 if success else 1)
 
