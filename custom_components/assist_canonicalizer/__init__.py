@@ -264,10 +264,11 @@ async def _async_warmup_pipeline_languages(
         except Exception:
             return
 
+    if runtime.closed:
+        return
+
     async with asyncio.TaskGroup() as task_group:
         for language in languages:
-            if runtime.closed:
-                return
             # The setup task tracked by the runtime owns this TaskGroup; the
             # TaskGroup, in turn, cancels and drains its language children.
             task_group.create_task(_warmup_single_language(hass, runtime, language))
