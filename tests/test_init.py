@@ -556,3 +556,238 @@ async def test_async_setup_entry_triggers_warmup(monkeypatch: pytest.MonkeyPatch
     assert result is True
     assert len(captured_tasks) == 1
     assert captured_tasks[0] is not None
+
+
+@pytest.mark.asyncio
+async def test_warmup_single_language_prepares_ranking_and_default_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pre-warm dynamic ranking structures and default agent during single language warmup."""
+    hass = MagicMock()
+    runtime = CanonicalizerRuntime()
+
+    mock_load = AsyncMock(return_value=MagicMock())
+    mock_prepare_ranking = AsyncMock()
+    monkeypatch.setattr(CanonicalizerRuntime, "async_load_index_from_store", mock_load)
+    monkeypatch.setattr(
+        CanonicalizerRuntime, "async_prepare_language_ranking", mock_prepare_ranking
+    )
+
+    mock_default_agent = MagicMock()
+    mock_default_agent.async_prepare = AsyncMock()
+    monkeypatch.setattr(
+        "custom_components.assist_canonicalizer.async_get_agent",
+        lambda _hass, _agent_id: mock_default_agent,
+    )
+
+    await _warmup_single_language(hass, runtime, "en")
+
+    mock_load.assert_awaited_once_with(hass, "en")
+    mock_prepare_ranking.assert_awaited_once_with(hass, "en")
+    mock_default_agent.async_prepare.assert_awaited_once_with("en")
+
+
+@pytest.mark.asyncio
+async def test_warmup_single_language_prepares_ranking_when_index_already_cached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pre-warm dynamic ranking structures even when index is already present in memory."""
+    hass = MagicMock()
+    runtime = CanonicalizerRuntime()
+    existing_index = MagicMock()
+    runtime.indexes["en"] = existing_index
+
+    mock_load = AsyncMock()
+    mock_rebuild = AsyncMock()
+    mock_prepare_ranking = AsyncMock()
+    monkeypatch.setattr(CanonicalizerRuntime, "async_load_index_from_store", mock_load)
+    monkeypatch.setattr(CanonicalizerRuntime, "async_rebuild_index", mock_rebuild)
+    monkeypatch.setattr(
+        CanonicalizerRuntime, "async_prepare_language_ranking", mock_prepare_ranking
+    )
+
+    mock_default_agent = MagicMock()
+    mock_default_agent.async_prepare = AsyncMock()
+    monkeypatch.setattr(
+        "custom_components.assist_canonicalizer.async_get_agent",
+        lambda _hass, _agent_id: mock_default_agent,
+    )
+
+    await _warmup_single_language(hass, runtime, "en")
+
+    mock_load.assert_not_called()
+    mock_rebuild.assert_not_called()
+    mock_prepare_ranking.assert_awaited_once_with(hass, "en")
+    mock_default_agent.async_prepare.assert_awaited_once_with("en")
+
+
+@pytest.mark.asyncio
+async def test_warmup_single_language_prepares_ranking_when_index_rebuilt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pre-warm dynamic ranking structures when an index must be rebuilt from scratch."""
+    hass = MagicMock()
+    runtime = CanonicalizerRuntime()
+
+    mock_load = AsyncMock(return_value=None)
+    mock_rebuild = AsyncMock()
+    mock_prepare_ranking = AsyncMock()
+    monkeypatch.setattr(CanonicalizerRuntime, "async_load_index_from_store", mock_load)
+    monkeypatch.setattr(CanonicalizerRuntime, "async_rebuild_index", mock_rebuild)
+    monkeypatch.setattr(
+        CanonicalizerRuntime, "async_prepare_language_ranking", mock_prepare_ranking
+    )
+
+    mock_default_agent = MagicMock()
+    mock_default_agent.async_prepare = AsyncMock()
+    monkeypatch.setattr(
+        "custom_components.assist_canonicalizer.async_get_agent",
+        lambda _hass, _agent_id: mock_default_agent,
+    )
+
+    await _warmup_single_language(hass, runtime, "en")
+
+    mock_load.assert_awaited_once_with(hass, "en")
+    mock_rebuild.assert_awaited_once_with(hass, "en", log_error=False)
+    mock_prepare_ranking.assert_awaited_once_with(hass, "en")
+    mock_default_agent.async_prepare.assert_awaited_once_with("en")
+
+
+@pytest.mark.asyncio
+async def test_warmup_single_language_handles_missing_default_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Warmup completes cleanly when default agent is unavailable."""
+    hass = MagicMock()
+    runtime = CanonicalizerRuntime()
+
+    mock_load = AsyncMock(return_value=MagicMock())
+    mock_prepare_ranking = AsyncMock()
+    monkeypatch.setattr(CanonicalizerRuntime, "async_load_index_from_store", mock_load)
+    monkeypatch.setattr(
+        CanonicalizerRuntime, "async_prepare_language_ranking", mock_prepare_ranking
+    )
+
+    monkeypatch.setattr(
+        "custom_components.assist_canonicalizer.async_get_agent",
+        lambda _hass, _agent_id: None,
+    )
+
+    await _warmup_single_language(hass, runtime, "en")
+
+    mock_load.assert_awaited_once_with(hass, "en")
+    mock_prepare_ranking.assert_awaited_once_with(hass, "en")
+
+
+@pytest.mark.asyncio
+async def test_warmup_single_language_handles_agent_without_async_prepare(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Warmup completes cleanly when default agent lacks an async_prepare attribute."""
+    hass = MagicMock()
+    runtime = CanonicalizerRuntime()
+
+    mock_load = AsyncMock(return_value=MagicMock())
+    mock_prepare_ranking = AsyncMock()
+    monkeypatch.setattr(CanonicalizerRuntime, "async_load_index_from_store", mock_load)
+    monkeypatch.setattr(
+        CanonicalizerRuntime, "async_prepare_language_ranking", mock_prepare_ranking
+    )
+
+    mock_agent = MagicMock(spec=[])
+    monkeypatch.setattr(
+        "custom_components.assist_canonicalizer.async_get_agent",
+        lambda _hass, _agent_id: mock_agent,
+    )
+
+    await _warmup_single_language(hass, runtime, "en")
+
+    mock_load.assert_awaited_once_with(hass, "en")
+    mock_prepare_ranking.assert_awaited_once_with(hass, "en")
+
+
+@pytest.mark.asyncio
+async def test_warmup_single_language_handles_sync_default_agent_prepare(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Warmup completes cleanly when default agent async_prepare returns a non-awaitable."""
+    hass = MagicMock()
+    runtime = CanonicalizerRuntime()
+
+    mock_load = AsyncMock(return_value=MagicMock())
+    mock_prepare_ranking = AsyncMock()
+    monkeypatch.setattr(CanonicalizerRuntime, "async_load_index_from_store", mock_load)
+    monkeypatch.setattr(
+        CanonicalizerRuntime, "async_prepare_language_ranking", mock_prepare_ranking
+    )
+
+    mock_default_agent = MagicMock()
+    mock_default_agent.async_prepare = MagicMock(return_value=None)
+    monkeypatch.setattr(
+        "custom_components.assist_canonicalizer.async_get_agent",
+        lambda _hass, _agent_id: mock_default_agent,
+    )
+
+    await _warmup_single_language(hass, runtime, "en")
+
+    mock_load.assert_awaited_once_with(hass, "en")
+    mock_prepare_ranking.assert_awaited_once_with(hass, "en")
+    mock_default_agent.async_prepare.assert_called_once_with("en")
+
+
+@pytest.mark.asyncio
+async def test_warmup_single_language_suppresses_ranking_prepare_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Warmup suppresses ranking preparation failures while continuing default agent prepare."""
+    hass = MagicMock()
+    runtime = CanonicalizerRuntime()
+
+    mock_load = AsyncMock(return_value=MagicMock())
+    mock_prepare_ranking = AsyncMock(side_effect=RuntimeError("ranking prep failed"))
+    monkeypatch.setattr(CanonicalizerRuntime, "async_load_index_from_store", mock_load)
+    monkeypatch.setattr(
+        CanonicalizerRuntime, "async_prepare_language_ranking", mock_prepare_ranking
+    )
+
+    mock_default_agent = MagicMock()
+    mock_default_agent.async_prepare = AsyncMock()
+    monkeypatch.setattr(
+        "custom_components.assist_canonicalizer.async_get_agent",
+        lambda _hass, _agent_id: mock_default_agent,
+    )
+
+    await _warmup_single_language(hass, runtime, "en")
+
+    mock_load.assert_awaited_once_with(hass, "en")
+    mock_prepare_ranking.assert_awaited_once_with(hass, "en")
+    mock_default_agent.async_prepare.assert_awaited_once_with("en")
+
+
+@pytest.mark.asyncio
+async def test_warmup_single_language_suppresses_default_agent_prepare_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Warmup suppresses default agent preparation failures without raising."""
+    hass = MagicMock()
+    runtime = CanonicalizerRuntime()
+
+    mock_load = AsyncMock(return_value=MagicMock())
+    mock_prepare_ranking = AsyncMock()
+    monkeypatch.setattr(CanonicalizerRuntime, "async_load_index_from_store", mock_load)
+    monkeypatch.setattr(
+        CanonicalizerRuntime, "async_prepare_language_ranking", mock_prepare_ranking
+    )
+
+    mock_default_agent = MagicMock()
+    mock_default_agent.async_prepare = AsyncMock(side_effect=ValueError("agent prep failed"))
+    monkeypatch.setattr(
+        "custom_components.assist_canonicalizer.async_get_agent",
+        lambda _hass, _agent_id: mock_default_agent,
+    )
+
+    await _warmup_single_language(hass, runtime, "en")
+
+    mock_load.assert_awaited_once_with(hass, "en")
+    mock_prepare_ranking.assert_awaited_once_with(hass, "en")
+    mock_default_agent.async_prepare.assert_awaited_once_with("en")

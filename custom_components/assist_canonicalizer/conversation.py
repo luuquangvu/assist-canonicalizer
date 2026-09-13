@@ -268,6 +268,15 @@ class AssistCanonicalizerConversationEntity(
                 index = await self._runtime.async_load_index_from_store(self.hass, language)
             if index is None:
                 await self._runtime.async_rebuild_index(self.hass, language)
+            try:
+                await self._runtime.async_prepare_language_ranking(self.hass, language)
+            except Exception as err:
+                _LOGGER.debug(
+                    "Failed to prepare ranking for language %s: %s",
+                    language,
+                    err,
+                    exc_info=True,
+                )
 
     async def async_reload(self, language: str | None = None) -> None:
         """Reload cached indexes for a language."""

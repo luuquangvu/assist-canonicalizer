@@ -343,6 +343,7 @@ async def test_conversation_entity_prepare() -> None:
     runtime = CanonicalizerRuntime()
     entity = AssistCanonicalizerConversationEntity(entry, runtime)
     entity.hass = MagicMock()
+    entity.hass.async_add_executor_job = AsyncMock()
 
     runtime.indexes["en"] = MagicMock()
     with patch.object(
@@ -369,6 +370,24 @@ async def test_conversation_entity_prepare() -> None:
         await entity.async_prepare("en")
         mock_load.assert_called_once()
         mock_rebuild.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_conversation_entity_prepare_suppresses_ranking_prepare_error() -> None:
+    """Test async_prepare suppresses ranking preparation failure without propagating."""
+    entry = MagicMock()
+    runtime = CanonicalizerRuntime()
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    entity.hass = MagicMock()
+    runtime.indexes["en"] = MagicMock()
+
+    with patch.object(
+        CanonicalizerRuntime,
+        "async_prepare_language_ranking",
+        AsyncMock(side_effect=RuntimeError("ranking prep failed")),
+    ) as mock_prep:
+        await entity.async_prepare("en")
+        mock_prep.assert_awaited_once_with(entity.hass, "en")
 
 
 @pytest.mark.asyncio

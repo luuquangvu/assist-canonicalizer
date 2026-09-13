@@ -298,7 +298,7 @@ Returns a real-time snapshot of the integration's runtime state, including:
 - `last_fallback_reason`: Why the last query fell back (if applicable)
 - `last_error`: The last error encountered (if any)
 - `dynamic_candidate_count`: Number of registry-based candidates generated for the most recent request
-- `pending_rebuild_languages`: Languages with an index rebuild currently in progress
+- `pending_rebuild_languages`: Languages with an index rebuild currently in progress (reports active index rebuild tasks only, not complete background warmup status)
 - `registry_slot_counts`: Number of values available per registry slot (entity names, area names, etc.)
 - `dynamic_candidate_generation`: Status and limits for dynamic candidate expansion
 - `subscribed_intent_source_counts`: Intent counts per subscribed conversation agent source
@@ -364,9 +364,14 @@ Before changing thresholds, check the runtime state and candidate coverage, then
 
 **The integration appears slow on the first query.**
 
-Indexes for configured Assist pipeline languages are built proactively in the background at startup and after reloads. Under normal conditions, the first query for a language should hit an already-warm cache and experience no cold-start delay.
+Cold-start delays are eliminated under normal conditions because indexes, dynamic ranking templates, and slot token indexes are proactively prewarmed in the background at startup and after reloads for all configured Assist pipeline languages. For the default conversation agent, the integration attempts preparation only when a compatible agent supporting `async_prepare` is available; preparation failures are suppressed to prevent startup disruption, so this cache may not be ready in all cases.
 
-If a delay does occur, the index may not have finished building yet (check `pending_rebuild_languages` in the **Diagnostics** output). Languages outside your pipeline configuration are built lazily on first use. Subsequent queries use the cached in-memory index and are much faster.
+If a delay is still observed on the very first query:
+
+1. **Warmup still in progress**: If a query is issued immediately after Home Assistant boots or the integration reloads, background prewarming may still be finishing. Note that `pending_rebuild_languages` in the **Diagnostics** output reports only active index rebuild tasks rather than overall background warmup completion, and may be empty while other warmup work (such as ranking and default-agent preparation) continues.
+2. **Unconfigured language**: Queries in languages outside your configured Assist pipelines are compiled and cached lazily on first use.
+
+Under normal conditions, subsequent queries hit the cached in-memory structures and run with minimal latency.
 
 **I changed my entities/areas/floors but the canonicalizer doesn't reflect them.**
 

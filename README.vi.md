@@ -298,7 +298,7 @@ Trả về thông tin trạng thái hoạt động theo thời gian thực của
 - `last_fallback_reason`: Lý do câu lệnh gần nhất bị chuyển tiếp dự phòng.
 - `last_error`: Lỗi gần nhất ghi nhận được.
 - `dynamic_candidate_count`: Số ứng viên động được tạo từ dữ liệu sổ đăng ký cho yêu cầu gần nhất.
-- `pending_rebuild_languages`: Các ngôn ngữ đang trong hàng đợi xây dựng lại chỉ mục.
+- `pending_rebuild_languages`: Các ngôn ngữ đang trong quá trình xây dựng lại chỉ mục (chỉ phản ánh các tác vụ dựng lại chỉ mục, không đại diện cho toàn bộ tiến trình làm ấm nền).
 - `registry_slot_counts`: Số giá trị từ sổ đăng ký có sẵn cho từng loại slot, chẳng hạn như tên thực thể hoặc khu vực.
 - `dynamic_candidate_generation`: Trạng thái và giới hạn của quá trình tạo ứng viên động.
 - `subscribed_intent_source_counts`: Số ý định theo từng nguồn tác nhân hội thoại đã đăng ký.
@@ -364,9 +364,14 @@ Trước khi điều chỉnh ngưỡng, hãy kiểm tra trạng thái hoạt đ�
 
 **Bộ tích hợp xử lý chậm ở câu lệnh đầu tiên.**
 
-Chỉ mục cho các ngôn ngữ đã cấu hình trong Assist pipeline được xây dựng trước ở chế độ nền khi khởi động và sau khi tải lại. Trong điều kiện bình thường, câu lệnh đầu tiên sẽ dùng chỉ mục đã sẵn sàng trong bộ nhớ đệm.
+Độ trễ ở lượt gọi đầu tiên (cold-start delay) đã được loại bỏ trong điều kiện bình thường nhờ cơ chế nạp trước vào bộ nhớ đệm (pre-warm) chủ động chạy nền khi khởi động và sau khi tải lại. Quá trình này chuẩn bị sẵn chỉ mục chính, mẫu câu ý định động và chỉ mục tham số (slot) của thực thể cho mọi ngôn ngữ được cấu hình trong Assist pipeline. Đối với tác nhân hội thoại mặc định, tích hợp sẽ cố gắng chuẩn bị trước bộ nhớ đệm khi có tác nhân tương thích hỗ trợ `async_prepare`; các lỗi phát sinh trong quá trình này (nếu có) sẽ được tự động bỏ qua để tránh làm gián đoạn việc khởi động, do đó bộ nhớ đệm của tác nhân có thể chưa sẵn sàng trong một số trường hợp.
 
-Nếu vẫn có độ trễ, chỉ mục có thể chưa xây dựng xong; hãy kiểm tra `pending_rebuild_languages` trong kết quả **Diagnostics**. Chỉ mục cho ngôn ngữ chưa có trong cấu hình pipeline được tạo ở lần sử dụng đầu tiên. Các lượt truy vấn sau sẽ dùng chỉ mục trong bộ nhớ.
+Nếu bạn vẫn thấy độ trễ ở câu lệnh đầu tiên:
+
+1. **Quá trình làm ấm chưa hoàn tất**: Nếu câu lệnh được gửi ngay khi Home Assistant vừa khởi động xong hoặc ngay sau khi tải lại tích hợp, tác vụ làm ấm nền có thể vẫn đang chạy. Lưu ý rằng trường `pending_rebuild_languages` trong kết quả **Diagnostics** chỉ báo cáo các tác vụ xây dựng lại chỉ mục đang chạy chứ không phản ánh toàn bộ tiến trình làm ấm nền; trường này có thể trống trong khi các công việc làm ấm khác (như chuẩn bị xếp hạng và chuẩn bị tác nhân hội thoại mặc định) vẫn đang tiếp diễn.
+2. **Ngôn ngữ chưa được cấu hình**: Các ngôn ngữ nằm ngoài danh sách pipeline đã cấu hình sẽ chỉ được khởi tạo và lưu vào bộ nhớ đệm theo yêu cầu (lazy build) ở lần gọi đầu tiên.
+
+Trong điều kiện bình thường, các truy vấn tiếp theo sẽ sử dụng bộ nhớ đệm trong RAM và phản hồi với độ trễ tối thiểu.
 
 **Tôi mới cập nhật thực thể/khu vực/tầng nhưng bộ chuẩn hóa chưa nhận diện.**
 

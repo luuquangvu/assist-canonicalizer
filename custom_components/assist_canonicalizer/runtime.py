@@ -175,6 +175,12 @@ class CanonicalizerRuntime:
     # Query ranking runs in executor threads while the event loop invalidates
     # these caches, so both halves of each logical entry must change atomically.
     _source_cache_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    # Serializes dynamic template compilation and slot index builds per language
+    # across background warmup and live query execution to avoid duplicate work
+    # without serializing independent languages against each other.
+    _language_preparation_locks: dict[str, threading.RLock] = field(
+        default_factory=dict, repr=False
+    )
     intent_sources: dict[str, IntentSource] = field(default_factory=dict)
     language_intent_sources: dict[str, dict[str, IntentSource]] = field(default_factory=dict)
     config_path: Callable[..., str] | None = None
@@ -214,6 +220,12 @@ class CanonicalizerRuntime:
     _storage_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     _active_index_loads: int = field(default=0, init=False, repr=False)
     _index_loads_drained: asyncio.Event = field(
+        default_factory=_new_set_event,
+        init=False,
+        repr=False,
+    )
+    _active_preparations: int = field(default=0, init=False, repr=False)
+    _preparations_drained: asyncio.Event = field(
         default_factory=_new_set_event,
         init=False,
         repr=False,
@@ -617,6 +629,35 @@ class CanonicalizerRuntime:
         )
         return ranked, decision
 
+    def _get_language_preparation_lock(self, language: str) -> threading.RLock:
+        """Return a dedicated reentrant lock for serializing preparation of a language."""
+        language = normalize_language(language)
+        with self._source_cache_lock:
+            lock = self._language_preparation_locks.get(language)
+            if lock is None:
+                lock = threading.RLock()
+                self._language_preparation_locks[language] = lock
+            return lock
+
+    def prepare_language_ranking(self, language: str) -> None:
+        """Precompute query-independent dynamic templates and slot index for a language."""
+        language = normalize_language(language)
+        with self._get_language_preparation_lock(language):
+            if self._closed:
+                return
+            self._dynamic_registry_intents_for_query(language)
+            self._registry_slot_snapshot_for_language(language)
+
+    async def async_prepare_language_ranking(self, hass: HomeAssistant, language: str) -> None:
+        """Precompute dynamic ranking templates and slot index in the executor."""
+        if not self._start_preparation():
+            return
+        try:
+            language = normalize_language(language)
+            await _async_add_executor_job_drained(hass, self.prepare_language_ranking, language)
+        finally:
+            self._finish_preparation()
+
     def clear_index(self, language: str | None = None) -> None:
         """Clear one language index or all indexes and invalidate active rebuilds."""
         if language is not None:
@@ -741,17 +782,27 @@ class CanonicalizerRuntime:
             ):
                 return cached
             generation = self.intent_source_generation
-        compiled = compile_dynamic_registry_intents(
-            self._intent_sources_for_query(language),
-            language,
-            include_literal_only_templates=True,
-            include_area_only_templates=False,
-        )
-        with self._source_cache_lock:
-            if not self._closed and self.intent_source_generation == generation:
-                self.dynamic_registry_intents[language] = compiled
-                self._dynamic_intent_generations[language] = generation
-        return compiled
+        with self._get_language_preparation_lock(language):
+            with self._source_cache_lock:
+                if self._closed:
+                    return ()
+                cached = self.dynamic_registry_intents.get(language)
+                if cached is not None and self._generation_stamp_current(
+                    self._dynamic_intent_generations, language, self.intent_source_generation
+                ):
+                    return cached
+                generation = self.intent_source_generation
+            compiled = compile_dynamic_registry_intents(
+                self._intent_sources_for_query(language),
+                language,
+                include_literal_only_templates=True,
+                include_area_only_templates=False,
+            )
+            with self._source_cache_lock:
+                if not self._closed and self.intent_source_generation == generation:
+                    self.dynamic_registry_intents[language] = compiled
+                    self._dynamic_intent_generations[language] = generation
+            return compiled
 
     @staticmethod
     def _generation_stamp_current(
@@ -787,12 +838,21 @@ class CanonicalizerRuntime:
                 self._registry_slot_index_generations, language, generation
             ):
                 return registry_slot_values, cached
-        built = build_registry_slot_index(registry_slot_values, language)
-        with self._source_cache_lock:
-            if not self._closed and self.registry_generation == generation:
-                self.registry_slot_indexes[language] = built
-                self._registry_slot_index_generations[language] = generation
-        return registry_slot_values, built
+        with self._get_language_preparation_lock(language):
+            with self._source_cache_lock:
+                generation = self.registry_generation
+                registry_slot_values = dict(self.registry_slot_values)
+                cached = self.registry_slot_indexes.get(language)
+                if cached is not None and self._generation_stamp_current(
+                    self._registry_slot_index_generations, language, generation
+                ):
+                    return registry_slot_values, cached
+            built = build_registry_slot_index(registry_slot_values, language)
+            with self._source_cache_lock:
+                if not self._closed and self.registry_generation == generation:
+                    self.registry_slot_indexes[language] = built
+                    self._registry_slot_index_generations[language] = generation
+            return registry_slot_values, built
 
     def _all_intent_sources(self, language: str) -> dict[str, IntentSource]:
         """Return built-in, custom, and subscribed intent sources."""
@@ -880,6 +940,21 @@ class CanonicalizerRuntime:
         if self._active_index_loads == 0:
             self._index_loads_drained.set()
 
+    def _start_preparation(self) -> bool:
+        """Register a preparation job unless runtime shutdown has started."""
+        if self._closed:
+            return False
+        if self._active_preparations == 0:
+            self._preparations_drained.clear()
+        self._active_preparations += 1
+        return True
+
+    def _finish_preparation(self) -> None:
+        """Release one preparation job and signal when every preparation has drained."""
+        self._active_preparations -= 1
+        if self._active_preparations == 0:
+            self._preparations_drained.set()
+
     async def _async_load_store_manifest(self, hass: HomeAssistant) -> tuple[str, set[str]] | None:
         """Load the cache epoch and known persisted language keys."""
         try:
@@ -938,6 +1013,7 @@ class CanonicalizerRuntime:
         if await_tasks := tuple(task for task in tasks if task is not current_task):
             await asyncio.gather(*await_tasks, return_exceptions=True)
         await self._index_loads_drained.wait()
+        await self._preparations_drained.wait()
         async with self._storage_lock:
             pass
         self._clear_runtime_state_and_caches()
@@ -1465,7 +1541,13 @@ async def _async_add_executor_job_drained[R](
     storage or lifecycle barrier. Do not use it for request-scoped work that is
     safe to abandon, because cancellation waits for the executor job to finish.
     """
-    return await _async_await_drained(hass.async_add_executor_job(func, *args))
+    add_job = getattr(hass, "async_add_executor_job", None)
+    if not callable(add_job):
+        return await _async_await_drained(asyncio.to_thread(func, *args))
+    job = add_job(func, *args)
+    if not inspect.isawaitable(job):
+        raise TypeError("async_add_executor_job returned a non-awaitable result")
+    return await _async_await_drained(job)
 
 
 async def _async_await_drained[T](awaitable: Awaitable[T]) -> T:

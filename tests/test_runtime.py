@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from enum import Enum
 from types import ModuleType
 from typing import Any, ClassVar, cast
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import homeassistant.helpers.event
 import homeassistant.helpers.storage
@@ -358,14 +358,18 @@ def test_rebuild_failure_logging_prunes_generations_and_preserves_severity(
     runtime = CanonicalizerRuntime()
     failure = RuntimeError("rebuild failed")
 
+    def log_failure(language: str, generation: tuple[int, int], *, log_error: bool) -> None:
+        """Log rebuild failure with the shared failure instance."""
+        runtime._log_rebuild_failure_once(language, generation, failure, log_error=log_error)
+
     with caplog.at_level(logging.INFO, logger=runtime_module.__name__):
-        runtime._log_rebuild_failure_once("vi", (0, 0), failure, log_error=True)
-        runtime._log_rebuild_failure_once("en", (0, 0), failure, log_error=False)
-        runtime._log_rebuild_failure_once("en", (0, 0), failure, log_error=True)
-        runtime._log_rebuild_failure_once("en", (0, 0), failure, log_error=False)
-        runtime._log_rebuild_failure_once("en", (0, 1), failure, log_error=False)
-        runtime._log_rebuild_failure_once("en", (0, 1), failure, log_error=True)
-        runtime._log_rebuild_failure_once("en", (0, 0), failure, log_error=True)
+        log_failure("vi", (0, 0), log_error=True)
+        log_failure("en", (0, 0), log_error=False)
+        log_failure("en", (0, 0), log_error=True)
+        log_failure("en", (0, 0), log_error=False)
+        log_failure("en", (0, 1), log_error=False)
+        log_failure("en", (0, 1), log_error=True)
+        log_failure("en", (0, 0), log_error=True)
 
     assert [record.levelno for record in caplog.records] == [
         logging.ERROR,
@@ -456,21 +460,16 @@ def test_fuzzy_tail_registry_retrieval_is_bounded_independently_of_registry_size
     runtime = CanonicalizerRuntime()
     runtime.update_registry_slot_values(registry_slots)
     runtime.language_intent_sources["en"] = intent_sources
-    ranked = runtime.rank_with_dynamic_candidates(
-        "en",
-        build_index("en", static_candidates),
-        "turn on Garden becon",
-    )
+    index = build_index("en", static_candidates)
 
-    assert ranked[0].candidate.text == "turn on Garden beacon"
-    assert ranked[0].candidate.metadata["registry_retrieval"] == "fuzzy"
-    atrium_ranked = runtime.rank_with_dynamic_candidates(
-        "en",
-        build_index("en", static_candidates),
-        "turn on lights in atrum",
-    )
-    assert atrium_ranked[0].candidate.text == "turn on lights in Atrium"
-    assert atrium_ranked[0].candidate.metadata["registry_retrieval"] == "fuzzy"
+    def assert_fuzzy_match(query: str, expected_text: str) -> None:
+        """Assert dynamic candidate ranking matches expected text via fuzzy retrieval."""
+        ranked = runtime.rank_with_dynamic_candidates("en", index, query)
+        assert ranked[0].candidate.text == expected_text
+        assert ranked[0].candidate.metadata["registry_retrieval"] == "fuzzy"
+
+    assert_fuzzy_match("turn on Garden becon", "turn on Garden beacon")
+    assert_fuzzy_match("turn on lights in atrum", "turn on lights in Atrium")
     assert runtime.diagnostics.registry_record_count == len(names) + len(areas)
     assert (
         runtime.diagnostics.registry_values_scored <= DEFAULT_MAX_REGISTRY_VALUES_SCORED_PER_QUERY
@@ -2579,3 +2578,302 @@ def test_merge_ranked_candidates_resolves_cross_pass_intent_tie() -> None:
 
     assert merged[0] is strong_intent
     assert merged[1] is weak_intent
+
+
+def test_prepare_language_ranking_populates_caches() -> None:
+    """Prepare language ranking eagerly compiles dynamic templates and slot index."""
+    runtime = CanonicalizerRuntime()
+    assert "en" not in runtime.dynamic_registry_intents
+    assert "en" not in runtime.registry_slot_indexes
+
+    runtime.prepare_language_ranking("EN")
+
+    assert "en" in runtime.dynamic_registry_intents
+    assert "en" in runtime.registry_slot_indexes
+
+    # When closed, no work is performed
+    runtime._closed = True
+    runtime.prepare_language_ranking("vi")
+    assert "vi" not in runtime.dynamic_registry_intents
+
+
+@pytest.mark.asyncio
+async def test_async_prepare_language_ranking_delegates_to_executor() -> None:
+    """Async prepare runs ranking preparation inside Home Assistant executor job."""
+    runtime = CanonicalizerRuntime()
+    hass = MagicMock()
+    hass.async_add_executor_job = AsyncMock()
+
+    await runtime.async_prepare_language_ranking(hass, "en")
+
+    hass.async_add_executor_job.assert_awaited_once_with(runtime.prepare_language_ranking, "en")
+
+    # When closed, no work is performed
+    hass.async_add_executor_job.reset_mock()
+    runtime._closed = True
+    await runtime.async_prepare_language_ranking(hass, "en")
+    hass.async_add_executor_job.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_async_prepare_language_ranking_fallback_missing_executor() -> None:
+    """Async prepare falls back cleanly if async_add_executor_job is missing."""
+    runtime = CanonicalizerRuntime()
+    hass = MagicMock(spec=[])
+
+    assert "en" not in runtime.dynamic_registry_intents
+    assert "en" not in runtime.registry_slot_indexes
+    await runtime.async_prepare_language_ranking(hass, "en")
+    assert "en" in runtime.dynamic_registry_intents
+    assert "en" in runtime.registry_slot_indexes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("executor_return", [None, "non-awaitable-result", 42])
+async def test_async_prepare_language_ranking_rejects_non_awaitable(
+    executor_return: Any,
+) -> None:
+    """Async prepare rejects when async_add_executor_job returns a non-awaitable value."""
+    runtime = CanonicalizerRuntime()
+    hass = MagicMock()
+    hass.async_add_executor_job = MagicMock(return_value=executor_return)
+
+    assert "en" not in runtime.dynamic_registry_intents
+    assert "en" not in runtime.registry_slot_indexes
+    with pytest.raises(TypeError, match="async_add_executor_job returned a non-awaitable result"):
+        await runtime.async_prepare_language_ranking(hass, "en")
+    assert "en" not in runtime.dynamic_registry_intents
+    assert "en" not in runtime.registry_slot_indexes
+    hass.async_add_executor_job.assert_called_once_with(runtime.prepare_language_ranking, "en")
+
+
+@pytest.mark.asyncio
+async def test_async_prepare_language_ranking_synchronous_executor_not_retried() -> None:
+    """Async prepare does not retry func when executor returns non-awaitable."""
+    runtime = CanonicalizerRuntime()
+    call_count = 0
+
+    def sync_executor(func: Any, *args: Any) -> Any:
+        """Execute function synchronously and return its result."""
+        nonlocal call_count
+        call_count += 1
+        return func(*args)
+
+    hass = MagicMock()
+    hass.async_add_executor_job = MagicMock(side_effect=sync_executor)
+
+    with pytest.raises(TypeError, match="async_add_executor_job returned a non-awaitable result"):
+        await runtime.async_prepare_language_ranking(hass, "en")
+
+    assert call_count == 1
+    assert hass.async_add_executor_job.call_count == 1
+
+
+def test_language_preparation_lock_serializes_concurrent_compilation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent preparation for the same language compiles templates only once."""
+    runtime = CanonicalizerRuntime()
+    compilation_count = 0
+    entered_compiler = threading.Event()
+    release_compiler = threading.Event()
+
+    def blocking_compile(*args: Any, **kwargs: Any) -> tuple[Any, ...]:
+        nonlocal compilation_count
+        compilation_count += 1
+        entered_compiler.set()
+        release_compiler.wait(timeout=5)
+        return ()
+
+    monkeypatch.setattr(runtime_module, "compile_dynamic_registry_intents", blocking_compile)
+    monkeypatch.setattr(
+        runtime_module,
+        "load_language_intent_sources",
+        lambda _language, *, config_path=None: {},
+    )
+
+    t1 = threading.Thread(target=runtime.prepare_language_ranking, args=("en",), daemon=True)
+    t2 = threading.Thread(target=runtime.prepare_language_ranking, args=("en",), daemon=True)
+
+    original_get_lock = CanonicalizerRuntime._get_language_preparation_lock
+    second_thread_reached_lock = threading.Event()
+
+    def instrumented_get_lock(self: CanonicalizerRuntime, language: str) -> threading.RLock:
+        """Signal arrival of second thread at the preparation lock."""
+        if threading.current_thread() is t2:
+            second_thread_reached_lock.set()
+        return original_get_lock(self, language)
+
+    monkeypatch.setattr(
+        CanonicalizerRuntime, "_get_language_preparation_lock", instrumented_get_lock
+    )
+
+    t1.start()
+    assert entered_compiler.wait(timeout=5)
+    t2.start()
+    assert second_thread_reached_lock.wait(timeout=5)
+
+    release_compiler.set()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+
+    assert not t1.is_alive()
+    assert not t2.is_alive()
+    assert compilation_count == 1
+
+
+def test_language_preparation_lock_allows_independent_languages_concurrently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Independent languages can prepare concurrently without blocking each other."""
+    runtime = CanonicalizerRuntime()
+    en_started = threading.Event()
+    release_en = threading.Event()
+
+    def language_compile(sources: Any, language: str, **kwargs: Any) -> tuple[Any, ...]:
+        if language == "en":
+            en_started.set()
+            release_en.wait(timeout=5)
+        return ()
+
+    monkeypatch.setattr(runtime_module, "compile_dynamic_registry_intents", language_compile)
+    monkeypatch.setattr(
+        runtime_module,
+        "load_language_intent_sources",
+        lambda _language, *, config_path=None: {},
+    )
+
+    t_en = threading.Thread(target=runtime.prepare_language_ranking, args=("en",), daemon=True)
+    t_vi = threading.Thread(target=runtime.prepare_language_ranking, args=("vi",), daemon=True)
+
+    t_en.start()
+    assert en_started.wait(timeout=5)
+
+    # vi completes even while en is still blocked in compilation
+    t_vi.start()
+    t_vi.join(timeout=2)
+    assert not t_vi.is_alive()
+    assert "vi" in runtime.dynamic_registry_intents
+
+    release_en.set()
+    t_en.join(timeout=5)
+    assert not t_en.is_alive()
+    assert "en" in runtime.dynamic_registry_intents
+
+
+def test_language_preparation_lock_serializes_concurrent_slot_index_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent slot snapshot calls for the same language build the index only once."""
+    runtime = CanonicalizerRuntime()
+    runtime.update_registry_slot_values({"name": ("lamp",)})
+    build_count = 0
+    entered_build = threading.Event()
+    release_build = threading.Event()
+
+    original_build = runtime_module.build_registry_slot_index
+
+    def blocking_build(values: Any, language: str | None = None) -> Any:
+        nonlocal build_count
+        build_count += 1
+        entered_build.set()
+        release_build.wait(timeout=5)
+        return original_build(values, language)
+
+    monkeypatch.setattr(runtime_module, "build_registry_slot_index", blocking_build)
+
+    t1 = threading.Thread(
+        target=runtime._registry_slot_snapshot_for_language, args=("en",), daemon=True
+    )
+    t2 = threading.Thread(
+        target=runtime._registry_slot_snapshot_for_language, args=("en",), daemon=True
+    )
+
+    original_get_lock = CanonicalizerRuntime._get_language_preparation_lock
+    second_thread_reached_lock = threading.Event()
+
+    def instrumented_get_lock(self: CanonicalizerRuntime, language: str) -> threading.RLock:
+        """Signal arrival of second thread at the preparation lock."""
+        if threading.current_thread() is t2:
+            second_thread_reached_lock.set()
+        return original_get_lock(self, language)
+
+    monkeypatch.setattr(
+        CanonicalizerRuntime, "_get_language_preparation_lock", instrumented_get_lock
+    )
+
+    t1.start()
+    assert entered_build.wait(timeout=5)
+    t2.start()
+    assert second_thread_reached_lock.wait(timeout=5)
+
+    release_build.set()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+
+    assert not t1.is_alive()
+    assert not t2.is_alive()
+    assert build_count == 1
+
+
+def test_language_preparation_locks_retained_across_state_clears() -> None:
+    """Language preparation locks are retained across runtime state clears."""
+    runtime = CanonicalizerRuntime()
+    en_lock = runtime._get_language_preparation_lock("en")
+    vi_lock = runtime._get_language_preparation_lock("vi")
+
+    # Clear index for one language or all languages
+    runtime.clear_index("en")
+    assert runtime._get_language_preparation_lock("en") is en_lock
+
+    runtime.clear_index(None)
+    assert runtime._get_language_preparation_lock("en") is en_lock
+    assert runtime._get_language_preparation_lock("vi") is vi_lock
+
+    # Full internal state and cache purge retains locks
+    runtime._clear_runtime_state_and_caches()
+    assert runtime._get_language_preparation_lock("en") is en_lock
+    assert runtime._get_language_preparation_lock("vi") is vi_lock
+
+
+@pytest.mark.asyncio
+async def test_async_shutdown_drains_in_flight_preparation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Async shutdown waits for in-flight ranking preparation to finish before clearing caches."""
+
+    async def async_add_executor_job_mock(func: Any, *args: Any) -> Any:
+        """Mock executor by running target in a thread."""
+        return await asyncio.to_thread(func, *args)
+
+    runtime = CanonicalizerRuntime()
+    hass = MagicMock()
+    hass.async_add_executor_job = async_add_executor_job_mock
+    entered_prep = threading.Event()
+    release_prep = threading.Event()
+    prep_completed = False
+
+    def blocking_prep(self: CanonicalizerRuntime, language: str) -> None:
+        """Block preparation until released to simulate in-flight execution."""
+        nonlocal prep_completed
+        entered_prep.set()
+        release_prep.wait(timeout=5)
+        prep_completed = True
+
+    monkeypatch.setattr(CanonicalizerRuntime, "prepare_language_ranking", blocking_prep)
+
+    prep_task = asyncio.create_task(runtime.async_prepare_language_ranking(hass, "en"))
+    await asyncio.to_thread(entered_prep.wait, 5)
+
+    shutdown_task = asyncio.create_task(runtime.async_shutdown())
+    await asyncio.sleep(0.01)
+
+    assert not shutdown_task.done()
+    assert not prep_completed
+
+    release_prep.set()
+    await prep_task
+    await shutdown_task
+
+    assert prep_completed
+    assert runtime.closed
