@@ -391,6 +391,85 @@ async def test_conversation_entity_prepare_suppresses_ranking_prepare_error() ->
 
 
 @pytest.mark.asyncio
+async def test_conversation_entity_prepare_prepares_default_agent() -> None:
+    """Test async_prepare prepares the default conversation agent."""
+    entry = MagicMock()
+    runtime = CanonicalizerRuntime()
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    entity.hass = MagicMock()
+    runtime.indexes["en"] = MagicMock()
+    mock_agent = MagicMock()
+    mock_agent.async_prepare = AsyncMock()
+
+    with (
+        patch.object(CanonicalizerRuntime, "async_prepare_language_ranking", AsyncMock()),
+        patch(
+            "custom_components.assist_canonicalizer.preparation.async_get_agent",
+            return_value=mock_agent,
+        ) as mock_get_agent,
+    ):
+        await entity.async_prepare("en")
+        mock_get_agent.assert_called_once_with(entity.hass, HOME_ASSISTANT_AGENT)
+        mock_agent.async_prepare.assert_awaited_once_with("en")
+
+
+@pytest.mark.asyncio
+async def test_conversation_entity_prepare_suppresses_default_agent_error() -> None:
+    """Test async_prepare suppresses default agent prepare failure without propagating."""
+    entry = MagicMock()
+    runtime = CanonicalizerRuntime()
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    entity.hass = MagicMock()
+    runtime.indexes["en"] = MagicMock()
+    mock_agent = MagicMock()
+    mock_agent.async_prepare = AsyncMock(side_effect=RuntimeError("default agent prep failed"))
+
+    with (
+        patch.object(CanonicalizerRuntime, "async_prepare_language_ranking", AsyncMock()),
+        patch(
+            "custom_components.assist_canonicalizer.preparation.async_get_agent",
+            return_value=mock_agent,
+        ),
+    ):
+        await entity.async_prepare("en")
+        mock_agent.async_prepare.assert_awaited_once_with("en")
+
+
+@pytest.mark.asyncio
+async def test_conversation_entity_prepare_handles_sync_or_missing_default_agent() -> None:
+    """Test async_prepare handles missing or sync default conversation agent."""
+    entry = MagicMock()
+    runtime = CanonicalizerRuntime()
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    entity.hass = MagicMock()
+    runtime.indexes["en"] = MagicMock()
+
+    # 1. Missing agent
+    with (
+        patch.object(CanonicalizerRuntime, "async_prepare_language_ranking", AsyncMock()),
+        patch(
+            "custom_components.assist_canonicalizer.preparation.async_get_agent",
+            return_value=None,
+        ),
+    ):
+        await entity.async_prepare("en")
+
+    # 2. Agent with sync prepare
+    runtime.invalidate_language_preparation("en")
+    mock_sync_agent = MagicMock()
+    mock_sync_agent.async_prepare = MagicMock(return_value=None)
+    with (
+        patch.object(CanonicalizerRuntime, "async_prepare_language_ranking", AsyncMock()),
+        patch(
+            "custom_components.assist_canonicalizer.preparation.async_get_agent",
+            return_value=mock_sync_agent,
+        ),
+    ):
+        await entity.async_prepare("en")
+        mock_sync_agent.async_prepare.assert_called_once_with("en")
+
+
+@pytest.mark.asyncio
 async def test_async_process_error_handling() -> None:
     """Test exception during async_process generates error result and updates diagnostics."""
     entry = MagicMock()

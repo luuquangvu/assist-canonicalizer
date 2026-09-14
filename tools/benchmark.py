@@ -107,6 +107,8 @@ _AREA_ACTION_INTENTS = frozenset({"HassVacuumCleanArea"})
 
 _PATH_ALLOWED_CHARS = ascii_letters + digits + "/._-"
 
+_JSON_GLOB = "*.json"
+
 
 class BenchmarkError(RuntimeError):
     """Raised when a managed benchmark precondition or operation fails."""
@@ -266,7 +268,7 @@ def _load_outcome_cases(path: Path) -> tuple[str, tuple[BenchmarkCase, ...]]:
 
 def _load_real_world_cases(path: Path) -> tuple[str, tuple[BenchmarkCase, ...]]:
     """Load the maintained multilingual corpus as production-traced live cases."""
-    dataset_paths = sorted(path.glob("*.json"))
+    dataset_paths = sorted(path.glob(_JSON_GLOB))
     if not dataset_paths:
         raise BenchmarkError(f"No real-world dataset JSON files found in {path}")
     discovered_languages = {dataset_path.stem for dataset_path in dataset_paths}
@@ -544,7 +546,7 @@ def _case_input_sha256(path: Path) -> str:
     if not path.is_dir():
         raise BenchmarkError(f"Benchmark case input does not exist: {path}")
     digest = hashlib.sha256()
-    dataset_paths = sorted(path.glob("*.json"))
+    dataset_paths = sorted(path.glob(_JSON_GLOB))
     if not dataset_paths:
         raise BenchmarkError(f"No benchmark dataset files found in {path}")
     for dataset_path in dataset_paths:
@@ -557,7 +559,7 @@ def _case_input_sha256(path: Path) -> str:
 
 def _case_input_files(path: Path) -> list[dict[str, Any]]:
     """Return stable metadata for every tracked case input file."""
-    paths = [path] if path.is_file() else sorted(path.glob("*.json"))
+    paths = [path] if path.is_file() else sorted(path.glob(_JSON_GLOB))
     return [
         {
             "path": str(item.relative_to(REPO_ROOT)),

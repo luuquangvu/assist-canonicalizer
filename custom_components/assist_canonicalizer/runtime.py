@@ -12,7 +12,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence, Set
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from enum import Enum
+from enum import Enum, StrEnum
 from uuid import uuid4
 
 import orjson
@@ -80,6 +80,15 @@ _INDEX_MANIFEST_VERSION = 1
 _MAX_REBUILD_ATTEMPTS = 5
 
 IndexGeneration = tuple[int, int]
+type PreparationStamp = tuple[int, int, int, IndexGeneration, int]
+
+
+class PreparationOutcome(StrEnum):
+    """Outcome of a language cache preparation run."""
+
+    SUCCESS = "success"
+    FAILED = "failed"
+    STALE = "stale"
 
 
 def _new_set_event() -> asyncio.Event:
@@ -230,6 +239,10 @@ class CanonicalizerRuntime:
         init=False,
         repr=False,
     )
+    preparation_tasks: dict[str, asyncio.Task[PreparationOutcome]] = field(
+        default_factory=dict, repr=False
+    )
+    _prepared_language_stamps: dict[str, PreparationStamp] = field(default_factory=dict, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
 
     @property
@@ -245,7 +258,9 @@ class CanonicalizerRuntime:
         """Store a language-specific index."""
         if self._closed:
             return
-        self.indexes[normalize_language(index.language)] = index
+        language = normalize_language(index.language)
+        self.indexes[language] = index
+        self.invalidate_language_preparation(language)
         self.update_diagnostics(
             candidate_count=index.candidate_count,
             index_version=index.version,
@@ -276,6 +291,7 @@ class CanonicalizerRuntime:
         if self._closed:
             return None
         self._logged_rebuilds.pop((language, generation), None)
+        self.invalidate_language_preparation(language)
         task = hass.async_create_task(_run_rebuild(self, hass, language, generation))
         self.rebuild_tasks[language] = (generation, task)
         return task
@@ -658,6 +674,101 @@ class CanonicalizerRuntime:
         finally:
             self._finish_preparation()
 
+    def preparation_stamp(self, language: str) -> PreparationStamp:
+        """Return the generation and index stamp for language preparation."""
+        language = normalize_language(language)
+        with self._source_cache_lock:
+            return self._preparation_stamp_unlocked(language)
+
+    def _preparation_stamp_unlocked(self, language: str) -> PreparationStamp:
+        """Return the preparation stamp while holding _source_cache_lock."""
+        index = self.indexes.get(language)
+        return (
+            self.intent_source_generation,
+            self.registry_generation,
+            self.source_generation,
+            self._index_generation_for(language),
+            id(index),
+        )
+
+    def is_language_prepared(self, language: str) -> bool:
+        """Return whether a language has been prepared for current generations and index."""
+        language = normalize_language(language)
+        with self._source_cache_lock:
+            current_stamp = self._preparation_stamp_unlocked(language)
+            return self._prepared_language_stamps.get(language) == current_stamp
+
+    def mark_language_prepared(
+        self,
+        language: str,
+        *,
+        expected_stamp: PreparationStamp | None = None,
+    ) -> bool:
+        """Record that a language was successfully prepared for current generations and index.
+
+        Returns True if marked, or False if the generation or index changed while
+        preparation was in-flight or if the runtime is closed.
+        """
+        if self._closed:
+            return False
+        language = normalize_language(language)
+        with self._source_cache_lock:
+            current_stamp = self._preparation_stamp_unlocked(language)
+            if expected_stamp is not None and current_stamp != expected_stamp:
+                return False
+            self._prepared_language_stamps[language] = current_stamp
+            return True
+
+    def cancel_preparation_task(self, language: str | None = None) -> None:
+        """Cancel and unregister active preparation tasks for one or all languages."""
+        if language is None:
+            tasks = list(self.preparation_tasks.values())
+            self.preparation_tasks.clear()
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+        else:
+            lang = normalize_language(language)
+            task = self.preparation_tasks.pop(lang, None)
+            if task is not None and not task.done():
+                task.cancel()
+
+    def invalidate_language_preparation(self, language: str | None = None) -> None:
+        """Invalidate the prepared cache and cancel active preparation tasks."""
+        with self._source_cache_lock:
+            if language is None:
+                self._prepared_language_stamps.clear()
+            else:
+                self._prepared_language_stamps.pop(normalize_language(language), None)
+        self.cancel_preparation_task(language)
+
+    def active_preparation_task(self, language: str) -> asyncio.Task[PreparationOutcome] | None:
+        """Return an in-flight preparation task for a language if one is active."""
+        language = normalize_language(language)
+        task = self.preparation_tasks.get(language)
+        if task is None:
+            return None
+        if task.done():
+            self.preparation_tasks.pop(language, None)
+            return None
+        return task
+
+    def register_preparation_task(
+        self, language: str, task: asyncio.Task[PreparationOutcome]
+    ) -> None:
+        """Register an active preparation task for a language."""
+        if self._closed:
+            return
+        self.preparation_tasks[normalize_language(language)] = task
+
+    def discard_finished_preparation_task(
+        self, language: str, task: asyncio.Task[PreparationOutcome]
+    ) -> None:
+        """Unregister a finished preparation task."""
+        language = normalize_language(language)
+        if self.preparation_tasks.get(language) is task and task.done():
+            self.preparation_tasks.pop(language, None)
+
     def clear_index(self, language: str | None = None) -> None:
         """Clear one language index or all indexes and invalidate active rebuilds."""
         if language is not None:
@@ -667,12 +778,14 @@ class CanonicalizerRuntime:
             self._language_index_generations.clear()
             self.indexes.clear()
             self.rebuild_tasks.clear()
+            self.invalidate_language_preparation(None)
         else:
             self._language_index_generations[language] = (
                 self._language_index_generations.get(language, 0) + 1
             )
             self.rebuild_tasks.pop(language, None)
             self.indexes.pop(language, None)
+            self.invalidate_language_preparation(language)
         self.update_diagnostics(candidate_count=self.total_candidate_count())
 
     def total_candidate_count(self) -> int:
@@ -890,12 +1003,14 @@ class CanonicalizerRuntime:
         """Invalidate source caches while the caller holds _source_cache_lock."""
         self.source_generation += 1
         self.indexes.clear()
+        self._prepared_language_stamps.clear()
         if clear_sources:
             self.intent_source_generation += 1
             self.language_intent_sources.clear()
             self._language_source_generations.clear()
             self.dynamic_registry_intents.clear()
             self._dynamic_intent_generations.clear()
+        self.cancel_preparation_task(None)
         self.update_diagnostics(candidate_count=0)
 
     def _storage_generation_matches(
@@ -1048,8 +1163,10 @@ class CanonicalizerRuntime:
             callback()
         tasks: set[asyncio.Task[object]] = set(self.warmup_tasks)
         tasks.update(task for _generation, task in self.rebuild_tasks.values())
+        tasks.update(self.preparation_tasks.values())
         self.warmup_tasks.clear()
         self.rebuild_tasks.clear()
+        self.preparation_tasks.clear()
         self._logged_rebuilds.clear()
         current_task = _current_task_or_none()
         for task in tasks:
@@ -1073,6 +1190,8 @@ class CanonicalizerRuntime:
             self._language_index_generations.clear()
             self.rebuild_tasks.clear()
             self.warmup_tasks.clear()
+            self.preparation_tasks.clear()
+            self._prepared_language_stamps.clear()
         self.update_diagnostics(candidate_count=0, dynamic_candidate_count=0)
         clear_normalization_caches()
         clear_bm25_caches()
