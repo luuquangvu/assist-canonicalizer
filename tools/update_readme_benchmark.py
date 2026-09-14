@@ -21,7 +21,8 @@ except ImportError:
 
 
 def _is_str_mapping(val: object) -> TypeGuard[Mapping[str, object]]:
-    return isinstance(val, Mapping)
+    """Return whether the value is a mapping with string keys."""
+    return isinstance(val, Mapping) and all(isinstance(key, str) for key in val)
 
 
 _ALNUM_CHARS: Final[str] = ascii_letters + digits

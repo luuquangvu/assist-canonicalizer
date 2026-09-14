@@ -45,6 +45,7 @@ from .const import (
 )
 from .indexer import CanonicalIndex
 from .normalization import normalize_text
+from .preparation import async_prepare_language_caches
 from .ranking import (
     ConfidenceGateDecision,
     RankedCandidate,
@@ -261,22 +262,15 @@ class AssistCanonicalizerConversationEntity(
 
     async def async_prepare(self, language: str | None = None) -> None:
         """Prepare the agent for a language."""
-        if language:
-            language = normalize_language(language)
-            index = self._runtime.get_index(language)
-            if index is None:
-                index = await self._runtime.async_load_index_from_store(self.hass, language)
-            if index is None:
-                await self._runtime.async_rebuild_index(self.hass, language)
-            try:
-                await self._runtime.async_prepare_language_ranking(self.hass, language)
-            except Exception as err:
-                _LOGGER.debug(
-                    "Failed to prepare ranking for language %s: %s",
-                    language,
-                    err,
-                    exc_info=True,
-                )
+        if not language:
+            return
+        language = normalize_language(language)
+        index = self._runtime.get_index(language)
+        if index is None:
+            index = await self._runtime.async_load_index_from_store(self.hass, language)
+        if index is None:
+            await self._runtime.async_rebuild_index(self.hass, language)
+        await async_prepare_language_caches(self.hass, self._runtime, language)
 
     async def async_reload(self, language: str | None = None) -> None:
         """Reload cached indexes for a language."""

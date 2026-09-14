@@ -357,6 +357,110 @@ async def test_rebuild_index_service() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rebuild_index_service_prepares_ranking_and_default_agent() -> None:
+    """Test rebuild_index service handler prepares dynamic ranking and default agent."""
+    runtime = CanonicalizerRuntime()
+    hass = MockHass(runtime)
+    call = MockServiceCall({"language": "vi"})
+    mock_agent = MagicMock()
+    mock_agent.async_prepare = AsyncMock()
+
+    with (
+        patch.object(
+            CanonicalizerRuntime,
+            "async_rebuild_index",
+            AsyncMock(return_value=build_index("vi", [])),
+        ),
+        patch.object(
+            CanonicalizerRuntime, "async_prepare_language_ranking", AsyncMock()
+        ) as mock_prep_ranking,
+        patch(
+            "custom_components.assist_canonicalizer.preparation.async_get_agent",
+            return_value=mock_agent,
+        ) as mock_get_agent,
+    ):
+        result = await _handle_rebuild_index(_as_hass(hass), cast(ServiceCall, call))
+        assert result["language"] == "vi"
+        mock_prep_ranking.assert_awaited_once_with(_as_hass(hass), "vi")
+        mock_get_agent.assert_called_once()
+        mock_agent.async_prepare.assert_awaited_once_with("vi")
+
+
+@pytest.mark.asyncio
+async def test_rebuild_index_service_suppresses_prepare_errors() -> None:
+    """Test rebuild_index service handler suppresses preparation failures."""
+    runtime = CanonicalizerRuntime()
+    hass = MockHass(runtime)
+    call = MockServiceCall({"language": "vi"})
+    mock_agent = MagicMock()
+    mock_agent.async_prepare = AsyncMock(side_effect=RuntimeError("Agent prepare failed"))
+
+    with (
+        patch.object(
+            CanonicalizerRuntime,
+            "async_rebuild_index",
+            AsyncMock(return_value=build_index("vi", [])),
+        ),
+        patch.object(
+            CanonicalizerRuntime,
+            "async_prepare_language_ranking",
+            AsyncMock(side_effect=RuntimeError("Ranking prepare failed")),
+        ),
+        patch(
+            "custom_components.assist_canonicalizer.preparation.async_get_agent",
+            return_value=mock_agent,
+        ),
+    ):
+        result = await _handle_rebuild_index(_as_hass(hass), cast(ServiceCall, call))
+        assert result["language"] == "vi"
+        assert result["candidate_count"] == 0
+        assert result["rebuild_latency_ms"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_rebuild_index_service_handles_sync_or_missing_default_agent() -> None:
+    """Test rebuild_index handles default agent without async_prepare or with sync prepare."""
+    runtime = CanonicalizerRuntime()
+    hass = MockHass(runtime)
+    call = MockServiceCall({"language": "vi"})
+
+    # 1. Missing agent
+    with (
+        patch.object(
+            CanonicalizerRuntime,
+            "async_rebuild_index",
+            AsyncMock(return_value=build_index("vi", [])),
+        ),
+        patch.object(CanonicalizerRuntime, "async_prepare_language_ranking", AsyncMock()),
+        patch(
+            "custom_components.assist_canonicalizer.preparation.async_get_agent",
+            return_value=None,
+        ),
+    ):
+        result = await _handle_rebuild_index(_as_hass(hass), cast(ServiceCall, call))
+        assert result["language"] == "vi"
+
+    # 2. Agent with sync prepare
+    mock_sync_agent = MagicMock()
+    mock_sync_agent.async_prepare = MagicMock(return_value=None)
+    with (
+        patch.object(
+            CanonicalizerRuntime,
+            "async_rebuild_index",
+            AsyncMock(return_value=build_index("vi", [])),
+        ),
+        patch.object(CanonicalizerRuntime, "async_prepare_language_ranking", AsyncMock()),
+        patch(
+            "custom_components.assist_canonicalizer.preparation.async_get_agent",
+            return_value=mock_sync_agent,
+        ),
+    ):
+        result = await _handle_rebuild_index(_as_hass(hass), cast(ServiceCall, call))
+        assert result["language"] == "vi"
+        mock_sync_agent.async_prepare.assert_called_once_with("vi")
+
+
+@pytest.mark.asyncio
 async def test_clear_index_service() -> None:
     """Test clear_index service handler."""
     runtime = CanonicalizerRuntime()

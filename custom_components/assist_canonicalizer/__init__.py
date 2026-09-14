@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import logging
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from functools import partial
 
 from homeassistant.components.conversation import agent_manager
-from homeassistant.components.conversation.agent_manager import async_get_agent
-from homeassistant.components.conversation.const import HOME_ASSISTANT_AGENT
 from homeassistant.components.homeassistant import exposed_entities
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
@@ -24,6 +21,7 @@ from .const import (
     DATA_RUNTIME,
     DOMAIN,
 )
+from .preparation import async_prepare_language_caches
 from .registry import async_registry_slot_values
 from .runtime import CanonicalizerRuntime
 from .services import async_setup_services, async_unload_services
@@ -243,28 +241,7 @@ async def _warmup_single_language(
             index = await runtime.async_load_index_from_store(hass, language)
         if index is None:
             await runtime.async_rebuild_index(hass, language, log_error=False)
-        try:
-            await runtime.async_prepare_language_ranking(hass, language)
-        except Exception as err:
-            _LOGGER.debug(
-                "Failed to warm up ranking for language %s: %s",
-                language,
-                err,
-                exc_info=True,
-            )
-        try:
-            default_agent = async_get_agent(hass, HOME_ASSISTANT_AGENT)
-            if default_agent is not None and hasattr(default_agent, "async_prepare"):
-                res = default_agent.async_prepare(language)
-                if inspect.isawaitable(res):
-                    await res
-        except Exception as err:
-            _LOGGER.debug(
-                "Failed to warm up default agent for language %s: %s",
-                language,
-                err,
-                exc_info=True,
-            )
+        await async_prepare_language_caches(hass, runtime, language)
     except Exception as err:
         _LOGGER.debug(
             "Failed to warm up canonicalizer index for language %s: %s",

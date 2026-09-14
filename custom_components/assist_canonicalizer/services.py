@@ -41,6 +41,7 @@ from .const import (
 )
 from .indexer import CanonicalIndex
 from .normalization import normalize_text
+from .preparation import async_prepare_language_caches
 from .ranking import ConfidenceGatePayload, RankedCandidate, evaluate_confidence_gates
 from .rehydration import get_wildcard_rehydration
 from .runtime import CanonicalizerRuntime
@@ -437,10 +438,12 @@ async def _handle_rebuild_index(hass: HomeAssistant, call: ServiceCall) -> Rebui
     index = await _rebuild_index(hass, runtime, language)
     if index is None:
         raise HomeAssistantError("Index rebuild failed or was cancelled")
+    await async_prepare_language_caches(hass, runtime, language, force=True)
+    rebuild_latency = elapsed_ms(started_at)
     return RebuildPayload(
         language=language,
         candidate_count=index.candidate_count,
-        rebuild_latency_ms=elapsed_ms(started_at),
+        rebuild_latency_ms=rebuild_latency,
     )
 
 

@@ -576,7 +576,7 @@ async def test_warmup_single_language_prepares_ranking_and_default_agent(
     mock_default_agent = MagicMock()
     mock_default_agent.async_prepare = AsyncMock()
     monkeypatch.setattr(
-        "custom_components.assist_canonicalizer.async_get_agent",
+        "custom_components.assist_canonicalizer.preparation.async_get_agent",
         lambda _hass, _agent_id: mock_default_agent,
     )
 
@@ -609,7 +609,7 @@ async def test_warmup_single_language_prepares_ranking_when_index_already_cached
     mock_default_agent = MagicMock()
     mock_default_agent.async_prepare = AsyncMock()
     monkeypatch.setattr(
-        "custom_components.assist_canonicalizer.async_get_agent",
+        "custom_components.assist_canonicalizer.preparation.async_get_agent",
         lambda _hass, _agent_id: mock_default_agent,
     )
 
@@ -641,7 +641,7 @@ async def test_warmup_single_language_prepares_ranking_when_index_rebuilt(
     mock_default_agent = MagicMock()
     mock_default_agent.async_prepare = AsyncMock()
     monkeypatch.setattr(
-        "custom_components.assist_canonicalizer.async_get_agent",
+        "custom_components.assist_canonicalizer.preparation.async_get_agent",
         lambda _hass, _agent_id: mock_default_agent,
     )
 
@@ -669,7 +669,7 @@ async def test_warmup_single_language_handles_missing_default_agent(
     )
 
     monkeypatch.setattr(
-        "custom_components.assist_canonicalizer.async_get_agent",
+        "custom_components.assist_canonicalizer.preparation.async_get_agent",
         lambda _hass, _agent_id: None,
     )
 
@@ -696,7 +696,7 @@ async def test_warmup_single_language_handles_agent_without_async_prepare(
 
     mock_agent = MagicMock(spec=[])
     monkeypatch.setattr(
-        "custom_components.assist_canonicalizer.async_get_agent",
+        "custom_components.assist_canonicalizer.preparation.async_get_agent",
         lambda _hass, _agent_id: mock_agent,
     )
 
@@ -724,7 +724,7 @@ async def test_warmup_single_language_handles_sync_default_agent_prepare(
     mock_default_agent = MagicMock()
     mock_default_agent.async_prepare = MagicMock(return_value=None)
     monkeypatch.setattr(
-        "custom_components.assist_canonicalizer.async_get_agent",
+        "custom_components.assist_canonicalizer.preparation.async_get_agent",
         lambda _hass, _agent_id: mock_default_agent,
     )
 
@@ -753,7 +753,7 @@ async def test_warmup_single_language_suppresses_ranking_prepare_error(
     mock_default_agent = MagicMock()
     mock_default_agent.async_prepare = AsyncMock()
     monkeypatch.setattr(
-        "custom_components.assist_canonicalizer.async_get_agent",
+        "custom_components.assist_canonicalizer.preparation.async_get_agent",
         lambda _hass, _agent_id: mock_default_agent,
     )
 
@@ -782,7 +782,7 @@ async def test_warmup_single_language_suppresses_default_agent_prepare_error(
     mock_default_agent = MagicMock()
     mock_default_agent.async_prepare = AsyncMock(side_effect=ValueError("agent prep failed"))
     monkeypatch.setattr(
-        "custom_components.assist_canonicalizer.async_get_agent",
+        "custom_components.assist_canonicalizer.preparation.async_get_agent",
         lambda _hass, _agent_id: mock_default_agent,
     )
 
