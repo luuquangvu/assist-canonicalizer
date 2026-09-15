@@ -210,7 +210,7 @@ To reproduce the benchmark from [`tests/real_world/`](tests/real_world/), run:
 
 ```bash
 uv sync --locked --all-groups
-uv run tools/benchmark.py
+uv run --locked tools/benchmark.py
 ```
 
 For details about the managed fixture, baseline comparisons, and report formats, see [`tools/ha_dev/README.md`](tools/ha_dev/README.md). `tools/benchmark_offline.py` is intended for offline diagnostics and focused profiling; it is not production accuracy evidence.
@@ -411,7 +411,7 @@ Because voice commands can control real devices, changes need more than a succes
 Run the same validation entry point locally before opening a pull request:
 
 ```bash
-uv run tools/validate.py
+uv run --locked tools/validate.py
 ```
 
 > [!NOTE]

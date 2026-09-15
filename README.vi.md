@@ -210,7 +210,7 @@ Benchmark `managed_live` chạy mỗi truy vấn hai lần trên cùng một mô
 
 ```bash
 uv sync --locked --all-groups
-uv run tools/benchmark.py
+uv run --locked tools/benchmark.py
 ```
 
 Để tìm hiểu môi trường kiểm thử được quản lý, cách so sánh đường cơ sở và định dạng báo cáo, xem [`tools/ha_dev/README.md`](tools/ha_dev/README.md). Công cụ `tools/benchmark_offline.py` dành cho chẩn đoán ngoại tuyến và đo kiểm tập trung; kết quả của công cụ này không đại diện cho độ chính xác khi vận hành thực tế.
@@ -413,7 +413,7 @@ Vì câu lệnh giọng nói có thể điều khiển thiết bị thật, mỗ
 Trước khi mở pull request, hãy chạy cùng lệnh xác thực được dùng trong kho mã nguồn:
 
 ```bash
-uv run tools/validate.py
+uv run --locked tools/validate.py
 ```
 
 > [!NOTE]

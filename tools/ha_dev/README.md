@@ -53,7 +53,7 @@ From the repository root, prepare the environment and run the complete suite:
 
 ```bash
 uv sync --locked --all-groups
-uv run tools/benchmark.py
+uv run --locked tools/benchmark.py
 ```
 
 By default, the runner executes every query in `tests/real_world/`, runs the managed compatibility checks, and writes:
@@ -83,10 +83,10 @@ The generated report distinguishes successful execution from semantic correctnes
 To preserve both reports while comparing a local change:
 
 ```bash
-uv run tools/benchmark.py \
+uv run --locked tools/benchmark.py \
   --output-json scratch/benchmark/before.json \
   --output-markdown scratch/benchmark/before.md
-uv run tools/benchmark.py \
+uv run --locked tools/benchmark.py \
   --baseline scratch/benchmark/before.json \
   --output-json scratch/benchmark/after.json \
   --output-markdown scratch/benchmark/after.md \
