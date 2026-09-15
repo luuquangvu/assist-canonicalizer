@@ -601,7 +601,7 @@ def test_real_world_expected_slots_align_with_hassil(
     assert not failures, (
         f"{dataset_context.language}: expected_slots mismatch HassIL: {failures}. "
         "If this is due to upstream grammar updates, please run: "
-        "uv run tools/benchmark_offline.py --regenerate-expectations"
+        "uv run --locked tools/benchmark_offline.py --regenerate-expectations"
     )
 
 

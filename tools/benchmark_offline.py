@@ -3120,7 +3120,7 @@ def _print_evaluation_completion(
     if lexical_stats.drift > 0:
         print(
             "Reminder: Please regenerate expectations "
-            "(uv run tools/benchmark_offline.py --regenerate-expectations) "
+            "(uv run --locked tools/benchmark_offline.py --regenerate-expectations) "
             "to update test suite expectations after upgrading home-assistant-intents."
         )
     print("\nEvaluation Complete.")
@@ -6317,7 +6317,7 @@ def _benchmark_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Offline Performance Profiler for Assist Canonicalizer.\n\n"
-            "For authoritative accuracy results use: uv run tools/benchmark.py"
+            "For authoritative accuracy results use: uv run --locked tools/benchmark.py"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -6439,7 +6439,7 @@ def _run_accuracy_benchmark(
     """Run the diagnostic offline accuracy benchmark."""
     print(
         "NOTE: Offline accuracy results are NON-AUTHORITATIVE.\n"
-        "For production accuracy measurement use: uv run tools/benchmark.py\n",
+        "For production accuracy measurement use: uv run --locked tools/benchmark.py\n",
         file=sys.stderr,
     )
     success = run_evaluation(
