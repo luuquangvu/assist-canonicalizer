@@ -13,7 +13,7 @@ from homeassistant.components.homeassistant import exposed_entities
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers import area_registry, entity_registry, floor_registry
+from homeassistant.helpers import area_registry, device_registry, entity_registry, floor_registry
 from homeassistant.helpers import event as ha_event
 
 from .const import (
@@ -61,8 +61,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         DATA_RUNTIME: runtime,
     }
     # Every current option is resolved from this ConfigEntry for each request.
-    # Add an update listener only if a future option is cached during setup and
-    # therefore requires a reload when it changes.
+    # Invalidate the runtime ranking cache when options change to avoid serving stale results.
+    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     async_setup_services(hass)
@@ -72,6 +72,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     return True
+
+
+async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Invalidate runtime ranking cache synchronously when entry options change."""
+    runtime = _runtime_from_entry(hass, entry)
+    runtime.clear_ranking_cache()
 
 
 def _subscribe_intent_updates(
@@ -138,6 +144,9 @@ def _subscribe_registry_updates(hass: HomeAssistant, runtime: CanonicalizerRunti
         hass.bus.async_listen(floor_registry.EVENT_FLOOR_REGISTRY_UPDATED, refresh_from_event)
     )
     runtime.add_cleanup_callback(
+        hass.bus.async_listen(device_registry.EVENT_DEVICE_REGISTRY_UPDATED, refresh_from_event)
+    )
+    runtime.add_cleanup_callback(
         exposed_entities.async_listen_entity_updates(
             hass, ASSISTANT_CONVERSATION, refresh_from_event
         )
@@ -186,6 +195,7 @@ def _schedule_registry_refresh(
     """Schedule a debounced refresh after a registry update."""
     if runtime.closed:
         return
+    runtime.clear_ranking_cache()
     if runtime.rebuild_timer_cancel is not None:
         runtime.rebuild_timer_cancel()
         runtime.rebuild_timer_cancel = None

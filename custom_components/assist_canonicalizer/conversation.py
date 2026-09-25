@@ -522,6 +522,22 @@ class AssistCanonicalizerConversationEntity(
     ) -> tuple[tuple[RankedCandidate, ...], ConfidenceGateDecision]:
         """Rank candidates on the executor and publish the gate decision."""
         intent_context = self._intent_context_from_user_input(user_input)
+        expected_generation = self._runtime.current_cache_generation
+        cached = self._runtime.get_cached_ranking(
+            language,
+            user_input.text,
+            index=index,
+            max_candidates=DEFAULT_MAX_CANDIDATES,
+            intent_context=intent_context,
+            min_confidence=min_confidence,
+            min_margin=min_margin,
+            expected_generation=expected_generation,
+        )
+        if cached is not None:
+            ranked, decision = cached
+            self._runtime.update_diagnostics(confidence_gate=decision.as_json_dict())
+            return ranked, decision
+
         ranked, decision = await self.hass.async_add_executor_job(
             partial(
                 self._runtime.rank_and_evaluate,

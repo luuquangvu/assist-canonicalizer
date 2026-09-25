@@ -833,7 +833,7 @@ def _fixture_summary(
     exposed_entity_ids: set[str],
 ) -> JsonObjectType:
     """Build the stable summary for a verified fixture."""
-    domain_counts: JsonObjectType = dict(
+    domain_counts: JsonObjectType = dict[str, JsonValueType](
         sorted(Counter(_required_string(entity, "domain") for entity in entities).items())
     )
     return {

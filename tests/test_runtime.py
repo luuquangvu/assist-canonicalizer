@@ -19,9 +19,11 @@ import homeassistant.helpers.storage
 import orjson
 import pytest
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry
 
 import custom_components.assist_canonicalizer as integration
 from custom_components.assist_canonicalizer import (
+    _schedule_registry_refresh,
     _subscribe_registry_updates,
     grammar_loader,
 )
@@ -39,7 +41,12 @@ from custom_components.assist_canonicalizer.grammar_loader import (
     build_registry_slot_index,
 )
 from custom_components.assist_canonicalizer.indexer import CanonicalIndex, build_index
-from custom_components.assist_canonicalizer.ranking import RankedCandidate, ScoreBreakdown
+from custom_components.assist_canonicalizer.ranking import (
+    ConfidenceGateDecision,
+    RankedCandidate,
+    ScoreBreakdown,
+    evaluate_confidence_gates,
+)
 from custom_components.assist_canonicalizer.runtime import (
     _INDEX_BUILD_VERSION,
     CanonicalizerRuntime,
@@ -2162,6 +2169,87 @@ def test_is_perfect_rank_result_false() -> None:
     assert not _is_perfect_rank_result((rc,))
 
 
+def test_is_perfect_rank_result_cases() -> None:
+    """Test _is_perfect_rank_result across single, tied, and competing candidates."""
+    assert not _is_perfect_rank_result(())
+
+    cand1 = Candidate(text="turn on the light", intent_name="HassTurnOn")
+    perfect_rc1 = RankedCandidate(
+        candidate=cand1,
+        scores=ScoreBreakdown(
+            rapidfuzz_score=1.0,
+            char_ngram_score=1.0,
+            bm25_score=1.0,
+            intent_score=1.0,
+            final_score=1.0,
+            penalty=0.0,
+        ),
+    )
+    # Single perfect candidate
+    assert _is_perfect_rank_result((perfect_rc1,))
+
+    # Top perfect, second candidate lower score is not perfect overall
+    cand2 = Candidate(text="turn on something", intent_name="HassTurnOn")
+    lower_rc = RankedCandidate(
+        candidate=cand2,
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.8,
+            char_ngram_score=0.8,
+            bm25_score=0.8,
+            intent_score=0.8,
+            final_score=0.8,
+            penalty=0.0,
+        ),
+    )
+    assert not _is_perfect_rank_result((perfect_rc1, lower_rc))
+
+    # Top perfect, second candidate tied at 1.0 with same intent
+    cand3 = Candidate(text="turn on the light please", intent_name="HassTurnOn")
+    tied_same_intent = RankedCandidate(
+        candidate=cand3,
+        scores=ScoreBreakdown(
+            rapidfuzz_score=1.0,
+            char_ngram_score=1.0,
+            bm25_score=1.0,
+            intent_score=1.0,
+            final_score=1.0,
+            penalty=0.0,
+        ),
+    )
+    assert _is_perfect_rank_result((perfect_rc1, tied_same_intent))
+
+    # Top perfect, second candidate tied at 1.0 with differing intent
+    cand4 = Candidate(text="turn off the light", intent_name="HassTurnOff")
+    tied_different_intent = RankedCandidate(
+        candidate=cand4,
+        scores=ScoreBreakdown(
+            rapidfuzz_score=1.0,
+            char_ngram_score=1.0,
+            bm25_score=1.0,
+            intent_score=1.0,
+            final_score=1.0,
+            penalty=0.0,
+        ),
+    )
+    assert not _is_perfect_rank_result((perfect_rc1, tied_different_intent))
+    # Competitor check does not break early on a non-perfect score
+    assert not _is_perfect_rank_result((perfect_rc1, lower_rc, tied_different_intent))
+
+    # Top candidate has penalty
+    penalty_rc = RankedCandidate(
+        candidate=cand1,
+        scores=ScoreBreakdown(
+            rapidfuzz_score=1.0,
+            char_ngram_score=1.0,
+            bm25_score=1.0,
+            intent_score=1.0,
+            final_score=1.0,
+            penalty=0.1,
+        ),
+    )
+    assert not _is_perfect_rank_result((penalty_rc,))
+
+
 def test_valid_store_metadata_rejections() -> None:
     """Test metadata validations in _valid_store_metadata."""
     # Non-dict
@@ -2877,3 +2965,459 @@ async def test_async_shutdown_drains_in_flight_preparation(
 
     assert prep_completed
     assert runtime.closed
+
+
+def test_ranking_cache_put_get_hit() -> None:
+    """Verify that CanonicalizerRuntime correctly caches ranking evaluations."""
+    runtime = CanonicalizerRuntime()
+    cand = Candidate(text="turn on the light", intent_name="HassTurnOn")
+    index = build_index("en", (cand,))
+    runtime.set_index(index)
+    rc = RankedCandidate(
+        candidate=cand,
+        scores=ScoreBreakdown(
+            rapidfuzz_score=1.0,
+            char_ngram_score=1.0,
+            bm25_score=1.0,
+            intent_score=1.0,
+            final_score=1.0,
+            penalty=0.0,
+        ),
+    )
+    decision = evaluate_confidence_gates((rc,), query="turn on the light", language="en")
+    result = ((rc,), decision)
+
+    gen = runtime.current_cache_generation
+    assert runtime.get_cached_ranking("en", "turn on the light", expected_generation=gen) is None
+
+    runtime.put_cached_ranking("en", "turn on the light", result, expected_generation=gen)
+    cached = runtime.get_cached_ranking("en", "turn on the light", expected_generation=gen)
+    assert cached is not None
+    assert cached[0] == result[0]
+    assert cached[1] == result[1]
+
+
+def _make_score_breakdown(score: float, penalty: float = 0.0) -> ScoreBreakdown:
+    """Return a ScoreBreakdown with all required fields set."""
+    return ScoreBreakdown(
+        rapidfuzz_score=score,
+        char_ngram_score=score,
+        bm25_score=score,
+        intent_score=score,
+        final_score=score,
+        penalty=penalty,
+    )
+
+
+def test_ranking_cache_context_discrimination() -> None:
+    """Verify that different intent contexts produce distinct cache entries without cross-talk."""
+    runtime = CanonicalizerRuntime()
+    cand1 = Candidate(text="turn on light", intent_name="HassTurnOn")
+    index = build_index("en", (cand1,))
+    runtime.set_index(index)
+
+    rc1 = RankedCandidate(
+        candidate=cand1,
+        scores=_make_score_breakdown(1.0),
+    )
+    decision1 = evaluate_confidence_gates((rc1,), query="turn on light", language="en")
+    result1 = ((rc1,), decision1)
+
+    cand2 = Candidate(text="turn on living room light", intent_name="HassTurnOn")
+    rc2 = RankedCandidate(
+        candidate=cand2,
+        scores=_make_score_breakdown(0.9),
+    )
+    decision2 = evaluate_confidence_gates((rc2,), query="turn on light", language="en")
+    result2 = ((rc2,), decision2)
+
+    gen = runtime.current_cache_generation
+    ctx_kitchen = {"area": "kitchen"}
+    ctx_living = {"area": "living_room"}
+
+    runtime.put_cached_ranking(
+        "en", "turn on light", result1, intent_context=ctx_kitchen, expected_generation=gen
+    )
+    runtime.put_cached_ranking(
+        "en", "turn on light", result2, intent_context=ctx_living, expected_generation=gen
+    )
+
+    hit_kitchen = runtime.get_cached_ranking(
+        "en", "turn on light", intent_context=ctx_kitchen, expected_generation=gen
+    )
+    hit_living = runtime.get_cached_ranking(
+        "en", "turn on light", intent_context=ctx_living, expected_generation=gen
+    )
+    hit_no_ctx = runtime.get_cached_ranking(
+        "en", "turn on light", intent_context=None, expected_generation=gen
+    )
+
+    assert hit_kitchen is not None
+    assert hit_kitchen[0] == (rc1,)
+    assert hit_living is not None
+    assert hit_living[0] == (rc2,)
+    assert hit_no_ctx is None
+
+
+def test_ranking_cache_slot_preferences_discrimination() -> None:
+    """Verify distinct slot preferences do not share cache entries and order is normalized."""
+    runtime = CanonicalizerRuntime()
+    cand1 = Candidate(text="turn on light", intent_name="HassTurnOn")
+    index = build_index("en", (cand1,))
+    runtime.set_index(index)
+
+    rc1 = RankedCandidate(candidate=cand1, scores=_make_score_breakdown(1.0))
+    decision1 = evaluate_confidence_gates((rc1,), query="turn on light", language="en")
+    result1 = ((rc1,), decision1)
+
+    cand2 = Candidate(text="turn on lamp", intent_name="HassTurnOn")
+    rc2 = RankedCandidate(candidate=cand2, scores=_make_score_breakdown(0.9))
+    decision2 = evaluate_confidence_gates((rc2,), query="turn on light", language="en")
+    result2 = ((rc2,), decision2)
+
+    gen = runtime.current_cache_generation
+    pref_a: set[tuple[str, str]] = {("domain", "light"), ("area", "kitchen")}
+    pref_b: set[tuple[str, str]] = {("domain", "switch"), ("area", "kitchen")}
+    pref_a_reordered: set[tuple[str, str]] = {("area", "kitchen"), ("domain", "light")}
+
+    runtime.put_cached_ranking(
+        "en", "turn on light", result1, slot_preferences=pref_a, expected_generation=gen
+    )
+    runtime.put_cached_ranking(
+        "en", "turn on light", result2, slot_preferences=pref_b, expected_generation=gen
+    )
+
+    hit_a = runtime.get_cached_ranking(
+        "en", "turn on light", slot_preferences=pref_a, expected_generation=gen
+    )
+    hit_b = runtime.get_cached_ranking(
+        "en", "turn on light", slot_preferences=pref_b, expected_generation=gen
+    )
+    hit_a_reordered = runtime.get_cached_ranking(
+        "en", "turn on light", slot_preferences=pref_a_reordered, expected_generation=gen
+    )
+    hit_none = runtime.get_cached_ranking(
+        "en", "turn on light", slot_preferences=None, expected_generation=gen
+    )
+
+    assert hit_a is not None
+    assert hit_a[0] == (rc1,)
+    assert hit_b is not None
+    assert hit_b[0] == (rc2,)
+    # Equivalent set with different insertion order shares the cache key
+    assert hit_a_reordered is not None
+    assert hit_a_reordered[0] == (rc1,)
+    assert hit_none is None
+
+
+def test_ranking_cache_stale_rejection_on_generation_race() -> None:
+    """Verify that stale rankings computed during concurrent invalidation are rejected."""
+    runtime = CanonicalizerRuntime()
+    cand = Candidate(text="turn on light", intent_name="HassTurnOn")
+    index = build_index("en", (cand,))
+    runtime.set_index(index)
+    rc = RankedCandidate(candidate=cand, scores=_make_score_breakdown(1.0))
+    decision = evaluate_confidence_gates((rc,), query="turn on light", language="en")
+    result = ((rc,), decision)
+
+    stale_gen = runtime.current_cache_generation
+    # Invalidation happens while executor ranking was running:
+    runtime.clear_ranking_cache()
+
+    # Attempt to put using stale_gen:
+    runtime.put_cached_ranking("en", "turn on light", result, expected_generation=stale_gen)
+    # Must be dropped!
+    assert runtime.get_cached_ranking("en", "turn on light") is None
+
+
+def _populate_ranking_cache_sample(
+    runtime: CanonicalizerRuntime,
+    result: tuple[tuple[RankedCandidate, ...], ConfidenceGateDecision],
+    query: str = "turn on light",
+    language: str = "en",
+) -> None:
+    """Populate a sample ranking in runtime cache and assert it is present."""
+    if language not in runtime.indexes:
+        cand = Candidate(text=query, intent_name="HassTurnOn")
+        runtime.set_index(build_index(language, (cand,)))
+    runtime.put_cached_ranking(
+        language, query, result, expected_generation=runtime.current_cache_generation
+    )
+    assert runtime.get_cached_ranking(language, query) is not None
+
+
+def test_ranking_cache_invalidation_lifecycle() -> None:
+    """Verify invalidation on registry update, intent update, set_index, and clear_index."""
+    runtime = CanonicalizerRuntime()
+    cand = Candidate(text="turn on light", intent_name="HassTurnOn")
+    rc = RankedCandidate(candidate=cand, scores=_make_score_breakdown(1.0))
+    decision = evaluate_confidence_gates((rc,), query="turn on light", language="en")
+    result = ((rc,), decision)
+
+    # 1. Invalidation on update_registry_slot_values
+    _populate_ranking_cache_sample(runtime, result)
+    runtime.update_registry_slot_values({"name": ("light",)})
+    assert runtime.get_cached_ranking("en", "turn on light") is None
+
+    # 2. Invalidation on update_intent_sources
+    _populate_ranking_cache_sample(runtime, result)
+    runtime.update_intent_sources({"new_source": {"intents": {"Test": {}}}})
+    assert runtime.get_cached_ranking("en", "turn on light") is None
+
+    # 3. Invalidation on set_index
+    _populate_ranking_cache_sample(runtime, result)
+    new_index = build_index("en", (cand,))
+    runtime.set_index(new_index)
+    assert runtime.get_cached_ranking("en", "turn on light") is None
+
+    # 4. Invalidation on clear_index
+    _populate_ranking_cache_sample(runtime, result)
+    runtime.clear_index("en")
+    assert runtime.get_cached_ranking("en", "turn on light") is None
+
+
+def test_ranking_cache_immediate_invalidation_on_schedule_registry_refresh() -> None:
+    """Verify _schedule_registry_refresh immediately clears ranking cache without waiting 5s."""
+    hass = MagicMock()
+    runtime = CanonicalizerRuntime()
+    cand = Candidate(text="turn on light", intent_name="HassTurnOn")
+    rc = RankedCandidate(candidate=cand, scores=_make_score_breakdown(1.0))
+    decision = evaluate_confidence_gates((rc,), query="turn on light", language="en")
+    result = ((rc,), decision)
+
+    _populate_ranking_cache_sample(runtime, result)
+
+    with patch("homeassistant.helpers.event.async_call_later"):
+        _schedule_registry_refresh(hass, runtime, lambda now: None)
+
+    assert runtime.get_cached_ranking("en", "turn on light") is None
+
+
+def test_ranking_cache_lru_eviction() -> None:
+    """Verify LRU capacity capping and oldest entry eviction."""
+    runtime = CanonicalizerRuntime()
+    runtime.max_ranking_cache_size = 2
+
+    cand = Candidate(text="test", intent_name="HassTurnOn")
+    index = build_index("en", (cand,))
+    runtime.set_index(index)
+    rc = RankedCandidate(candidate=cand, scores=_make_score_breakdown(1.0))
+    decision = evaluate_confidence_gates((rc,), query="test", language="en")
+    res = ((rc,), decision)
+
+    gen = runtime.current_cache_generation
+    for q in ("q1", "q2"):
+        runtime.put_cached_ranking("en", q, res, expected_generation=gen)
+        assert runtime.get_cached_ranking("en", q) is not None
+
+    # Access q1 so q2 becomes LRU
+    assert runtime.get_cached_ranking("en", "q1") is not None
+
+    # Insert q3 -> q2 should be evicted
+    runtime.put_cached_ranking("en", "q3", res, expected_generation=gen)
+    assert runtime.get_cached_ranking("en", "q1") is not None
+    assert runtime.get_cached_ranking("en", "q3") is not None
+    assert runtime.get_cached_ranking("en", "q2") is None
+
+
+def test_ranking_cache_disabled_and_negative_capacity() -> None:
+    """Verify ranking cache is disabled when max_ranking_cache_size is zero or negative."""
+    cand = Candidate(text="test", intent_name="HassTurnOn")
+    index = build_index("en", (cand,))
+
+    for disabled_size in (0, -1, -10):
+        runtime = CanonicalizerRuntime()
+        runtime.set_index(index)
+        runtime.max_ranking_cache_size = disabled_size
+        rc = RankedCandidate(candidate=cand, scores=_make_score_breakdown(1.0))
+        decision = evaluate_confidence_gates((rc,), query="test", language="en")
+        res = ((rc,), decision)
+        gen = runtime.current_cache_generation
+        runtime.put_cached_ranking("en", "test", res, expected_generation=gen)
+        assert len(runtime._ranking_cache) == 0
+        assert runtime.get_cached_ranking("en", "test") is None
+
+
+def test_rank_and_evaluate_caches_result() -> None:
+    """Verify rank_and_evaluate stores and returns cached evaluations on repeated queries."""
+    runtime = CanonicalizerRuntime()
+    cand = Candidate(text="turn on light", intent_name="HassTurnOn")
+    index = build_index("en", (cand,))
+    runtime.set_index(index)
+
+    assert len(runtime._ranking_cache) == 0
+    ranked1, decision1 = runtime.rank_and_evaluate("en", index, "turn on light")
+    assert len(runtime._ranking_cache) == 1
+
+    ranked2, decision2 = runtime.rank_and_evaluate("en", index, "turn on light")
+    assert len(runtime._ranking_cache) == 1
+    assert ranked1 == ranked2
+    assert decision1 == decision2
+
+
+def test_rank_and_evaluate_does_not_cache_rejected_decisions() -> None:
+    """Verify rank_and_evaluate never caches evaluations that fail confidence gates."""
+    runtime = CanonicalizerRuntime()
+    index = build_index("en", ())
+    runtime.set_index(index)
+
+    assert len(runtime._ranking_cache) == 0
+    _ranked, decision = runtime.rank_and_evaluate("en", index, "unmatched query")
+    assert not decision.accepted
+    assert len(runtime._ranking_cache) == 0
+
+    # Non-empty ranked candidates rejected by confidence gates must also not be cached
+    cand = Candidate(text="turn on the light", intent_name="HassTurnOn")
+    index_with_cand = build_index("en", (cand,))
+    runtime.set_index(index_with_cand)
+    ranked, decision = runtime.rank_and_evaluate(
+        "en",
+        index_with_cand,
+        "turn",
+        min_confidence=0.99,
+    )
+    assert len(ranked) > 0
+    assert not decision.accepted
+    assert len(runtime._ranking_cache) == 0
+    assert runtime.get_cached_ranking("en", "turn", index=index_with_cand) is None
+
+
+def test_ranking_cache_entry_generation_validation_without_expected_generation() -> None:
+    """Verify entry generation is validated even if expected_generation is omitted."""
+    runtime = CanonicalizerRuntime()
+    cand = Candidate(text="turn on light", intent_name="HassTurnOn")
+    index = build_index("en", (cand,))
+    runtime.set_index(index)
+    rc = RankedCandidate(candidate=cand, scores=_make_score_breakdown(1.0))
+    decision = evaluate_confidence_gates((rc,), query="turn on light", language="en")
+    result = ((rc,), decision)
+
+    gen = runtime.current_cache_generation
+    runtime.put_cached_ranking("en", "turn on light", result, expected_generation=gen)
+
+    # Invalidate by bumping a generation counter without clearing the cache map directly
+    runtime.registry_generation += 1
+
+    # Caller omits expected_generation, but stored entry generation no longer matches
+    assert runtime.get_cached_ranking("en", "turn on light") is None
+    assert len(runtime._ranking_cache) == 0
+
+
+def test_ranking_cache_index_identity_discrimination() -> None:
+    """Verify replacing an index updates cache keys and clears stale entries."""
+    runtime = CanonicalizerRuntime()
+    cand1 = Candidate(text="turn on light", intent_name="HassTurnOn")
+    cand2 = Candidate(text="turn on light", intent_name="HassTurnOff")
+    index1 = build_index("en", (cand1,))
+    index2 = build_index("en", (cand2,))
+
+    rc = RankedCandidate(candidate=cand1, scores=_make_score_breakdown(1.0))
+    decision = evaluate_confidence_gates((rc,), query="turn on light", language="en")
+    result = ((rc,), decision)
+
+    runtime.set_index(index1)
+    gen = runtime.current_cache_generation
+    runtime.put_cached_ranking("en", "turn on light", result, index=index1, expected_generation=gen)
+
+    assert runtime.get_cached_ranking("en", "turn on light", index=index1) is not None
+
+    # Replacing the index clears obsolete entries and advances ranking cache generation
+    runtime.set_index(index2)
+    assert runtime.get_cached_ranking("en", "turn on light", index=index2) is None
+    assert len(runtime._ranking_cache) == 0
+
+
+def test_ranking_cache_requires_registered_index() -> None:
+    """Verify that explicit CanonicalIndex calls require registration to use the cache."""
+    runtime = CanonicalizerRuntime()
+    cand1 = Candidate(text="turn on light", intent_name="HassTurnOn")
+    cand2 = Candidate(text="turn on light", intent_name="HassTurnOff")
+    index1 = build_index("en", (cand1,))
+    index2 = build_index("en", (cand2,))
+
+    # 1. Unregistered index is not cached by rank_and_evaluate
+    ranked, decision = runtime.rank_and_evaluate("en", index1, "turn on light")
+    assert decision.accepted
+    assert len(ranked) > 0
+    assert len(runtime._ranking_cache) == 0
+    assert runtime.get_cached_ranking("en", "turn on light", index=index1) is None
+
+    # 2. Once registered, rank_and_evaluate caches the result
+    runtime.set_index(index1)
+    ranked1, decision1 = runtime.rank_and_evaluate("en", index1, "turn on light")
+    assert decision1.accepted
+    assert len(ranked1) > 0
+    assert len(runtime._ranking_cache) == 1
+    assert runtime.get_cached_ranking("en", "turn on light", index=index1) is not None
+
+    # 3. Passing a different explicit index bypasses the cache of index1
+    assert runtime.get_cached_ranking("en", "turn on light", index=index2) is None
+    ranked2, decision2 = runtime.rank_and_evaluate("en", index2, "turn on light")
+    assert decision2.accepted
+    assert ranked2[0].candidate.intent_name == "HassTurnOff"
+    # index2 was not registered, so cache still contains only index1's entry
+    assert len(runtime._ranking_cache) == 1
+
+
+def test_device_registry_update_event_clears_ranking_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify that a device registry update event clears the runtime ranking cache."""
+    listeners: dict[object, list[Any]] = {}
+
+    class FakeBus:
+        """Fake event bus tracking subscriptions."""
+
+        def async_listen(self, event_type: object, callback: Any) -> Any:
+            """Register an event listener."""
+            listeners.setdefault(event_type, []).append(callback)
+            return lambda: None
+
+    hass = MagicMock()
+    hass.bus = FakeBus()
+
+    monkeypatch.setattr(
+        integration.exposed_entities,
+        "async_listen_entity_updates",
+        lambda *args, **kwargs: lambda: None,
+    )
+
+    runtime = CanonicalizerRuntime()
+    cand = Candidate(text="turn on light", intent_name="HassTurnOn")
+    rc = RankedCandidate(candidate=cand, scores=_make_score_breakdown(1.0))
+    decision = evaluate_confidence_gates((rc,), query="turn on light", language="en")
+    result = ((rc,), decision)
+
+    _populate_ranking_cache_sample(runtime, result)
+    assert runtime.get_cached_ranking("en", "turn on light") is not None
+
+    _subscribe_registry_updates(hass, runtime)
+
+    device_listeners = listeners.get(device_registry.EVENT_DEVICE_REGISTRY_UPDATED, [])
+    assert len(device_listeners) == 1
+
+    with patch("homeassistant.helpers.event.async_call_later"):
+        device_listeners[0]({"action": "update", "device_id": "device_123"})
+
+    assert runtime.get_cached_ranking("en", "turn on light") is None
+
+
+def test_set_index_preserves_language_index_generation_for_concurrent_rebuilds() -> None:
+    """Verify set_index preserves language index generation so concurrent loads do not abort."""
+    runtime = CanonicalizerRuntime()
+    initial_gen = runtime._index_generation_for("en")
+    source_gen = runtime.source_generation
+
+    # In-flight operation starts with initial_gen:
+    assert not runtime_module._index_load_invalidated(runtime, "en", initial_gen, source_gen)
+
+    # Publishing an index via set_index does NOT bump index_generation:
+    index = build_index("en", (Candidate(text="turn on light", intent_name="HassTurnOn"),))
+    runtime.set_index(index)
+    assert runtime._index_generation_for("en") == initial_gen
+    assert not runtime_module._index_load_invalidated(runtime, "en", initial_gen, source_gen)
+
+    # However, clear_index DOES advance index generation to invalidate pending loads:
+    runtime.clear_index("en")
+    assert runtime._index_generation_for("en") != initial_gen
+    assert runtime_module._index_load_invalidated(runtime, "en", initial_gen, source_gen)

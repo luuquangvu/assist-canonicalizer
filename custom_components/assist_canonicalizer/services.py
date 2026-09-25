@@ -152,7 +152,7 @@ class DumpCandidatesPayload(TypedDict):
 
 def _json_int_mapping(values: Mapping[str, int]) -> JsonObjectType:
     """Return integer metrics in a JSON-object-compatible mapping."""
-    result: JsonObjectType = dict(values.items())
+    result: JsonObjectType = dict[str, JsonValueType](values.items())
     return result
 
 

@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import inspect
 import sys
+from collections.abc import Mapping, Sequence
 from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -31,7 +32,12 @@ from custom_components.assist_canonicalizer.conversation import (
     async_setup_entry,
 )
 from custom_components.assist_canonicalizer.indexer import CanonicalIndex, build_index
-from custom_components.assist_canonicalizer.ranking import RankedCandidate, ScoreBreakdown
+from custom_components.assist_canonicalizer.ranking import (
+    ConfidenceGateDecision,
+    RankedCandidate,
+    ScoreBreakdown,
+    evaluate_confidence_gates,
+)
 from custom_components.assist_canonicalizer.recognition import (
     RecognitionKind,
     RecognitionObservation,
@@ -2752,52 +2758,64 @@ async def test_hotword_mixed_invalid_list_filtered_and_matched() -> None:
     assert runtime.diagnostics.last_fallback_reason == FallbackReason.HOTWORD_MATCHED
 
 
+def _mock_hotword_entry(
+    confidence: object = None,
+    *,
+    enabled: bool = True,
+    hotwords: Sequence[str] = ("Jarvis",),
+    options: Mapping[str, object] | None = None,
+    data: Mapping[str, object] | None = None,
+) -> MagicMock:
+    """Return a mock config entry configured with hotword options and data."""
+    entry = MagicMock()
+    if options is not None:
+        entry.options = dict(options)
+    elif confidence is not None:
+        entry.options = {
+            ConfigKey.ENABLE_HOTWORD: enabled,
+            ConfigKey.HOTWORD: list(hotwords),
+            ConfigKey.HOTWORD_MIN_CONFIDENCE: confidence,
+        }
+    else:
+        entry.options = {}
+    entry.data = dict(data) if data is not None else {}
+    return entry
+
+
 def test_resolve_entry_hotword_options_fallback_chains() -> None:
     """Verify resolve_entry_hotword_options fallback across options, data, and defaults."""
     # 1. Options present and overrides data
-    entry_both = MagicMock()
-    entry_both.options = {
-        ConfigKey.ENABLE_HOTWORD: True,
-        ConfigKey.HOTWORD: ["Jarvis", "Alexa"],
-        ConfigKey.HOTWORD_MIN_CONFIDENCE: 0.92,
-    }
-    entry_both.data = {
-        ConfigKey.ENABLE_HOTWORD: False,
-        ConfigKey.HOTWORD: ["OldHotword"],
-        ConfigKey.HOTWORD_MIN_CONFIDENCE: 0.70,
-    }
-    enabled, hws, conf = resolve_entry_hotword_options(entry_both)
-    assert enabled is True
-    assert hws == ("Jarvis", "Alexa")
-    assert conf == 0.92
+    entry_both = _mock_hotword_entry(
+        0.92,
+        hotwords=("Jarvis", "Alexa"),
+        data={
+            ConfigKey.ENABLE_HOTWORD: False,
+            ConfigKey.HOTWORD: ["OldHotword"],
+            ConfigKey.HOTWORD_MIN_CONFIDENCE: 0.70,
+        },
+    )
+    assert resolve_entry_hotword_options(entry_both) == (True, ("Jarvis", "Alexa"), 0.92)
 
     # 2. Data only (no options)
-    entry_data = MagicMock()
-    entry_data.options = {}
-    entry_data.data = {
-        ConfigKey.ENABLE_HOTWORD: True,
-        ConfigKey.HOTWORD: ["Jarvis"],
-        ConfigKey.HOTWORD_MIN_CONFIDENCE: 0.88,
-    }
-    enabled, hws, conf = resolve_entry_hotword_options(entry_data)
-    assert enabled is True
-    assert hws == ("Jarvis",)
-    assert conf == 0.88
+    entry_data = _mock_hotword_entry(
+        options={},
+        data={
+            ConfigKey.ENABLE_HOTWORD: True,
+            ConfigKey.HOTWORD: ["Jarvis"],
+            ConfigKey.HOTWORD_MIN_CONFIDENCE: 0.88,
+        },
+    )
+    assert resolve_entry_hotword_options(entry_data) == (True, ("Jarvis",), 0.88)
 
     # 3. Neither options nor data (defaults used)
-    entry_empty = MagicMock()
-    entry_empty.options = {}
-    entry_empty.data = {}
-    enabled, hws, conf = resolve_entry_hotword_options(entry_empty)
-    assert enabled is False
-    assert hws == ()
-    assert conf == 0.85
+    assert resolve_entry_hotword_options(_mock_hotword_entry(options={}, data={})) == (
+        False,
+        (),
+        0.85,
+    )
 
     # 4. None entry (defaults used)
-    enabled, hws, conf = resolve_entry_hotword_options(None)
-    assert enabled is False
-    assert hws == ()
-    assert conf == 0.85
+    assert resolve_entry_hotword_options(None) == (False, (), 0.85)
 
 
 def test_normalize_hotword_list_types_and_edge_cases() -> None:
@@ -2829,56 +2847,117 @@ def test_normalize_hotword_list_types_and_edge_cases() -> None:
 def test_resolve_entry_hotword_options_defensive_confidence_parsing() -> None:
     """Verify resolve_entry_hotword_options defensively parses confidence values."""
     # 1. String float confidence is parsed cleanly
-    entry_str = MagicMock()
-    entry_str.options = {
-        ConfigKey.ENABLE_HOTWORD: True,
-        ConfigKey.HOTWORD: ["Jarvis"],
-        ConfigKey.HOTWORD_MIN_CONFIDENCE: "0.95",
-    }
-    entry_str.data = {}
-    _, _, conf = resolve_entry_hotword_options(entry_str)
+    _, _, conf = resolve_entry_hotword_options(_mock_hotword_entry("0.95"))
     assert conf == 0.95
 
     # 2. Invalid string confidence falls back to default
-    entry_inv = MagicMock()
-    entry_inv.options = {
-        ConfigKey.ENABLE_HOTWORD: True,
-        ConfigKey.HOTWORD: ["Jarvis"],
-        ConfigKey.HOTWORD_MIN_CONFIDENCE: "invalid_not_a_number",
-    }
-    entry_inv.data = {}
-    _, _, conf = resolve_entry_hotword_options(entry_inv)
+    _, _, conf = resolve_entry_hotword_options(_mock_hotword_entry("invalid_not_a_number"))
     assert conf == 0.85
 
     # 3. Out-of-bounds values are clamped to [0.0, 1.0]
-    entry_high = MagicMock()
-    entry_high.options = {
-        ConfigKey.ENABLE_HOTWORD: True,
-        ConfigKey.HOTWORD: ["Jarvis"],
-        ConfigKey.HOTWORD_MIN_CONFIDENCE: 2.5,
-    }
-    entry_high.data = {}
-    _, _, conf = resolve_entry_hotword_options(entry_high)
+    _, _, conf = resolve_entry_hotword_options(_mock_hotword_entry(2.5))
     assert conf == 1.0
 
-    entry_low = MagicMock()
-    entry_low.options = {
-        ConfigKey.ENABLE_HOTWORD: True,
-        ConfigKey.HOTWORD: ["Jarvis"],
-        ConfigKey.HOTWORD_MIN_CONFIDENCE: -0.5,
-    }
-    entry_low.data = {}
-    _, _, conf = resolve_entry_hotword_options(entry_low)
+    _, _, conf = resolve_entry_hotword_options(_mock_hotword_entry(-0.5))
     assert conf == 0.0
 
     # 4. Non-finite values (NaN, inf, -inf) fall back to default
     for non_finite in (float("nan"), float("inf"), float("-inf")):
-        entry_non_finite = MagicMock()
-        entry_non_finite.options = {
-            ConfigKey.ENABLE_HOTWORD: True,
-            ConfigKey.HOTWORD: ["Jarvis"],
-            ConfigKey.HOTWORD_MIN_CONFIDENCE: non_finite,
-        }
-        entry_non_finite.data = {}
-        _, _, conf = resolve_entry_hotword_options(entry_non_finite)
+        _, _, conf = resolve_entry_hotword_options(_mock_hotword_entry(non_finite))
         assert conf == 0.85
+
+
+def _setup_ranking_cache_test_context() -> tuple[
+    AssistCanonicalizerConversationEntity,
+    CanonicalizerRuntime,
+    CanonicalIndex,
+    RankedCandidate,
+    ConfidenceGateDecision,
+    MockConversationInput,
+]:
+    """Set up a test entity and runtime pre-populated with a cached ranking."""
+    entry = MagicMock()
+    entry.options = {"min_confidence": 0.60, "min_margin": 0.05}
+    entry.entry_id = "test_entry"
+    runtime = CanonicalizerRuntime()
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+
+    user_input = MockConversationInput("turn on the light", "en")
+    cand = Candidate(text="turn on the light", intent_name="HassTurnOn")
+    rc = RankedCandidate(
+        candidate=cand,
+        scores=ScoreBreakdown(
+            rapidfuzz_score=1.0,
+            char_ngram_score=1.0,
+            bm25_score=1.0,
+            intent_score=1.0,
+            final_score=1.0,
+            penalty=0.0,
+        ),
+    )
+    decision = evaluate_confidence_gates((rc,), query="turn on the light", language="en")
+    result = ((rc,), decision)
+
+    index = build_index("en", (cand,))
+    runtime.set_index(index)
+    # Prepopulate ranking cache:
+    runtime.put_cached_ranking(
+        "en",
+        "turn on the light",
+        result,
+        index=index,
+        min_confidence=0.60,
+        min_margin=0.05,
+        expected_generation=runtime.current_cache_generation,
+    )
+    return entity, runtime, index, rc, decision, user_input
+
+
+async def test_async_rank_user_input_cache_hit_avoids_executor() -> None:
+    """Verify that a ranking cache hit in _async_rank_user_input skips async_add_executor_job."""
+    entity, _, index, rc, decision, user_input = _setup_ranking_cache_test_context()
+    hass = MagicMock()
+    entity.hass = hass
+
+    ranked, dec = await entity._async_rank_user_input(user_input, "en", index, 0.60, 0.05)
+
+    assert ranked == (rc,)
+    assert dec == decision
+    # hass.async_add_executor_job must NOT have been called!
+    hass.async_add_executor_job.assert_not_called()
+
+
+async def test_async_rank_user_input_invalidated_cache_calls_executor() -> None:
+    """Verify that an invalidated cache generation misses the cache and invokes the executor."""
+    entity, runtime, index, rc, _, user_input = _setup_ranking_cache_test_context()
+
+    # Invalidate cache generation:
+    runtime.clear_ranking_cache()
+
+    fresh_cand = Candidate(text="turn on the light please", intent_name="HassTurnOn")
+    fresh_rc = RankedCandidate(
+        candidate=fresh_cand,
+        scores=ScoreBreakdown(
+            rapidfuzz_score=0.99,
+            char_ngram_score=0.99,
+            bm25_score=0.99,
+            intent_score=1.0,
+            final_score=0.99,
+            penalty=0.0,
+        ),
+    )
+    fresh_decision = evaluate_confidence_gates(
+        (fresh_rc,), query="turn on the light", language="en"
+    )
+    fresh_result = ((fresh_rc,), fresh_decision)
+
+    hass = MagicMock()
+    hass.async_add_executor_job = AsyncMock(return_value=fresh_result)
+    entity.hass = hass
+
+    ranked, dec = await entity._async_rank_user_input(user_input, "en", index, 0.60, 0.05)
+
+    assert ranked == (fresh_rc,)
+    assert dec == fresh_decision
+    assert ranked != (rc,)
+    hass.async_add_executor_job.assert_called_once()

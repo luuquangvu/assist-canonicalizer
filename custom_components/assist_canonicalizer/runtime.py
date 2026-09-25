@@ -9,6 +9,7 @@ import inspect
 import logging
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping, Sequence, Set
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -29,6 +30,7 @@ from .builtin_intents import (
 from .candidate import Candidate, CandidateSource
 from .const import (
     DEFAULT_MAX_CANDIDATES,
+    DEFAULT_MAX_RANKING_CACHE_SIZE,
     DEFAULT_MIN_CONFIDENCE,
     DEFAULT_MIN_MARGIN,
     DOMAIN,
@@ -61,6 +63,7 @@ from .rehydration import clear_rehydration_caches
 from .utils import (
     clear_utils_caches,
     elapsed_ms,
+    freeze_intent_context,
     normalize_language,
     register_custom_wildcards_from_sources,
 )
@@ -166,6 +169,46 @@ def _cleared_diagnostic_traces(
     return diagnostics
 
 
+@dataclass(frozen=True, slots=True)
+class CacheGenerationToken:
+    """Structured generation token representing all ranking-affecting state."""
+
+    registry_generation: int
+    source_generation: int
+    intent_source_generation: int
+    index_generation: int
+    ranking_cache_generation: int
+
+
+@dataclass(frozen=True, slots=True)
+class _RankingCacheKey:
+    """Cache key for memoizing ranking and gate evaluation results."""
+
+    language: str
+    query: str
+    index_generation: IndexGeneration | None
+    intent_context: tuple[tuple[str, tuple[str, ...]], ...] | None
+    slot_preferences: tuple[tuple[str, str], ...] | None
+    max_candidates: int
+    min_confidence: float
+    min_margin: float
+
+
+@dataclass(frozen=True, slots=True)
+class _RankingCacheEntry:
+    """Cached ranking evaluation and decision paired with its insertion generation token."""
+
+    result: tuple[tuple[RankedCandidate, ...], ConfidenceGateDecision]
+    generation: CacheGenerationToken
+
+
+def _freeze_slot_preferences(
+    slot_preferences: set[tuple[str, str]] | None,
+) -> tuple[tuple[str, str], ...] | None:
+    """Return a deterministic, hashable representation of slot preferences."""
+    return tuple(sorted(slot_preferences)) if slot_preferences else None
+
+
 @dataclass(slots=True)
 class CanonicalizerRuntime:
     """Mutable runtime state shared by the integration entry and agent.
@@ -225,6 +268,12 @@ class CanonicalizerRuntime:
     # Per-language intent-source caches stamp against this counter so registry
     # events do not spuriously invalidate them.
     intent_source_generation: int = 0
+    max_ranking_cache_size: int = DEFAULT_MAX_RANKING_CACHE_SIZE
+    ranking_cache_generation: int = 0
+    _ranking_cache: OrderedDict[_RankingCacheKey, _RankingCacheEntry] = field(
+        default_factory=OrderedDict, repr=False
+    )
+    _ranking_cache_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     rebuild_timer_cancel: Callable[[], None] | None = None
     _storage_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     _active_index_loads: int = field(default=0, init=False, repr=False)
@@ -250,6 +299,117 @@ class CanonicalizerRuntime:
         """Return whether this runtime is shutting down or fully closed."""
         return self._closed
 
+    @property
+    def current_cache_generation(self) -> CacheGenerationToken:
+        """Return the composite generation token for all ranking-affecting state."""
+        return CacheGenerationToken(
+            registry_generation=self.registry_generation,
+            source_generation=self.source_generation,
+            intent_source_generation=self.intent_source_generation,
+            index_generation=self.index_generation,
+            ranking_cache_generation=self.ranking_cache_generation,
+        )
+
+    def get_cached_ranking(
+        self,
+        language: str,
+        query: str,
+        *,
+        index: CanonicalIndex | None = None,
+        max_candidates: int = DEFAULT_MAX_CANDIDATES,
+        slot_preferences: set[tuple[str, str]] | None = None,
+        intent_context: Mapping[str, object] | None = None,
+        min_confidence: float = DEFAULT_MIN_CONFIDENCE,
+        min_margin: float = DEFAULT_MIN_MARGIN,
+        expected_generation: CacheGenerationToken | None = None,
+    ) -> tuple[tuple[RankedCandidate, ...], ConfidenceGateDecision] | None:
+        """Return cached ranking and decision if present and current."""
+        if self._closed or self.max_ranking_cache_size <= 0:
+            return None
+        norm_language = normalize_language(language)
+        registered_index = self.indexes.get(norm_language)
+        if registered_index is None or (index is not None and index is not registered_index):
+            return None
+        index_generation = self._index_generation_for(norm_language)
+        key = _RankingCacheKey(
+            language=norm_language,
+            query=query,
+            index_generation=index_generation,
+            intent_context=freeze_intent_context(intent_context),
+            slot_preferences=_freeze_slot_preferences(slot_preferences),
+            max_candidates=max_candidates,
+            min_confidence=min_confidence,
+            min_margin=min_margin,
+        )
+        with self._ranking_cache_lock:
+            current_generation = self.current_cache_generation
+            if expected_generation is not None and current_generation != expected_generation:
+                return None
+            if key in self._ranking_cache:
+                entry = self._ranking_cache[key]
+                if entry.generation != current_generation:
+                    self._ranking_cache.pop(key, None)
+                    return None
+                if expected_generation is not None and entry.generation != expected_generation:
+                    return None
+                self._ranking_cache.move_to_end(key)
+                return entry.result
+        return None
+
+    def put_cached_ranking(
+        self,
+        language: str,
+        query: str,
+        result: tuple[tuple[RankedCandidate, ...], ConfidenceGateDecision],
+        *,
+        expected_generation: CacheGenerationToken,
+        index: CanonicalIndex | None = None,
+        max_candidates: int = DEFAULT_MAX_CANDIDATES,
+        slot_preferences: set[tuple[str, str]] | None = None,
+        intent_context: Mapping[str, object] | None = None,
+        min_confidence: float = DEFAULT_MIN_CONFIDENCE,
+        min_margin: float = DEFAULT_MIN_MARGIN,
+    ) -> None:
+        """Store ranking result in the cache if the generation has not changed."""
+        if self._closed or self.max_ranking_cache_size <= 0:
+            return
+        norm_language = normalize_language(language)
+        registered_index = self.indexes.get(norm_language)
+        if registered_index is None or (index is not None and index is not registered_index):
+            return
+        index_generation = self._index_generation_for(norm_language)
+        key = _RankingCacheKey(
+            language=norm_language,
+            query=query,
+            index_generation=index_generation,
+            intent_context=freeze_intent_context(intent_context),
+            slot_preferences=_freeze_slot_preferences(slot_preferences),
+            max_candidates=max_candidates,
+            min_confidence=min_confidence,
+            min_margin=min_margin,
+        )
+        with self._ranking_cache_lock:
+            if self._closed or self.current_cache_generation != expected_generation:
+                return
+            entry = _RankingCacheEntry(result=result, generation=expected_generation)
+            if key in self._ranking_cache:
+                self._ranking_cache.move_to_end(key)
+            elif len(self._ranking_cache) >= self.max_ranking_cache_size:
+                self._ranking_cache.popitem(last=False)
+            self._ranking_cache[key] = entry
+
+    def clear_ranking_cache(self, language: str | None = None) -> None:
+        """Invalidate cached ranking evaluations for one language or all languages."""
+        with self._ranking_cache_lock:
+            if language is None:
+                self._ranking_cache.clear()
+            else:
+                norm_lang = normalize_language(language)
+                keys_to_remove = [k for k in self._ranking_cache if k.language == norm_lang]
+                for k in keys_to_remove:
+                    self._ranking_cache.pop(k, None)
+            self.ranking_cache_generation += 1
+
     def get_index(self, language: str) -> CanonicalIndex | None:
         """Return the cached index for a language."""
         return None if self._closed else self.indexes.get(normalize_language(language))
@@ -261,6 +421,7 @@ class CanonicalizerRuntime:
         language = normalize_language(index.language)
         self.indexes[language] = index
         self.invalidate_language_preparation(language)
+        self.clear_ranking_cache(language)
         self.update_diagnostics(
             candidate_count=index.candidate_count,
             index_version=index.version,
@@ -624,8 +785,24 @@ class CanonicalizerRuntime:
 
         Bundling both steps lets the conversation entity run the full
         decision path inside a single executor job instead of evaluating
-        pairwise gate checks on the event loop.
+        pairwise gate checks on the event loop. Results are cached in the
+        runtime ranking cache guarded by composite cache generation stamps.
         """
+        expected_generation = self.current_cache_generation
+        cached = self.get_cached_ranking(
+            language,
+            query,
+            index=index,
+            max_candidates=max_candidates,
+            slot_preferences=slot_preferences,
+            intent_context=intent_context,
+            min_confidence=min_confidence,
+            min_margin=min_margin,
+            expected_generation=expected_generation,
+        )
+        if cached is not None:
+            return cached
+
         ranked = self.rank_with_dynamic_candidates(
             language,
             index,
@@ -643,7 +820,21 @@ class CanonicalizerRuntime:
             query=query,
             language=normalize_language(language),
         )
-        return ranked, decision
+        result = (ranked, decision)
+        if decision.accepted and ranked:
+            self.put_cached_ranking(
+                language,
+                query,
+                result,
+                expected_generation=expected_generation,
+                index=index,
+                max_candidates=max_candidates,
+                slot_preferences=slot_preferences,
+                intent_context=intent_context,
+                min_confidence=min_confidence,
+                min_margin=min_margin,
+            )
+        return result
 
     def _get_language_preparation_lock(self, language: str) -> threading.RLock:
         """Return a dedicated reentrant lock for serializing preparation of a language."""
@@ -786,6 +977,7 @@ class CanonicalizerRuntime:
             self.rebuild_tasks.pop(language, None)
             self.indexes.pop(language, None)
             self.invalidate_language_preparation(language)
+        self.clear_ranking_cache(language)
         self.update_diagnostics(candidate_count=self.total_candidate_count())
 
     def total_candidate_count(self) -> int:
@@ -1011,6 +1203,7 @@ class CanonicalizerRuntime:
             self.dynamic_registry_intents.clear()
             self._dynamic_intent_generations.clear()
         self.cancel_preparation_task(None)
+        self.clear_ranking_cache(None)
         self.update_diagnostics(candidate_count=0)
 
     def _storage_generation_matches(
@@ -1130,6 +1323,7 @@ class CanonicalizerRuntime:
         await self._index_loads_drained.wait()
         await self._preparations_drained.wait()
         async with self._storage_lock:
+            # Drain in-flight storage operations before clearing runtime state.
             pass
         self._clear_runtime_state_and_caches()
 
@@ -1192,6 +1386,7 @@ class CanonicalizerRuntime:
             self.warmup_tasks.clear()
             self.preparation_tasks.clear()
             self._prepared_language_stamps.clear()
+        self.clear_ranking_cache(None)
         self.update_diagnostics(candidate_count=0, dynamic_candidate_count=0)
         clear_normalization_caches()
         clear_bm25_caches()
@@ -1785,7 +1980,7 @@ def _serialize_candidate(candidate: Candidate) -> JsonObjectType:
         "intent_name": candidate.intent_name,
         "source": candidate.source.value,
         "language": candidate.language,
-        "metadata": dict(candidate.metadata),
+        "metadata": dict[str, JsonValueType](candidate.metadata),
         "slot_values": list(candidate.slot_values),
         "normalized_text": candidate.normalized_text,
         "wildcard_infos": [list(info) for info in candidate.wildcard_infos],
@@ -1910,7 +2105,11 @@ def _is_perfect_rank_result(ranked: tuple[RankedCandidate, ...]) -> bool:
             or scores.penalty != 0.0
         ):
             return False
-    return True
+    top_intent = ranked[0].candidate.intent_name
+    return not any(
+        (competitor.scores.final_score == 1.0 and competitor.candidate.intent_name != top_intent)
+        for competitor in ranked[1:]
+    )
 
 
 def _dynamic_exact_normalized_lookup(
