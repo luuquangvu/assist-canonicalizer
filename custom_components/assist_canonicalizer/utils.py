@@ -270,7 +270,7 @@ def normalize_intent_context(
             continue
         values: list[object] = []
         if isinstance(raw_value, Mapping):
-            values.extend(raw_value.get(field) for field in ("value", "text"))
+            values.extend(raw_value.get(field) for field in ("value", "text", "name"))
         else:
             values.append(raw_value)
         if tokens := frozenset(
@@ -278,6 +278,19 @@ def normalize_intent_context(
         ):
             normalized[key] = tokens
     return normalized
+
+
+def freeze_intent_context(
+    intent_context: Mapping[str, object] | None,
+) -> tuple[tuple[str, tuple[str, ...]], ...] | None:
+    """Return a deterministic, hashable representation of intent context.
+
+    Normalizes context values through ``normalize_intent_context`` and orders
+    all slot names and tokens to provide a stable cache key across requests.
+    """
+    if not intent_context or not (normalized := normalize_intent_context(intent_context)):
+        return None
+    return tuple(sorted((k, tuple(sorted(v))) for k, v in normalized.items()))
 
 
 def register_custom_wildcards_from_sources(

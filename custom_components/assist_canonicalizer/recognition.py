@@ -13,7 +13,7 @@ from homeassistant.components.conversation.agent_manager import async_get_agent
 from homeassistant.components.conversation.const import HOME_ASSISTANT_AGENT
 from homeassistant.components.conversation.models import ConversationInput
 from homeassistant.core import HomeAssistant
-from homeassistant.util.json import JsonObjectType
+from homeassistant.util.json import JsonObjectType, JsonValueType
 
 from .const import (
     CONVERSATION_INPUT_AREA_CONTEXT_FIELDS,
@@ -63,7 +63,9 @@ class RecognitionObservation:
             "kind": self.kind.value,
             "intent_name": self.intent_name,
             "slots": (
-                dict(self.slots) if include_slot_values else [name for name, _value in self.slots]
+                dict[str, JsonValueType](self.slots)
+                if include_slot_values
+                else [name for name, _value in self.slots]
             ),
             "unmatched_entities": list(self.unmatched_entities),
             "required_context": list(self.required_context),

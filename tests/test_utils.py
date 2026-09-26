@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from custom_components.assist_canonicalizer.utils import (
+    freeze_intent_context,
     is_valid_range_value,
     parse_float,
     strip_hotword_prefix,
@@ -172,3 +173,31 @@ def test_strip_hotword_prefix() -> None:
         == "Japanese restaurants nearby"
     )
     assert strip_hotword_prefix("Hey", "Hey Jarvis") == "Hey"
+
+
+def test_freeze_intent_context() -> None:
+    """Verify deterministic freezing and hashability of intent contexts."""
+    assert freeze_intent_context(None) is None
+    assert freeze_intent_context({}) is None
+    assert freeze_intent_context({"empty": ""}) is None
+
+    # Deterministic slot sorting and token freezing
+    ctx1 = {"area": "kitchen", "device": "light"}
+    ctx2 = {"device": "light", "area": "kitchen"}
+    frozen1 = freeze_intent_context(ctx1)
+    frozen2 = freeze_intent_context(ctx2)
+    assert frozen1 is not None
+    assert frozen1 == frozen2
+    assert isinstance(frozen1, tuple)
+
+    # Nested and multi-value normalization
+    ctx3 = {"area": {"name": "kitchen"}}
+    assert freeze_intent_context(ctx3) == (("area", ("kitchen",)),)
+
+    # Name as only field with multiple tokens
+    ctx_name_only = {"area": {"name": "kitchen living room"}}
+    assert freeze_intent_context(ctx_name_only) == (("area", ("kitchen", "living", "room")),)
+
+    # Multi-value combinations across value, text, and name
+    ctx_multi = {"area": {"name": "kitchen", "text": "dining room", "value": "kitchen"}}
+    assert freeze_intent_context(ctx_multi) == (("area", ("dining", "kitchen", "room")),)

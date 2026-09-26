@@ -345,14 +345,14 @@ def rehydrate_wildcard_slots(
 ) -> JsonObjectType:
     """Rehydrate wildcard values inside slots dictionary using query."""
     if not slots:
-        return dict(slots)
+        return dict[str, JsonValueType](slots)
     wildcards = wildcard_slot_names(language)
     if not wildcards or all(wc not in candidate_text for wc in wildcards):
-        return dict(slots)
+        return dict[str, JsonValueType](slots)
     candidate = _get_rehydration_candidate(candidate_text, language)
     _, replacements = get_wildcard_rehydration(candidate, query)
     if not replacements:
-        return dict(slots)
+        return dict[str, JsonValueType](slots)
     return {
         k: replacements[k] if isinstance(v, str) and k in replacements and v == k else v
         for k, v in slots.items()

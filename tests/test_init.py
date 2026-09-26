@@ -10,6 +10,7 @@ from homeassistant.core import HassJob, HassJobType
 
 import custom_components.assist_canonicalizer
 from custom_components.assist_canonicalizer import (
+    _async_update_listener,
     _async_warmup_pipeline_languages,
     _debounced_registry_rebuild,
     _discover_pipeline_languages,
@@ -137,6 +138,8 @@ async def test_async_setup_entry(monkeypatch: pytest.MonkeyPatch) -> None:
     assert hass.data[DOMAIN][entry.entry_id]["entry"] is entry
     runtime = hass.data[DOMAIN][entry.entry_id][DATA_RUNTIME]
     assert isinstance(runtime, CanonicalizerRuntime)
+    entry.add_update_listener.assert_called_once_with(_async_update_listener)
+    entry.async_on_unload.assert_called_once_with(entry.add_update_listener.return_value)
 
     # Verify triggering the intent update callback schedules index rebuild
     assert subscription_recorder.saved_callback is not None
@@ -791,3 +794,21 @@ async def test_warmup_single_language_suppresses_default_agent_prepare_error(
     mock_load.assert_awaited_once_with(hass, "en")
     mock_prepare_ranking.assert_awaited_once_with(hass, "en")
     mock_default_agent.async_prepare.assert_awaited_once_with("en")
+
+
+@pytest.mark.asyncio
+async def test_async_update_listener_clears_ranking_cache_synchronously() -> None:
+    """Verify that _async_update_listener synchronously clears the runtime ranking cache."""
+    hass = MagicMock()
+    runtime = CanonicalizerRuntime()
+    entry = MagicMock()
+    entry.entry_id = "test_entry"
+    hass.data = {DOMAIN: {"test_entry": {DATA_RUNTIME: runtime}}}
+
+    with patch.object(CanonicalizerRuntime, "clear_ranking_cache") as mock_clear:
+        await _async_update_listener(hass, entry)
+        mock_clear.assert_called_once_with()
+
+    gen_before = runtime.ranking_cache_generation
+    await _async_update_listener(hass, entry)
+    assert runtime.ranking_cache_generation > gen_before
