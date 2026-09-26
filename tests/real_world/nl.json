@@ -33,6 +33,17 @@
       }
     },
     {
+      "query": "slaapkamer lamp aan",
+      "language": "nl",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "slaapkamer lamp aan",
+      "category": "exact_match",
+      "expected_slots": {
+        "area": "slaapkamer",
+        "domain": "light"
+      }
+    },
+    {
       "query": "badkamerventilator uitzetten",
       "language": "nl",
       "expected_intent": "HassTurnOff",
@@ -70,6 +81,16 @@
       "language": "nl",
       "expected_intent": "HassTurnOff",
       "expected_canonical": "televisie uit",
+      "category": "exact_match",
+      "expected_slots": {
+        "name": "televisie"
+      }
+    },
+    {
+      "query": "televisie aan",
+      "language": "nl",
+      "expected_intent": "HassTurnOn",
+      "expected_canonical": "televisie aan",
       "category": "exact_match",
       "expected_slots": {
         "name": "televisie"
