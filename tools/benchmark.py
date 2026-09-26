@@ -108,6 +108,16 @@ _AREA_ACTION_INTENTS = frozenset({"HassVacuumCleanArea"})
 _PATH_ALLOWED_CHARS = ascii_letters + digits + "/._-"
 
 _JSON_GLOB = "*.json"
+_HASSIL_PROHIBITED_CATEGORIES = frozenset(
+    {
+        "complex_distortion",
+        "extra_words",
+        "missing_words",
+        "semantic_challenge",
+        "spelling_mistake",
+        "synonym_paraphrase",
+    }
+)
 
 
 class BenchmarkError(RuntimeError):
@@ -3128,6 +3138,33 @@ def _markdown_case_table(cases: Sequence[Mapping[str, Any]]) -> list[str]:
     return lines
 
 
+def _benchmark_warnings(cases: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Return warnings for benchmark integrity and design invariant violations."""
+    warnings: list[str] = []
+    for case in cases:
+        if not isinstance(case, Mapping):
+            continue
+        category = str(case.get("category", "")).casefold()
+        measured_passes = case.get("hassil_baseline_measured_passes")
+        has_measured_pass = (
+            isinstance(measured_passes, int)
+            and not isinstance(measured_passes, bool)
+            and measured_passes > 0
+        )
+        if category in _HASSIL_PROHIBITED_CATEGORIES and (
+            has_measured_pass or bool(case.get("hassil_baseline_passed"))
+        ):
+            case_id = case.get("id", "<unknown>")
+            language = case.get("language", "<unknown>")
+            query = case.get("query", "")
+            warnings.append(
+                f"Case '{case_id}' ({language}) in category '{case.get('category')}' "
+                f"passed HassIL baseline, but {case.get('category')} must not pass HassIL "
+                f"by design: {query!r}"
+            )
+    return warnings
+
+
 def _write_markdown(path: Path, report: Mapping[str, Any]) -> None:
     """Write a comprehensive human-readable managed-live report."""
     lines, has_corpus_metrics = _markdown_summary(report)
@@ -3148,6 +3185,14 @@ def _write_markdown(path: Path, report: Mapping[str, Any]) -> None:
             raise BenchmarkError("Benchmark report cases are invalid")
         validated_cases.append(case)
     lines.extend(_markdown_case_table(validated_cases))
+    raw_warnings = report.get("warnings", [])
+    if (
+        isinstance(raw_warnings, Sequence)
+        and not isinstance(raw_warnings, str | bytes)
+        and (warnings := [str(warning) for warning in raw_warnings])
+    ):
+        lines.extend(("", "## Warnings", ""))
+        lines.extend(f"- {warning}" for warning in warnings)
     if failures := report.get("case_failures", []):
         lines.extend(("", "## Failed live oracles", ""))
         lines.extend(f"- {failure}" for failure in failures)
@@ -3446,6 +3491,7 @@ def _build_benchmark_report(
         "summary": summary,
         "breakdowns": _breakdowns(live.case_results),
         "cases": live.case_results,
+        "warnings": _benchmark_warnings(live.case_results),
         "startup_and_run_seconds": time.perf_counter() - started_at,
     }
 
@@ -3608,6 +3654,13 @@ def _finalize_benchmark_report(
     report["regressions"] = regressions
     report["case_failures"] = suite_failures
     report["threshold_failures"] = threshold_failures
+    raw_cases = report.get("cases", [])
+    cases = (
+        raw_cases
+        if isinstance(raw_cases, Sequence) and not isinstance(raw_cases, str | bytes)
+        else []
+    )
+    report["warnings"] = _benchmark_warnings([c for c in cases if isinstance(c, Mapping)])
     _write_json(args.output_json, report)
     _write_markdown(args.output_markdown, report)
     if args.fail_on_case_failure and suite_failures:
@@ -3616,6 +3669,8 @@ def _finalize_benchmark_report(
         raise BenchmarkError("Benchmark regressions:\n- " + "\n- ".join(regressions))
     if threshold_failures:
         raise BenchmarkError("Benchmark threshold failures:\n- " + "\n- ".join(threshold_failures))
+    if args.fail_on_warning and report["warnings"]:
+        raise BenchmarkError("Benchmark warnings:\n- " + "\n- ".join(report["warnings"]))
 
 
 async def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
@@ -3738,6 +3793,11 @@ def _add_benchmark_policy_arguments(parser: argparse.ArgumentParser) -> None:
         "--fail-on-case-failure",
         action="store_true",
         help="Exit nonzero when any case misses its live oracle",
+    )
+    parser.add_argument(
+        "--fail-on-warning",
+        action="store_true",
+        help="Exit nonzero when any benchmark warning is emitted",
     )
     parser.add_argument(
         "--allow-homeassistant-upgrade",
@@ -3948,6 +4008,10 @@ def main() -> None:
     except (BenchmarkError, OSError, ValueError) as err:
         print(f"BENCHMARK_FAILED: {err}", file=sys.stderr, flush=True)
         raise SystemExit(1) from err
+    raw_warnings = report.get("warnings", [])
+    if isinstance(raw_warnings, Sequence) and not isinstance(raw_warnings, str | bytes):
+        for warning in raw_warnings:
+            print(f"BENCHMARK_WARNING: {warning}", file=sys.stderr, flush=True)
     print(
         " ".join(_benchmark_success_fields(report["summary"])),
         flush=True,

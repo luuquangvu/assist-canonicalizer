@@ -82,6 +82,7 @@ jobs:
           --max-mismatch-rate 0.5
           --min-language-intent-slot-accuracy 89.5
           --max-language-mismatch-rate 1.0
+          --fail-on-warning
 
   setup-matrix:
     runs-on: ubuntu-latest
