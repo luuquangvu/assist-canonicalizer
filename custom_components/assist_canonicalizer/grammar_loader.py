@@ -6,6 +6,7 @@ import contextlib
 import logging
 import re
 import unicodedata
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Mapping, Sequence, Set
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
@@ -27,6 +28,7 @@ from .const import (
     DEFAULT_MAX_CANDIDATES_PER_TEMPLATE,
     DEFAULT_MAX_DYNAMIC_CANDIDATES,
     DEFAULT_MAX_DYNAMIC_SLOT_VALUES,
+    DEFAULT_MAX_REGISTRY_RELEVANCE_CACHE_SIZE,
     DEFAULT_MAX_REGISTRY_VALUES_NOMINATED,
     DEFAULT_MAX_REGISTRY_VALUES_SCORED_PER_QUERY,
     DEFAULT_MAX_TOTAL_CANDIDATES_PER_LANGUAGE,
@@ -252,12 +254,43 @@ class RegistrySlotIndex(dict[str, tuple[RegistrySlotValue, ...]]):
             int,
             tuple[tuple[RegistrySlotValue, ...], dict[str, tuple[str, ...]]],
         ] = {}
+        self._relevance_cache: OrderedDict[tuple[int, str, str | None, bool], tuple[str, ...]] = (
+            OrderedDict()
+        )
+        self._relevance_cache_lock = Lock()
         self.record_count = sum(
             len(records) for records in {id(records): records for records in data.values()}.values()
         )
         for records in {id(records): records for records in data.values()}.values():
             lookup = self.get_inverted_for_records(records)
             self._tokens_by_deletion_for_records(records, lookup)
+
+    def get_cached_relevance(
+        self,
+        key: tuple[int, str, str | None, bool],
+    ) -> tuple[str, ...] | None:
+        """Return cached slot relevance if present in the persistent index cache."""
+        with self._relevance_cache_lock:
+            if key in self._relevance_cache:
+                self._relevance_cache.move_to_end(key)
+                return self._relevance_cache[key]
+        return None
+
+    def put_cached_relevance(
+        self,
+        key: tuple[int, str, str | None, bool],
+        relevant: tuple[str, ...],
+        max_size: int = DEFAULT_MAX_REGISTRY_RELEVANCE_CACHE_SIZE,
+    ) -> None:
+        """Store slot relevance in the bounded persistent index cache."""
+        if max_size <= 0:
+            return
+        with self._relevance_cache_lock:
+            if key in self._relevance_cache:
+                self._relevance_cache.move_to_end(key)
+            elif len(self._relevance_cache) >= max_size:
+                self._relevance_cache.popitem(last=False)
+            self._relevance_cache[key] = relevant
 
     def get_scoped_records(
         self,
@@ -2288,10 +2321,14 @@ def _query_candidates_from_compiled_intent(
             literal_only_wildcards_only=literal_only_wildcards_only,
         ):
             continue
-        anchored_slot_windows = _template_anchored_slot_query_windows(
-            template,
-            query_normalized,
-            query_no_diac,
+        anchored_slot_windows = (
+            _template_anchored_slot_query_windows(
+                template,
+                query_normalized,
+                query_no_diac,
+            )
+            if template.slot_anchor_patterns
+            else {}
         )
         if not _template_matches_query_literals(
             language,
@@ -2617,6 +2654,11 @@ def _cached_query_relevant_slot_values(
     relevant = relevant_cache.get(cache_key)
     if relevant is not None:
         return relevant
+    if retrieval_stats is None:
+        relevant = registry_slot_index.get_cached_relevance(cache_key)
+        if relevant is not None:
+            relevant_cache[cache_key] = relevant
+            return relevant
     relevant = _query_relevant_precomputed_slot_values(
         records,
         query_normalized,
@@ -2628,6 +2670,8 @@ def _cached_query_relevant_slot_values(
         require_whole_query=require_whole_query,
     )
     relevant_cache[cache_key] = relevant
+    if retrieval_stats is None:
+        registry_slot_index.put_cached_relevance(cache_key, relevant)
     return relevant
 
 
@@ -4533,10 +4577,8 @@ def _available_domains_from_registry(
         return None
     domains: set[str] = set()
     for key in registry_slot_values:
-        if ":" in key:
-            domain = key.split(":", 1)[1]
-            if domain:
-                domains.add(domain)
+        if ":" in key and (domain := key.split(":", 1)[1]):
+            domains.add(domain)
     return domains or None
 
 
