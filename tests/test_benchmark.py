@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -498,3 +499,196 @@ async def test_domain_entity_states_observes_only_the_managed_target_domain(
         "light.living_room_rgbww_lights": "on",
     }
     request_json.assert_awaited_once_with(session, "GET", "/api/states")
+
+
+def test_benchmark_warnings_detects_prohibited_hassil_passes() -> None:
+    """Warn when HassIL passes prohibited categories like complex_distortion or spelling_mistake."""
+    cases = [
+        {
+            "id": "en-106",
+            "language": "en",
+            "category": "spelling_mistake",
+            "query": "turm on bathroom fan",
+            "hassil_baseline_passed": True,
+        },
+        {
+            "id": "en-120",
+            "language": "en",
+            "category": "complex_distortion",
+            "query": "pls turm on the offise light",
+            "hassil_baseline_passed": True,
+        },
+        {
+            "id": "en-001",
+            "language": "en",
+            "category": "exact_match",
+            "query": "turn on the light",
+            "hassil_baseline_passed": True,
+        },
+        {
+            "id": "en-050",
+            "language": "en",
+            "category": "spelling_mistake",
+            "query": "turn off lite",
+            "hassil_baseline_passed": False,
+        },
+    ]
+
+    warnings = benchmark._benchmark_warnings(cases)
+
+    assert len(warnings) == 2
+    assert "en-106" in warnings[0]
+    assert "spelling_mistake" in warnings[0]
+    assert "en-120" in warnings[1]
+    assert "complex_distortion" in warnings[1]
+
+
+def test_benchmark_warnings_detects_prohibited_category_partial_pass() -> None:
+    """Warn when HassIL partially passes a prohibited category across iterations."""
+    cases = [
+        {
+            "id": "en-106",
+            "language": "en",
+            "category": "spelling_mistake",
+            "query": "turm on bathroom fan",
+            "hassil_baseline_measured_passes": 1,
+            "hassil_baseline_passed": False,
+        },
+        {
+            "id": "en-001",
+            "language": "en",
+            "category": "exact_match",
+            "query": "turn on the light",
+            "hassil_baseline_measured_passes": 1,
+            "hassil_baseline_passed": False,
+        },
+        {
+            "id": "en-050",
+            "language": "en",
+            "category": "spelling_mistake",
+            "query": "turn off lite",
+            "hassil_baseline_measured_passes": 0,
+            "hassil_baseline_passed": False,
+        },
+    ]
+
+    warnings = benchmark._benchmark_warnings(cases)
+
+    assert len(warnings) == 1
+    assert "en-106" in warnings[0]
+    assert "spelling_mistake" in warnings[0]
+    assert "turm on bathroom fan" in warnings[0]
+
+
+def test_benchmark_write_markdown_includes_warnings_section(tmp_path: Path) -> None:
+    """Render the warnings section in markdown reports when warnings are present."""
+    report = {
+        "environment": {
+            "homeassistant_version": "2026.9.0",
+            "python_version": "3.14.0",
+            "fixture": {"fixture_id": "test", "fingerprint": "abc"},
+        },
+        "summary": {
+            "case_count": 1,
+            "passed_cases": 1,
+            "canonicalizer_accuracy_pct": 100.0,
+            "direct_canonicalizer_accuracy_pct": 100.0,
+            "hassil_baseline_accuracy_pct": 100.0,
+            "accuracy_uplift_pp": 0.0,
+            "recovered_case_count": 0,
+            "shortcut_protected_case_count": 0,
+            "fallback_rate_pct": 0.0,
+            "mismatch_rate_pct": 0.0,
+            "direct_canonicalizer_fallback_rate_pct": 0.0,
+            "direct_canonicalizer_mismatch_rate_pct": 0.0,
+            "latency_ms": {"mean": 1.0, "median": 1.0, "p95": 1.0},
+            "hassil_baseline_latency_ms": {"mean": 1.0, "median": 1.0, "p95": 1.0},
+        },
+        "breakdowns": {"languages": {}, "categories": {}},
+        "cases": [
+            {
+                "id": "en-106",
+                "language": "en",
+                "category": "spelling_mistake",
+                "passed": True,
+                "semantic_passed": True,
+                "last_observation": {"fallback_observed": False},
+                "latency_ms": {"mean": 1.0, "median": 1.0, "p95": 1.0},
+            }
+        ],
+        "warnings": [
+            "Case 'en-106' (en) in category 'spelling_mistake' passed HassIL baseline, "
+            "but spelling_mistake must not pass HassIL by design: 'turm on bathroom fan'"
+        ],
+    }
+
+    markdown_path = tmp_path / "report.md"
+    benchmark._write_markdown(markdown_path, report)
+    content = markdown_path.read_text(encoding="utf-8")
+
+    assert "## Warnings" in content
+    assert "en-106" in content
+    assert "spelling_mistake" in content
+
+
+def test_benchmark_finalize_report_enforces_fail_on_warning(tmp_path: Path) -> None:
+    """Exit nonzero when --fail-on-warning is enabled and warnings exist."""
+    args = benchmark._parser().parse_args(
+        [
+            "--fail-on-warning",
+            "--output-json",
+            str(tmp_path / "report.json"),
+            "--output-markdown",
+            str(tmp_path / "report.md"),
+        ]
+    )
+    report: dict[str, Any] = {
+        "cases": [
+            {
+                "id": "en-106",
+                "language": "en",
+                "category": "spelling_mistake",
+                "query": "turm on bathroom fan",
+                "hassil_baseline_passed": True,
+                "passed": True,
+                "semantic_passed": True,
+                "last_observation": {"fallback_observed": False},
+                "latency_ms": {"mean": 1.0, "median": 1.0, "p95": 1.0},
+            }
+        ],
+        "summary": {
+            "case_count": 1,
+            "passed_cases": 1,
+            "canonicalizer_accuracy_pct": 100.0,
+            "direct_canonicalizer_accuracy_pct": 100.0,
+            "hassil_baseline_accuracy_pct": 100.0,
+            "accuracy_uplift_pp": 0.0,
+            "recovered_case_count": 0,
+            "shortcut_protected_case_count": 0,
+            "fallback_rate_pct": 0.0,
+            "mismatch_rate_pct": 0.0,
+            "direct_canonicalizer_fallback_rate_pct": 0.0,
+            "direct_canonicalizer_mismatch_rate_pct": 0.0,
+            "latency_ms": {"mean": 1.0, "median": 1.0, "p95": 1.0},
+            "hassil_baseline_latency_ms": {"mean": 1.0, "median": 1.0, "p95": 1.0},
+        },
+        "breakdowns": {"languages": {}, "categories": {}},
+        "environment": {
+            "homeassistant_version": "2026.9.0",
+            "python_version": "3.14.0",
+            "fixture": {"fixture_id": "test", "fingerprint": "abc"},
+        },
+    }
+
+    with pytest.raises(benchmark.BenchmarkError, match="Benchmark warnings:"):
+        benchmark._finalize_benchmark_report(args, report, [])
+
+    args_no_fail = benchmark._parser().parse_args(
+        [
+            "--output-json",
+            str(tmp_path / "report.json"),
+            "--output-markdown",
+            str(tmp_path / "report.md"),
+        ]
+    )
+    benchmark._finalize_benchmark_report(args_no_fail, report, [])

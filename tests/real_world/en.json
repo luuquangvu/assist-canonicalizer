@@ -1126,7 +1126,7 @@
       }
     },
     {
-      "query": "turm on bathroom fan",
+      "query": "turm onn bathroom fan",
       "language": "en",
       "expected_intent": "HassTurnOn",
       "expected_canonical": "turn on bathroom fan",
@@ -1149,7 +1149,7 @@
       }
     },
     {
-      "query": "turm on water heater",
+      "query": "turm onn water heater",
       "language": "en",
       "expected_intent": "HassTurnOn",
       "expected_canonical": "turn on water heater",
@@ -1159,7 +1159,7 @@
       }
     },
     {
-      "query": "turm off water heater",
+      "query": "turm of water heater",
       "language": "en",
       "expected_intent": "HassTurnOff",
       "expected_canonical": "turn off water heater",
@@ -1169,7 +1169,7 @@
       }
     },
     {
-      "query": "turm off bathroom fan",
+      "query": "turm of bathroom fan",
       "language": "en",
       "expected_intent": "HassTurnOff",
       "expected_canonical": "turn off bathroom fan",
@@ -1277,7 +1277,7 @@
       }
     },
     {
-      "query": "pls turm on the offise light",
+      "query": "pls turm on the offise lite",
       "language": "en",
       "expected_intent": "HassTurnOn",
       "expected_canonical": "turn on office light",
