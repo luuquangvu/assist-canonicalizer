@@ -119,6 +119,120 @@ def test_registry_slot_index_skips_inverted_cache_for_scoped_records() -> None:
     assert id(scoped_records) not in index._inverted_cache
 
 
+def test_registry_slot_index_persistent_relevance_cache() -> None:
+    """Validate persistent relevance caching across distinct query-local cache instances."""
+    index = build_registry_slot_index(
+        {
+            "name": ("living room light", "kitchen fan"),
+        },
+        "en",
+    )
+    records = index["name"]
+    query = normalize_text("turn on the kitchen fan")
+    tokens = frozenset(query.split())
+
+    local_cache_1: gl.RegistryRelevanceCache = {}
+    res_1 = gl._cached_query_relevant_slot_values(
+        records,
+        query,
+        tokens,
+        local_cache_1,
+        index,
+        query_no_diac=None,
+        query_tokens_no_diac=None,
+        retrieval_stats=None,
+        require_whole_query=False,
+    )
+    assert "kitchen fan" in res_1
+
+    cache_key = (id(records), query, None, False)
+    assert cache_key in index._relevance_cache
+
+    # Second query with a fresh, distinct local cache hits persistent cache
+    local_cache_2: gl.RegistryRelevanceCache = {}
+    res_2 = gl._cached_query_relevant_slot_values(
+        records,
+        query,
+        tokens,
+        local_cache_2,
+        index,
+        query_no_diac=None,
+        query_tokens_no_diac=None,
+        retrieval_stats=None,
+        require_whole_query=False,
+    )
+    assert res_2 == res_1
+    assert cache_key in local_cache_2
+
+    # Retrieval stats bypasses persistent cache for benchmark transparency
+    stats = gl.RegistryRetrievalStats()
+    res_stats = gl._cached_query_relevant_slot_values(
+        records,
+        query,
+        tokens,
+        {},
+        index,
+        query_no_diac=None,
+        query_tokens_no_diac=None,
+        retrieval_stats=stats,
+        require_whole_query=False,
+    )
+    assert res_stats == res_1
+    assert stats.postings_consulted > 0
+
+
+def test_registry_slot_index_relevance_cache_lru_eviction() -> None:
+    """Validate LRU eviction in the persistent relevance cache."""
+    index = build_registry_slot_index({"name": ("light",)}, "en")
+    key_1 = (1, "query 1", None, False)
+    key_2 = (1, "query 2", None, False)
+    key_3 = (1, "query 3", None, False)
+
+    index.put_cached_relevance(key_1, ("val 1",), max_size=2)
+    index.put_cached_relevance(key_2, ("val 2",), max_size=2)
+    assert index.get_cached_relevance(key_1) == ("val 1",)
+
+    # Adding key_3 should evict key_2 since key_1 was recently accessed
+    index.put_cached_relevance(key_3, ("val 3",), max_size=2)
+    assert index.get_cached_relevance(key_1) == ("val 1",)
+    assert index.get_cached_relevance(key_3) == ("val 3",)
+    assert index.get_cached_relevance(key_2) is None
+
+    # Non-positive max_size safely skips caching without raising KeyError
+    key_4 = (1, "query 4", None, False)
+    index.put_cached_relevance(key_4, ("val 4",), max_size=0)
+    assert index.get_cached_relevance(key_4) is None
+
+
+def test_gather_candidate_registry_records_multi_target_and_non_contiguous() -> None:
+    """Multi-target and non-contiguous query tokens retain both candidate entities."""
+    index = build_registry_slot_index(
+        {
+            "name": ("ceiling light", "kitchen fan"),
+        },
+        "en",
+    )
+    records = index["name"]
+    query = "turn on the light on the ceiling and the kitchen fan"
+    q_norm = normalize_text(query)
+    tokens = frozenset(q_norm.split())
+
+    candidates, is_anchored = gl._gather_candidate_registry_records(
+        records,
+        index,
+        q_norm,
+        tokens,
+        None,
+        None,
+        retrieval_stats=None,
+        require_whole_query=False,
+    )
+    candidate_texts = {r.text for r in candidates}
+    assert "ceiling light" in candidate_texts
+    assert "kitchen fan" in candidate_texts
+    assert is_anchored is True
+
+
 def test_domain_scoped_registry_retrieval_reaches_tail_records() -> None:
     """Search the complete domain index while keeping query-time scoring bounded."""
     values = (
