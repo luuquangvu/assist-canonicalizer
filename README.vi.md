@@ -183,7 +183,7 @@ Benchmark `managed_live` chạy mỗi truy vấn hai lần trên cùng một mô
 
 <!-- BENCHMARK_OVERALL_END -->
 
-> `Độ chính xác`, `Nhận diện sai` và `Dự phòng` là ba kết quả loại trừ lẫn nhau của luồng ưu tiên HassIL; tổng các tỷ lệ là 100% trước khi làm tròn. `Ngăn hồi quy` là số truy vấn được HassIL xử lý chính xác trong khi đường dẫn chuẩn hóa trực tiếp không đạt tiêu chí đánh giá. Độ trễ được đo từ lượt chạy trực tiếp qua Assist Canonicalizer; báo cáo thô vẫn cung cấp riêng các chỉ số của đường dẫn này.
+> `Độ chính xác`, `Nhận diện sai` và `Dự phòng` là ba kết quả loại trừ lẫn nhau của luồng ưu tiên HassIL; tổng các tỷ lệ đạt 100% trước khi làm tròn. `Ngăn hồi quy` đếm số lượng truy vấn được HassIL xử lý chính xác dù đường dẫn Assist Canonicalizer không đạt tiêu chí thành công. Độ trễ phản ánh các lượt benchmark trực tiếp qua Assist Canonicalizer mà không sử dụng kỹ thuật nạp trước bộ nhớ đệm.
 
 ### Chi tiết theo từng ngôn ngữ
 

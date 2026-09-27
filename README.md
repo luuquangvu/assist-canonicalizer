@@ -183,7 +183,7 @@ The managed-live benchmark runs every query twice against the same Home Assistan
 
 <!-- BENCHMARK_OVERALL_END -->
 
-> `Accuracy`, `Mismatch`, and `Fallback` are mutually exclusive HassIL-first outcomes and total 100% before rounding. `Regressions prevented` counts queries that HassIL handles correctly even though the direct canonicalizer path does not meet its success criteria. Latency describes the direct canonicalizer benchmark request; explicitly named direct-path outcome metrics remain available in the raw report.
+> `Accuracy`, `Mismatch`, and `Fallback` are mutually exclusive HassIL-first outcomes and total 100% before rounding. `Regressions prevented` counts queries that HassIL handles correctly even though the direct canonicalizer path does not meet its success criteria. Latency describes the direct canonicalizer benchmark requests without caching warmup technique.
 
 ### Per-Language Breakdown
 

@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import inspect
 import sys
+from collections import UserList
 from collections.abc import Mapping, Sequence
 from types import ModuleType, SimpleNamespace
 from typing import Any, cast
@@ -22,6 +23,7 @@ from custom_components.assist_canonicalizer.candidate import Candidate
 from custom_components.assist_canonicalizer.const import (
     CONVERSATION_INPUT_OPTIONAL_FIELDS,
     DATA_RUNTIME,
+    DEFAULT_HOTWORD_MIN_CONFIDENCE,
     DOMAIN,
     ConfigKey,
     ConversationInputField,
@@ -2961,3 +2963,268 @@ async def test_async_rank_user_input_invalidated_cache_calls_executor() -> None:
     assert dec == fresh_decision
     assert ranked != (rc,)
     hass.async_add_executor_job.assert_called_once()
+
+
+def test_entity_get_hotword_options_caching_and_invalidation() -> None:
+    """Verify _get_hotword_options caches resolved options and re-evaluates on state changes."""
+    entry = MagicMock()
+    entry.options = {
+        ConfigKey.ENABLE_HOTWORD: True,
+        ConfigKey.HOTWORD: ["Jarvis"],
+        ConfigKey.HOTWORD_MIN_CONFIDENCE: 0.90,
+    }
+    entry.data = {}
+    runtime = CanonicalizerRuntime()
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+
+    with patch.object(
+        conversation_platform,
+        "resolve_entry_hotword_options",
+        wraps=resolve_entry_hotword_options,
+    ) as resolver:
+        # First call populates cache; second call reuses it.
+        opts1 = entity._get_hotword_options()
+        assert opts1 == (True, ("Jarvis",), 0.90)
+        opts2 = entity._get_hotword_options()
+        assert opts2 is opts1
+        resolver.assert_called_once_with(entry)
+
+        # Mutate options in entry; the resolver runs again.
+        entry.options = {
+            ConfigKey.ENABLE_HOTWORD: True,
+            ConfigKey.HOTWORD: ["Jarvis", "Hey Jarvis"],
+            ConfigKey.HOTWORD_MIN_CONFIDENCE: 0.85,
+        }
+        opts3 = entity._get_hotword_options()
+        assert opts3 == (True, ("Jarvis", "Hey Jarvis"), 0.85)
+        assert opts3 is not opts1
+        assert resolver.call_count == 2
+
+        # In-place list mutation also invalidates the cache.
+        cast(list[str], entry.options[ConfigKey.HOTWORD]).append("Computer")
+        opts4 = entity._get_hotword_options()
+        assert opts4 == (True, ("Jarvis", "Hey Jarvis", "Computer"), 0.85)
+        assert opts4 is not opts3
+        assert resolver.call_count == 3
+
+
+def test_entity_get_hotword_options_tracks_mutable_sequence_and_snapshots_sets() -> None:
+    """Snapshot mutable sequence contents and keep set snapshots deterministic."""
+    entry = MagicMock()
+    entry.options = {
+        ConfigKey.ENABLE_HOTWORD: True,
+        ConfigKey.HOTWORD: UserList(["Jarvis"]),
+    }
+    entry.data = {}
+    entity = AssistCanonicalizerConversationEntity(entry, CanonicalizerRuntime())
+
+    opts1 = entity._get_hotword_options()
+    assert opts1 == (True, ("Jarvis",), DEFAULT_HOTWORD_MIN_CONFIDENCE)
+
+    cast(UserList[str], entry.options[ConfigKey.HOTWORD]).append("Computer")
+    opts2 = entity._get_hotword_options()
+    assert opts2 == (True, ("Jarvis", "Computer"), DEFAULT_HOTWORD_MIN_CONFIDENCE)
+    assert opts2 is not opts1
+
+    assert conversation_platform._snapshot_entry_hotword({"Jarvis", "Computer"}) == (
+        "Computer",
+        "Jarvis",
+    )
+
+
+def test_entity_get_hotword_options_tracks_mutable_enable_value() -> None:
+    """Snapshot the effective boolean value of mutable configuration objects."""
+
+    class MutableFlag:
+        """Boolean-like mutable value used to exercise snapshot invalidation."""
+
+        def __init__(self, value: bool) -> None:
+            """Initialize the current truth value."""
+            self.value = value
+
+        def __bool__(self) -> bool:
+            """Return the current truth value."""
+            return self.value
+
+    flag = MutableFlag(True)
+    entry = MagicMock()
+    entry.options = {
+        ConfigKey.ENABLE_HOTWORD: flag,
+        ConfigKey.HOTWORD: ["Jarvis"],
+    }
+    entry.data = {}
+    entity = AssistCanonicalizerConversationEntity(entry, CanonicalizerRuntime())
+
+    assert entity._get_hotword_options() == (
+        True,
+        ("Jarvis",),
+        DEFAULT_HOTWORD_MIN_CONFIDENCE,
+    )
+
+    flag.value = False
+
+    assert entity._get_hotword_options() == (
+        False,
+        ("Jarvis",),
+        DEFAULT_HOTWORD_MIN_CONFIDENCE,
+    )
+
+
+def test_entity_get_hotword_options_data_fallback_and_defaults() -> None:
+    """Verify _get_hotword_options resolves from data, handles mutations, and uses defaults."""
+    entry = MagicMock()
+    entry.options = {}
+    entry.data = {
+        ConfigKey.ENABLE_HOTWORD: True,
+        ConfigKey.HOTWORD: ["Computer"],
+        ConfigKey.HOTWORD_MIN_CONFIDENCE: 0.95,
+    }
+    runtime = CanonicalizerRuntime()
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+
+    # 1. Resolves from entry.data when options is empty
+    opts1 = entity._get_hotword_options()
+    assert opts1 == (True, ("Computer",), 0.95)
+
+    # 2. Mutate entry.data invalidates cache when options is empty
+    entry.data = {
+        ConfigKey.ENABLE_HOTWORD: True,
+        ConfigKey.HOTWORD: ["Computer", "Hal"],
+        ConfigKey.HOTWORD_MIN_CONFIDENCE: 0.88,
+    }
+    opts2 = entity._get_hotword_options()
+    assert opts2 == (True, ("Computer", "Hal"), 0.88)
+    assert opts2 is not opts1
+
+    # 3. entry.options overrides entry.data
+    entry.options = {
+        ConfigKey.ENABLE_HOTWORD: False,
+    }
+    opts3 = entity._get_hotword_options()
+    assert opts3 == (False, ("Computer", "Hal"), 0.88)
+
+    # 4. Absent or false settings return defaults
+    entry.options = {}
+    entry.data = {}
+    opts4 = entity._get_hotword_options()
+    assert opts4 == (False, (), DEFAULT_HOTWORD_MIN_CONFIDENCE)
+
+    # 5. Bare entry without options/data attributes safely returns defaults
+    bare_entry = MagicMock(spec=["entry_id"], entry_id="test_entry")
+    bare_entity = AssistCanonicalizerConversationEntity(bare_entry, runtime)
+    opts5 = bare_entity._get_hotword_options()
+    assert opts5 == (False, (), DEFAULT_HOTWORD_MIN_CONFIDENCE)
+
+
+def test_entity_get_hotword_options_distinguishes_absent_from_null() -> None:
+    """An explicit null option overrides the corresponding entry data value."""
+    entry = MagicMock()
+    entry.options = {}
+    entry.data = {
+        ConfigKey.ENABLE_HOTWORD: True,
+        ConfigKey.HOTWORD: ["Jarvis"],
+        ConfigKey.HOTWORD_MIN_CONFIDENCE: 0.95,
+    }
+    entity = AssistCanonicalizerConversationEntity(entry, CanonicalizerRuntime())
+
+    assert entity._get_hotword_options() == (True, ("Jarvis",), 0.95)
+
+    entry.options = {ConfigKey.HOTWORD: None}
+
+    assert entity._get_hotword_options() == (True, (), 0.95)
+
+
+def test_entity_get_hotword_options_publishes_cache_after_resolution() -> None:
+    """A failed resolution leaves the previous snapshot eligible for a retry."""
+    entry = MagicMock()
+    entry.options = {}
+    entry.data = {ConfigKey.ENABLE_HOTWORD: True, ConfigKey.HOTWORD: ["Jarvis"]}
+    entity = AssistCanonicalizerConversationEntity(entry, CanonicalizerRuntime())
+    previous_options = entity._get_hotword_options()
+    previous_state = entity._cached_hotword_state
+    entry.options = {ConfigKey.HOTWORD: None}
+
+    with (
+        patch.object(
+            conversation_platform,
+            "resolve_entry_hotword_options",
+            side_effect=RuntimeError("temporary resolver failure"),
+        ),
+        pytest.raises(RuntimeError, match="temporary resolver failure"),
+    ):
+        entity._get_hotword_options()
+
+    assert entity._cached_hotword_options is previous_options
+    assert entity._cached_hotword_state is previous_state
+    assert entity._get_hotword_options() == (True, (), DEFAULT_HOTWORD_MIN_CONFIDENCE)
+
+
+@pytest.mark.asyncio
+async def test_entity_async_reload_clears_hotword_cache() -> None:
+    """Verify async_reload clears cached hotword options."""
+    entry = MagicMock()
+    entry.options = {
+        ConfigKey.ENABLE_HOTWORD: True,
+        ConfigKey.HOTWORD: ["Jarvis"],
+    }
+    entry.data = {}
+    runtime = MagicMock()
+    runtime.async_clear_index = AsyncMock()
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    entity.hass = MagicMock()
+
+    with patch.object(
+        conversation_platform,
+        "resolve_entry_hotword_options",
+        wraps=resolve_entry_hotword_options,
+    ) as resolver:
+        opts1 = entity._get_hotword_options()
+        assert opts1 == (True, ("Jarvis",), DEFAULT_HOTWORD_MIN_CONFIDENCE)
+        assert entity._cached_hotword_options is not None
+        resolver.assert_called_once_with(entry)
+
+        await entity.async_reload("en")
+
+        assert entity._cached_hotword_options is None
+        assert entity._cached_hotword_state is None
+        assert entity._get_hotword_options() == opts1
+        assert resolver.call_count == 2
+        runtime.async_clear_index.assert_awaited_once_with(entity.hass, "en")
+
+
+def test_entity_is_hotword_matched_with_conversation_input() -> None:
+    """Verify _is_hotword_matched processes ConversationInput with correct stripping and caching."""
+    entry = MagicMock()
+    entry.options = {
+        ConfigKey.ENABLE_HOTWORD: True,
+        ConfigKey.HOTWORD: ["Hey Jarvis", "Computer"],
+        ConfigKey.HOTWORD_MIN_CONFIDENCE: 0.85,
+    }
+    entry.data = {}
+    runtime = CanonicalizerRuntime()
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+
+    # 1. Matching input with irregular whitespace and punctuation
+    inp1 = MockConversationInput("Hey   Jarvis,   turn on the kitchen lights", "en")
+    matched1, text1 = entity._is_hotword_matched(inp1)
+    assert matched1 is True
+    assert text1 == "turn on the kitchen lights"
+
+    # 2. Non-matching input
+    inp2 = MockConversationInput("Turn on the living room lights", "en")
+    matched2, text2 = entity._is_hotword_matched(inp2)
+    assert matched2 is False
+    assert text2 == "Turn on the living room lights"
+
+    # 3. Disabled hotword bypasses matching immediately
+    entry.options[ConfigKey.ENABLE_HOTWORD] = False
+    inp3 = MockConversationInput("Hey Jarvis, turn on the lights", "en")
+    matched3, text3 = entity._is_hotword_matched(inp3)
+    assert matched3 is False
+    assert text3 == "Hey Jarvis, turn on the lights"
+
+    # 4. Empty or whitespace input
+    inp4 = MockConversationInput("", "en")
+    matched4, text4 = entity._is_hotword_matched(inp4)
+    assert matched4 is False
+    assert text4 == ""

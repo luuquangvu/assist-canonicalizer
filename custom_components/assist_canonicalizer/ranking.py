@@ -4808,12 +4808,115 @@ def _is_exact_lexical_match(ranked_candidate: RankedCandidate) -> bool:
     return scores.rapidfuzz_score == 1.0 and scores.char_ngram_score == 1.0
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedHotword:
+    """Precomputed normalized representations of a configured hotword."""
+
+    raw: str
+    normalized: str
+    tokens: tuple[str, ...]
+    token_len: int
+    normalized_no_dia: str
+    has_diacritics: bool
+
+
+@lru_cache(maxsize=128)
+def _get_prepared_hotwords(
+    hotwords: tuple[str, ...],
+    language: str | None,
+) -> tuple[_PreparedHotword, ...]:
+    """Return precomputed normalized representations for candidate hotwords."""
+    candidate_hotwords = normalize_hotword_list(hotwords)
+    prepared: list[_PreparedHotword] = []
+    for hw in candidate_hotwords:
+        norm_hw = normalize_text(hw)
+        hw_tokens = tokenize_normalized(norm_hw)
+        if not hw_tokens:
+            continue
+        norm_hw_no_dia = normalize_text_no_diacritics_from_normalized(norm_hw, language)
+        prepared.append(
+            _PreparedHotword(
+                raw=hw,
+                normalized=norm_hw,
+                tokens=hw_tokens,
+                token_len=len(hw_tokens),
+                normalized_no_dia=norm_hw_no_dia,
+                has_diacritics=norm_hw != norm_hw_no_dia,
+            )
+        )
+    return tuple(prepared)
+
+
+@lru_cache(maxsize=4096)
 def _hotword_similarity(text_a: str, text_b: str) -> float:
     """Calculate normalized similarity between two token-normalized strings."""
+    if text_a == text_b:
+        return 1.0
     return max(
         _raw_cached_fuzz_ratio(text_a, text_b) / 100.0,
         rapidfuzz_similarity_normalized(text_a, text_b),
     )
+
+
+def _coerce_hotwords_tuple(hotwords: str | Sequence[str]) -> tuple[str, ...]:
+    """Coerce string or sequence into a tuple of candidate hotwords."""
+    if isinstance(hotwords, str):
+        return (hotwords,)
+    if isinstance(hotwords, tuple):
+        return hotwords
+    try:
+        return tuple(hotwords)
+    except TypeError:
+        return tuple(normalize_hotword_list(hotwords))
+
+
+def _score_no_diacritics_candidate(
+    phw: _PreparedHotword,
+    query_tokens_no_dia: tuple[str, ...],
+    prefix_text: str,
+) -> float:
+    """Compute similarity score against no-diacritics query tokens."""
+    token_len = phw.token_len
+    if len(query_tokens_no_dia) < token_len:
+        return 0.0
+    prefix_no_dia = (
+        query_tokens_no_dia[0] if token_len == 1 else " ".join(query_tokens_no_dia[:token_len])
+    )
+    if prefix_no_dia == phw.normalized_no_dia:
+        return 1.0
+    if prefix_no_dia != prefix_text or phw.has_diacritics:
+        return _hotword_similarity(prefix_no_dia, phw.normalized_no_dia)
+    return 0.0
+
+
+def _evaluate_hotword_candidate(
+    phw: _PreparedHotword,
+    query_tokens: tuple[str, ...],
+    is_ascii: bool,
+    query_tokens_no_dia: tuple[str, ...] | None,
+) -> float:
+    """Compute matching score between query prefix and a prepared hotword candidate."""
+    token_len = phw.token_len
+    if len(query_tokens) < token_len:
+        return 0.0
+
+    prefix_text = query_tokens[0] if token_len == 1 else " ".join(query_tokens[:token_len])
+    if prefix_text == phw.normalized:
+        return 1.0
+
+    score = _hotword_similarity(prefix_text, phw.normalized)
+    if is_ascii:
+        if phw.has_diacritics:
+            if prefix_text == phw.normalized_no_dia:
+                return 1.0
+            return max(score, _hotword_similarity(prefix_text, phw.normalized_no_dia))
+        return score
+
+    if query_tokens_no_dia is not None:
+        dia_score = _score_no_diacritics_candidate(phw, query_tokens_no_dia, prefix_text)
+        return max(score, dia_score)
+
+    return score
 
 
 def match_hotword_prefix(
@@ -4831,8 +4934,9 @@ def match_hotword_prefix(
     if not query or not hotwords:
         return False, 0.0, None
 
-    candidate_hotwords = normalize_hotword_list(hotwords)
-    if not candidate_hotwords:
+    hw_tuple = _coerce_hotwords_tuple(hotwords)
+    prepared = _get_prepared_hotwords(hw_tuple, language)
+    if not prepared:
         return False, 0.0, None
 
     norm_query = normalize_text(query)
@@ -4840,34 +4944,28 @@ def match_hotword_prefix(
     if not query_tokens:
         return False, 0.0, None
 
-    norm_query_no_dia = normalize_text_no_diacritics_from_normalized(norm_query, language)
-    query_tokens_no_dia = tokenize_normalized(norm_query_no_dia)
+    is_ascii = norm_query.isascii()
+    norm_query_no_dia: str | None = None
+    query_tokens_no_dia: tuple[str, ...] | None = None
 
     best_score = 0.0
     best_hw: str | None = None
 
-    for hw in candidate_hotwords:
-        norm_hw = normalize_text(hw)
-        hw_tokens = tokenize_normalized(norm_hw)
-        if not hw_tokens:
-            continue
+    for phw in prepared:
+        if not is_ascii and norm_query_no_dia is None:
+            norm_query_no_dia = normalize_text_no_diacritics_from_normalized(norm_query, language)
+            query_tokens_no_dia = tokenize_normalized(norm_query_no_dia)
 
-        token_len = len(hw_tokens)
-        if len(query_tokens) < token_len:
-            continue
-
-        prefix_text = " ".join(query_tokens[:token_len])
-        score = _hotword_similarity(prefix_text, norm_hw)
-
-        if len(query_tokens_no_dia) >= token_len:
-            norm_hw_no_dia = normalize_text_no_diacritics_from_normalized(norm_hw, language)
-            prefix_no_dia = " ".join(query_tokens_no_dia[:token_len])
-            if prefix_no_dia != prefix_text or norm_hw_no_dia != norm_hw:
-                score = max(score, _hotword_similarity(prefix_no_dia, norm_hw_no_dia))
+        score = _evaluate_hotword_candidate(
+            phw,
+            query_tokens,
+            is_ascii,
+            query_tokens_no_dia,
+        )
 
         if score > best_score:
             best_score = score
-            best_hw = hw
+            best_hw = phw.raw
 
         if best_score >= 1.0:
             break
@@ -4885,3 +4983,5 @@ def clear_ranking_caches() -> None:
     _build_positional_lookup.cache_clear()
     _short_nonliteral_query_tokens.cache_clear()
     _slot_names_from_csv.cache_clear()
+    _hotword_similarity.cache_clear()
+    _get_prepared_hotwords.cache_clear()

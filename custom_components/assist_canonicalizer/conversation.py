@@ -9,7 +9,7 @@ import hashlib
 import inspect
 import logging
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
@@ -35,6 +35,7 @@ from homeassistant.helpers import area_registry, device_registry, entity_registr
 from .const import (
     CONVERSATION_INPUT_OPTIONAL_FIELDS,
     DATA_RUNTIME,
+    DEFAULT_HOTWORD_MIN_CONFIDENCE,
     DEFAULT_MAX_CANDIDATES,
     DEFAULT_MAX_PREFLIGHT_ATTEMPTS,
     DOMAIN,
@@ -189,6 +190,17 @@ class TaskDeltaWrapper:
         return len(self._active_tasks) > 0
 
 
+def _snapshot_entry_hotword(val: object) -> tuple[str, ...]:
+    """Return an immutable snapshot of a hotword configuration value."""
+    if isinstance(val, set):
+        return tuple(sorted(item.strip() for item in val if isinstance(item, str) and item.strip()))
+    if isinstance(val, Sequence) and not isinstance(val, (str, bytes, Mapping)):
+        return tuple(item.strip() for item in val if isinstance(item, str) and item.strip())
+    if isinstance(val, str) and (stripped := val.strip()):
+        return (stripped,)
+    return ()
+
+
 class AssistCanonicalizerConversationEntity(
     conversation.ConversationEntity,
     AbstractConversationAgent,
@@ -205,6 +217,8 @@ class AssistCanonicalizerConversationEntity(
         self._entry = entry
         self._runtime = runtime
         self._attr_unique_id = f"{entry.entry_id}-conversation"
+        self._cached_hotword_state: tuple[object, ...] | None = None
+        self._cached_hotword_options: tuple[bool, Sequence[str], float] | None = None
 
     @property
     def supported_languages(self) -> list[str] | Literal["*"]:
@@ -274,14 +288,41 @@ class AssistCanonicalizerConversationEntity(
 
     async def async_reload(self, language: str | None = None) -> None:
         """Reload cached indexes for a language."""
+        self._cached_hotword_state = None
+        self._cached_hotword_options = None
         await self._runtime.async_clear_index(
             self.hass,
             normalize_language(language) if language else None,
         )
 
+    def _get_hotword_options(self) -> tuple[bool, Sequence[str], float]:
+        """Return cached hotword options if config entry state has not changed."""
+        opts = getattr(self._entry, "options", None) or {}
+        data = getattr(self._entry, "data", None) or {}
+        state = (
+            id(self._entry),
+            ConfigKey.ENABLE_HOTWORD in opts,
+            bool(opts.get(ConfigKey.ENABLE_HOTWORD)),
+            ConfigKey.HOTWORD in opts,
+            _snapshot_entry_hotword(opts.get(ConfigKey.HOTWORD)),
+            ConfigKey.HOTWORD_MIN_CONFIDENCE in opts,
+            opts.get(ConfigKey.HOTWORD_MIN_CONFIDENCE),
+            ConfigKey.ENABLE_HOTWORD in data,
+            bool(data.get(ConfigKey.ENABLE_HOTWORD)),
+            ConfigKey.HOTWORD in data,
+            _snapshot_entry_hotword(data.get(ConfigKey.HOTWORD)),
+            ConfigKey.HOTWORD_MIN_CONFIDENCE in data,
+            data.get(ConfigKey.HOTWORD_MIN_CONFIDENCE),
+        )
+        if self._cached_hotword_state != state:
+            resolved_options = resolve_entry_hotword_options(self._entry)
+            self._cached_hotword_options = resolved_options
+            self._cached_hotword_state = state
+        return self._cached_hotword_options or (False, (), DEFAULT_HOTWORD_MIN_CONFIDENCE)
+
     def _is_hotword_matched(self, user_input: ConversationInput) -> tuple[bool, str]:
         """Return whether user input starts with a configured hotword and the stripped text."""
-        enable_hotword, hotword, min_confidence = resolve_entry_hotword_options(self._entry)
+        enable_hotword, hotword, min_confidence = self._get_hotword_options()
         if not enable_hotword or not hotword or not user_input.text:
             return False, user_input.text
         language = normalize_language(user_input.language) if user_input.language else None
@@ -292,7 +333,7 @@ class AssistCanonicalizerConversationEntity(
             language=language,
         )
         if matched and matched_hw:
-            stripped = strip_hotword_prefix(user_input.text, matched_hw)
+            stripped = strip_hotword_prefix(user_input.text, matched_hw, already_matched=True)
             return True, stripped
         return False, user_input.text
 
