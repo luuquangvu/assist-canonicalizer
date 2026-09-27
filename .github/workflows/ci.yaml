@@ -80,7 +80,7 @@ jobs:
           uv run --locked tools/benchmark.py
           --min-intent-slot-accuracy 93.0
           --max-mismatch-rate 0.5
-          --min-language-intent-slot-accuracy 89.5
+          --min-language-intent-slot-accuracy 90.0
           --max-language-mismatch-rate 1.0
           --fail-on-warning
 

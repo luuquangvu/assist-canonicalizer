@@ -529,6 +529,32 @@
       }
     },
     {
+      "query": "hút bụi ở đây",
+      "language": "vi",
+      "expected_intent": "HassVacuumCleanArea",
+      "expected_canonical": "hút bụi ở đây",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "area": "phòng khách"
+      },
+      "context": {
+        "area": "phòng khách"
+      }
+    },
+    {
+      "query": "dọn dẹp ở đây",
+      "language": "vi",
+      "expected_intent": "HassVacuumCleanArea",
+      "expected_canonical": "dọn dẹp ở đây",
+      "category": "intent_coverage",
+      "expected_slots": {
+        "area": "phòng khách"
+      },
+      "context": {
+        "area": "phòng khách"
+      }
+    },
+    {
       "query": "thời tiết hôm nay thế nào",
       "language": "vi",
       "expected_intent": "HassGetWeather",
