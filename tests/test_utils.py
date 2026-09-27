@@ -174,6 +174,31 @@ def test_strip_hotword_prefix() -> None:
     )
     assert strip_hotword_prefix("Hey", "Hey Jarvis") == "Hey"
 
+    # 13. already_matched flag skips prefix validation
+    assert (
+        strip_hotword_prefix("Jarvis, turn on the lights", "Jarvis", already_matched=True)
+        == "turn on the lights"
+    )
+
+    # 14. Boundary behavior with multi-token hotwords, irregular whitespace, and punctuation
+    assert (
+        strip_hotword_prefix(
+            "Hey   Jarvis,   please turn on lights", "Hey Jarvis", already_matched=True
+        )
+        == "please turn on lights"
+    )
+    assert (
+        strip_hotword_prefix("Hey-Jarvis, what time is it?", "Hey-Jarvis", already_matched=True)
+        == "what time is it?"
+    )
+    assert strip_hotword_prefix("Jarvisville is a town", "Jarvis") == "Jarvisville is a town"
+    assert (
+        strip_hotword_prefix(
+            "Hey Jarvis:  set timer for   10 minutes  ", "Hey Jarvis", already_matched=True
+        )
+        == "set timer for   10 minutes"
+    )
+
 
 def test_freeze_intent_context() -> None:
     """Verify deterministic freezing and hashability of intent contexts."""

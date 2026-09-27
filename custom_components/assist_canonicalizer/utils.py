@@ -165,7 +165,57 @@ def _strip_leading_punctuation(text: str) -> str:
     return text[idx:]
 
 
-def strip_hotword_prefix(query: str, hotword: str) -> str:
+def _find_hotword_token_boundary(query: str, target_tokens: tuple[str, ...]) -> int | None:
+    """Find character offset in query after matching target normalized tokens."""
+    token_len = len(target_tokens)
+    if token_len == 0:
+        return None
+
+    # For ASCII text without digits, normalization only case-folds and replaces
+    # punctuation with separators. Locate the requested token end in one pass.
+    if query.isascii() and not any(char.isdigit() for char in query):
+        token_count = 0
+        in_token = False
+        for index, char in enumerate(query):
+            is_token_char = char.isalnum() or char == "_"
+            if is_token_char:
+                if not in_token:
+                    token_count += 1
+                    in_token = True
+            elif in_token and token_count == token_len:
+                return index
+            else:
+                in_token = False
+        return len(query) if in_token and token_count == token_len else None
+    query_len = len(query)
+    low = 0
+    high = query_len
+    while low < high:
+        middle = (low + high) // 2
+        prefix_tokens = tokenize_normalized(normalize_text(query[:middle]))
+        if len(prefix_tokens) >= token_len:
+            high = middle
+        else:
+            low = middle + 1
+
+    for end in range(low, query_len + 1):
+        if end < query_len and (
+            query[end].isalnum()
+            or query[end] == "_"
+            or unicodedata.category(query[end]).startswith("M")
+        ):
+            continue
+
+        candidate_tokens = tokenize_normalized(normalize_text(query[:end]))
+        if candidate_tokens == target_tokens:
+            return end
+        if len(candidate_tokens) > token_len:
+            break
+
+    return None
+
+
+def strip_hotword_prefix(query: str, hotword: str, *, already_matched: bool = False) -> str:
     """Strip a matched hotword prefix and leading punctuation from the query string.
 
     Verifies that the query begins with a confirmed hotword match, finds the character
@@ -178,11 +228,12 @@ def strip_hotword_prefix(query: str, hotword: str) -> str:
     if not hotword or not hotword.strip():
         return query
 
-    from .ranking import match_hotword_prefix
+    if not already_matched:
+        from .ranking import match_hotword_prefix
 
-    matched, _score, _matched_hw = match_hotword_prefix(query, hotword)
-    if not matched:
-        return query
+        matched, _score, _matched_hw = match_hotword_prefix(query, hotword)
+        if not matched:
+            return query
 
     hw_tokens = tokenize_normalized(normalize_text(hotword))
     if not hw_tokens:
@@ -193,14 +244,8 @@ def strip_hotword_prefix(query: str, hotword: str) -> str:
     if len(query_tokens) < token_len:
         return query
 
-    # Find the character offset in query after matching token_len normalized query tokens.
-    target_tokens = query_tokens[:token_len]
-    pos = 0
-    for end in range(1, len(query) + 1):
-        if tokenize_normalized(normalize_text(query[:end])) == target_tokens:
-            pos = end
-            break
-    else:
+    pos = _find_hotword_token_boundary(query, query_tokens[:token_len])
+    if pos is None:
         return query
 
     remainder = query[pos:]

@@ -34,10 +34,12 @@ from custom_components.assist_canonicalizer.ranking import (
     _best_positional_score,
     _calculate_slot_penalty,
     _check_and_calculate_conflict_penalty,
+    _get_prepared_hotwords,
     _get_wildcard_slot_tokens,
     _has_static_entity_uncovered_query_tokens,
     _has_static_slot_query_conflict,
     _has_wildcard_known_slot_token_absorption,
+    _hotword_similarity,
     _is_numeric_slot_value,
     _per_pair_positional_threshold,
     _positional_similarity,
@@ -4624,15 +4626,21 @@ def test_base_margin_accepts_equal_boundary_and_rejects_immediately_below() -> N
 
 
 def test_clear_ranking_caches() -> None:
-    """Test clear_ranking_caches does not raise exceptions."""
-    # Warm up cache
+    """Test clear_ranking_caches does not raise exceptions and clears all LRU caches."""
+    # Warm up caches
     _raw_cached_fuzz_ratio("test", "test")
-    # Verify cache is populated
+    _hotword_similarity("jarvis", "jarvis")
+    _get_prepared_hotwords(("jarvis",), "en")
+    # Verify caches are populated
     assert _raw_cached_fuzz_ratio.cache_info().currsize > 0
-    # Clear cache
+    assert _hotword_similarity.cache_info().currsize > 0
+    assert _get_prepared_hotwords.cache_info().currsize > 0
+    # Clear caches
     clear_ranking_caches()
-    # Verify cache is empty
+    # Verify caches are empty
     assert _raw_cached_fuzz_ratio.cache_info().currsize == 0
+    assert _hotword_similarity.cache_info().currsize == 0
+    assert _get_prepared_hotwords.cache_info().currsize == 0
 
 
 def test_token_count_ratio_empty() -> None:
@@ -5237,3 +5245,47 @@ def test_match_hotword_prefix() -> None:
     assert matched is True
     assert score == 1.0
     assert hw == "Jarvis"
+
+    # 16. ASCII query matches configured hotword with diacritics
+    matched, score, hw = match_hotword_prefix("Cafe please make coffee", "Café")
+    assert matched is True
+    assert score == 1.0
+    assert hw == "Café"
+
+    # 17. Diacritic query matches configured ASCII hotword
+    matched, score, hw = match_hotword_prefix("Café please make coffee", "Cafe")
+    assert matched is True
+    assert score == 1.0
+    assert hw == "Cafe"
+
+    # 18. Combining accents in a non-ASCII multi-token query use token-level fallback
+    matched, score, hw = match_hotword_prefix(
+        "Cafe\u0301 Maison, please start", "Cafe Maison", min_confidence=0.90
+    )
+    assert matched is True
+    assert score == 1.0
+    assert hw == "Cafe Maison"
+
+    # 19. A non-ASCII multi-token near match below threshold returns no match
+    matched, score, hw = match_hotword_prefix(
+        "Café Maisen please start", "Cafe Maison", min_confidence=0.99
+    )
+    assert matched is False
+    assert score < 0.99
+    assert hw is None
+
+    # 20. Near match below threshold returns no match and hw is None
+    matched, score, hw = match_hotword_prefix(
+        "Jarvxyz what time is it", "Jarvis", min_confidence=0.85
+    )
+    assert matched is False
+    assert score < 0.85
+    assert hw is None
+
+    # 21. Multi-token exact match returns configured hotword
+    matched, score, hw = match_hotword_prefix(
+        "Hey Computer, what is the temperature?", ["Hey Jarvis", "Hey Computer"]
+    )
+    assert matched is True
+    assert score == 1.0
+    assert hw == "Hey Computer"
