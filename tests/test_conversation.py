@@ -3,9 +3,11 @@
 import asyncio
 import contextlib
 import inspect
+import logging
 import sys
 from collections import UserList
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -2977,14 +2979,20 @@ def test_entity_get_hotword_options_caching_and_invalidation() -> None:
     runtime = CanonicalizerRuntime()
     entity = AssistCanonicalizerConversationEntity(entry, runtime)
 
+    def check_options(
+        expected: tuple[bool, tuple[str, ...], float],
+    ) -> tuple[bool, Sequence[str], float]:
+        options = entity._get_hotword_options()
+        assert options == expected
+        return options
+
     with patch.object(
         conversation_platform,
         "resolve_entry_hotword_options",
         wraps=resolve_entry_hotword_options,
     ) as resolver:
         # First call populates cache; second call reuses it.
-        opts1 = entity._get_hotword_options()
-        assert opts1 == (True, ("Jarvis",), 0.90)
+        opts1 = check_options((True, ("Jarvis",), 0.90))
         opts2 = entity._get_hotword_options()
         assert opts2 is opts1
         resolver.assert_called_once_with(entry)
@@ -2995,15 +3003,13 @@ def test_entity_get_hotword_options_caching_and_invalidation() -> None:
             ConfigKey.HOTWORD: ["Jarvis", "Hey Jarvis"],
             ConfigKey.HOTWORD_MIN_CONFIDENCE: 0.85,
         }
-        opts3 = entity._get_hotword_options()
-        assert opts3 == (True, ("Jarvis", "Hey Jarvis"), 0.85)
+        opts3 = check_options((True, ("Jarvis", "Hey Jarvis"), 0.85))
         assert opts3 is not opts1
         assert resolver.call_count == 2
 
         # In-place list mutation also invalidates the cache.
         cast(list[str], entry.options[ConfigKey.HOTWORD]).append("Computer")
-        opts4 = entity._get_hotword_options()
-        assert opts4 == (True, ("Jarvis", "Hey Jarvis", "Computer"), 0.85)
+        opts4 = check_options((True, ("Jarvis", "Hey Jarvis", "Computer"), 0.85))
         assert opts4 is not opts3
         assert resolver.call_count == 3
 
@@ -3204,27 +3210,466 @@ def test_entity_is_hotword_matched_with_conversation_input() -> None:
     runtime = CanonicalizerRuntime()
     entity = AssistCanonicalizerConversationEntity(entry, runtime)
 
+    def assert_matched(text: str, expected_matched: bool, expected_text: str) -> None:
+        matched, stripped = entity._is_hotword_matched(MockConversationInput(text, "en"))
+        assert matched is expected_matched
+        assert stripped == expected_text
+
     # 1. Matching input with irregular whitespace and punctuation
-    inp1 = MockConversationInput("Hey   Jarvis,   turn on the kitchen lights", "en")
-    matched1, text1 = entity._is_hotword_matched(inp1)
-    assert matched1 is True
-    assert text1 == "turn on the kitchen lights"
+    assert_matched("Hey   Jarvis,   turn on the kitchen lights", True, "turn on the kitchen lights")
 
     # 2. Non-matching input
-    inp2 = MockConversationInput("Turn on the living room lights", "en")
-    matched2, text2 = entity._is_hotword_matched(inp2)
-    assert matched2 is False
-    assert text2 == "Turn on the living room lights"
+    assert_matched("Turn on the living room lights", False, "Turn on the living room lights")
 
     # 3. Disabled hotword bypasses matching immediately
     entry.options[ConfigKey.ENABLE_HOTWORD] = False
-    inp3 = MockConversationInput("Hey Jarvis, turn on the lights", "en")
-    matched3, text3 = entity._is_hotword_matched(inp3)
-    assert matched3 is False
-    assert text3 == "Hey Jarvis, turn on the lights"
+    assert_matched("Hey Jarvis, turn on the lights", False, "Hey Jarvis, turn on the lights")
 
     # 4. Empty or whitespace input
-    inp4 = MockConversationInput("", "en")
-    matched4, text4 = entity._is_hotword_matched(inp4)
-    assert matched4 is False
-    assert text4 == ""
+    assert_matched("", False, "")
+
+
+def _sync_single_item_chat_log(
+    item: object,
+    original_text: str = "orig",
+    stripped_text: str = "stripped",
+) -> MagicMock:
+    """Run _sync_chat_log_current_user_text on a mock chat log with a single item."""
+    chat_log = MagicMock()
+    chat_log.content = [item]
+    AssistCanonicalizerConversationEntity._sync_chat_log_current_user_text(
+        chat_log,
+        original_text,
+        stripped_text,
+    )
+    return chat_log
+
+
+def test_sync_chat_log_current_user_text_single_turn() -> None:
+    """Verify _sync_chat_log_current_user_text updates single turn UserContent."""
+    pytest.importorskip("homeassistant.components.conversation.chat_log")
+    from homeassistant.components.conversation.chat_log import UserContent
+
+    msg = UserContent(content="em gái anh đã đậu xe ở đâu")
+    created_time = getattr(msg, "created", None)
+    chat_log = _sync_single_item_chat_log(
+        msg,
+        "em gái anh đã đậu xe ở đâu",
+        "anh đã đậu xe ở đâu",
+    )
+
+    assert len(chat_log.content) == 1
+    assert chat_log.content[0] is not msg
+    assert chat_log.content[0].role == "user"
+    assert chat_log.content[0].content == "anh đã đậu xe ở đâu"
+    assert getattr(chat_log.content[0], "created", None) == created_time
+    assert msg.content == "em gái anh đã đậu xe ở đâu"
+
+
+def test_sync_chat_log_multi_turn_preserves_older_turns() -> None:
+    """Verify older turns in multi-turn sessions remain untouched to preserve LLM caching."""
+    pytest.importorskip("homeassistant.components.conversation.chat_log")
+    from homeassistant.components.conversation.chat_log import AssistantContent, UserContent
+
+    # Turn 1: user used hotword in Turn 1, trimmed, and assistant replied
+    turn1_user = UserContent(content="anh đã đậu xe ở đâu")
+    turn1_assistant = AssistantContent(agent_id="test_agent", content="Anh đã đậu ở tầng B2.")
+    turn1_user_created = getattr(turn1_user, "created", None)
+
+    # Turn 2: user forgot and used hotword again in Turn 2
+    turn2_user = UserContent(content="em gái vậy còn chìa khóa thì sao")
+    turn2_user_created = getattr(turn2_user, "created", None)
+
+    chat_log = MagicMock()
+    chat_log.content = [turn1_user, turn1_assistant, turn2_user]
+
+    # Helper syncs Turn 2
+    AssistCanonicalizerConversationEntity._sync_chat_log_current_user_text(
+        chat_log,
+        "em gái vậy còn chìa khóa thì sao",
+        "vậy còn chìa khóa thì sao",
+    )
+
+    # Asserts that Turn 1 is 100% UNTOUCHED (same objects, same content, same created timestamps)
+    assert chat_log.content[0] is turn1_user
+    assert chat_log.content[0].content == "anh đã đậu xe ở đâu"
+    assert getattr(chat_log.content[0], "created", None) == turn1_user_created
+
+    assert chat_log.content[1] is turn1_assistant
+    assert chat_log.content[1].content == "Anh đã đậu ở tầng B2."
+
+    # Asserts that ONLY Turn 2 is updated to the trimmed text
+    assert chat_log.content[2].role == "user"
+    assert chat_log.content[2].content == "vậy còn chìa khóa thì sao"
+    assert getattr(chat_log.content[2], "created", None) == turn2_user_created
+
+    # Turn 3: assistant replied to Turn 2, and user enters Turn 3 with hotword again
+    turn2_assistant = AssistantContent(agent_id="test_agent", content="Chìa khóa ở trên bàn.")
+    turn3_user = UserContent(content="em gái cảm ơn em nhé")
+    turn3_user_created = getattr(turn3_user, "created", None)
+    chat_log.content.extend([turn2_assistant, turn3_user])
+
+    AssistCanonicalizerConversationEntity._sync_chat_log_current_user_text(
+        chat_log,
+        "em gái cảm ơn em nhé",
+        "cảm ơn em nhé",
+    )
+
+    # Verify Turns 1 and 2 remain strictly identical
+    assert chat_log.content[0] is turn1_user
+    assert chat_log.content[1] is turn1_assistant
+    assert chat_log.content[2].content == "vậy còn chìa khóa thì sao"
+    assert chat_log.content[3] is turn2_assistant
+
+    # Verify Turn 3 updated
+    assert chat_log.content[4].content == "cảm ơn em nhé"
+    assert getattr(chat_log.content[4], "created", None) == turn3_user_created
+
+
+def test_sync_chat_log_edge_cases_and_non_matching() -> None:
+    """Verify _sync_chat_log_current_user_text handles edge cases gracefully."""
+    pytest.importorskip("homeassistant.components.conversation.chat_log")
+    from homeassistant.components.conversation.chat_log import AssistantContent, UserContent
+
+    # 1. chat_log is None
+    AssistCanonicalizerConversationEntity._sync_chat_log_current_user_text(None, "orig", "stripped")
+
+    # 2. chat_log.content is empty
+    empty_log = MagicMock()
+    empty_log.content = []
+    AssistCanonicalizerConversationEntity._sync_chat_log_current_user_text(
+        empty_log, "orig", "stripped"
+    )
+    assert not empty_log.content
+
+    def assert_unchanged(msg: object, initial_content: str) -> None:
+        log = _sync_single_item_chat_log(msg, "orig", "stripped")
+        assert log.content[0] is msg
+        assert getattr(log.content[0], "content", None) == initial_content
+
+    # 3. last item is not role "user" (e.g. role "assistant", both mock and dataclass)
+    mock_assistant = MagicMock(role="assistant", content="orig")
+    assert_unchanged(mock_assistant, "orig")
+
+    dataclass_assistant = AssistantContent(agent_id="test_agent", content="orig")
+    assert_unchanged(dataclass_assistant, "orig")
+
+    # 4. last item content does not match original_text (both mock and dataclass)
+    mock_mismatch = MagicMock(role="user", content="different text")
+    assert_unchanged(mock_mismatch, "different text")
+
+    dataclass_mismatch = UserContent(content="different text")
+    assert_unchanged(dataclass_mismatch, "different text")
+
+
+@pytest.mark.asyncio
+async def test_hotword_matched_syncs_active_chat_log() -> None:
+    """Verify hotword match updates active chat log message before fallback delegation."""
+    pytest.importorskip("homeassistant.components.conversation.chat_log")
+    from homeassistant.components.conversation.chat_log import UserContent
+
+    entry = MagicMock()
+    entry.entry_id = "test_entry"
+    entry.options = {
+        ConfigKey.ENABLE_HOTWORD: True,
+        ConfigKey.HOTWORD: "Jarvis",
+    }
+    entry.data = {}
+    runtime = CanonicalizerRuntime()
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    entity.hass = MagicMock()
+
+    user_msg = UserContent(content="Jarvis turn off lights")
+    mock_chat_log = MagicMock()
+    mock_chat_log.content = [user_msg]
+
+    user_input = MockConversationInput("Jarvis turn off lights", "en")
+
+    with (
+        patch.object(entity, "_get_active_chat_log", return_value=mock_chat_log),
+        patch.object(entity, "_delegate_text", AsyncMock(return_value="delegated")) as delegate,
+    ):
+        res = await entity._async_process_with_runtime(user_input)
+
+    assert res == "delegated"
+    delegate.assert_awaited_once_with("turn off lights", user_input, primary=False)
+    assert mock_chat_log.content[0].content == "turn off lights"
+
+
+def test_sync_chat_log_mutable_non_dataclass_item() -> None:
+    """Verify _sync_chat_log_current_user_text updates mutable non-dataclass items in place."""
+    msg = SimpleNamespace(role="user", content="em gái anh đã đậu xe ở đâu")
+    chat_log = _sync_single_item_chat_log(
+        msg,
+        "em gái anh đã đậu xe ở đâu",
+        "anh đã đậu xe ở đâu",
+    )
+
+    assert chat_log.content[0] is msg
+    assert msg.content == "anh đã đậu xe ở đâu"
+
+
+def test_sync_chat_log_empty_stripped_text() -> None:
+    """Verify _sync_chat_log_current_user_text allows updating to an empty stripped text."""
+    pytest.importorskip("homeassistant.components.conversation.chat_log")
+    from homeassistant.components.conversation.chat_log import UserContent
+
+    msg = UserContent(content="Jarvis")
+    chat_log = _sync_single_item_chat_log(
+        msg,
+        "Jarvis",
+        "",
+    )
+
+    assert chat_log.content[0].content == ""
+
+
+@dataclass(frozen=True)
+class _FrozenTestMessage:
+    """Frozen test message dataclass with init=False metadata."""
+
+    content: str
+    role: str = "user"
+    metadata: str = field(init=False, default="cached_metadata")
+
+
+def test_sync_chat_log_frozen_dataclass_preserves_metadata_and_replaces_entry() -> None:
+    """Verify frozen dataclass with init=False metadata is replaced cleanly."""
+    msg = _FrozenTestMessage(content="Jarvis turn on lights")
+    object.__setattr__(msg, "metadata", "custom_cached_value")
+
+    chat_log = _sync_single_item_chat_log(
+        msg,
+        "Jarvis turn on lights",
+        "turn on lights",
+    )
+
+    # Replaced with a new dataclass instance, original frozen object untouched
+    assert chat_log.content[0] is not msg
+    assert chat_log.content[0].content == "turn on lights"
+    assert chat_log.content[0].metadata == "custom_cached_value"
+    assert msg.content == "Jarvis turn on lights"
+    assert msg.metadata == "custom_cached_value"
+
+
+def test_sync_chat_log_dataclass_replace_failure_logs_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Verify graceful handling and warning when dataclass replacement fails."""
+    pytest.importorskip("homeassistant.components.conversation.chat_log")
+    from homeassistant.components.conversation.chat_log import UserContent
+
+    msg = UserContent(content="Jarvis turn on lights")
+    with (
+        caplog.at_level(logging.WARNING),
+        patch(
+            "custom_components.assist_canonicalizer.conversation.replace",
+            side_effect=TypeError("Incompatible dataclass fields"),
+        ),
+    ):
+        chat_log = _sync_single_item_chat_log(
+            msg,
+            "Jarvis turn on lights",
+            "turn on lights",
+        )
+
+    # Replacement failed gracefully, log remains unchanged
+    assert chat_log.content[0] is msg
+    assert chat_log.content[0].content == "Jarvis turn on lights"
+    assert "Dataclass replacement failed: Incompatible dataclass fields" in caplog.text
+
+
+def test_sync_chat_log_inspection_failure_logs_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Verify failure to inspect active chat log item emits a warning."""
+    from unittest.mock import PropertyMock
+
+    item = MagicMock()
+    type(item).role = PropertyMock(side_effect=RuntimeError("Corrupted role"))
+
+    with caplog.at_level(logging.WARNING):
+        chat_log = _sync_single_item_chat_log(item)
+
+    assert chat_log.content[0] is item
+    assert "Unable to inspect active chat log item: Corrupted role" in caplog.text
+
+
+def test_sync_chat_log_non_dataclass_failure_logs_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Verify non-dataclass content update failure emits a warning."""
+
+    class _ReadOnlyContentItem:
+        """Non-dataclass item whose content setter cannot be mutated."""
+
+        def __init__(self) -> None:
+            """Initialize test item."""
+            self.role = "user"
+
+        @property
+        def content(self) -> str:
+            """Return current content."""
+            return "Jarvis turn on lights"
+
+    item = _ReadOnlyContentItem()
+    with caplog.at_level(logging.WARNING):
+        chat_log = _sync_single_item_chat_log(
+            item,
+            "Jarvis turn on lights",
+            "turn on lights",
+        )
+
+    assert chat_log.content[0] is item
+    assert chat_log.content[0].content == "Jarvis turn on lights"
+    assert "Unable to update non-dataclass item content" in caplog.text
+
+
+def test_sync_chat_log_malformed_item_raises_gracefully() -> None:
+    """Verify _sync_chat_log_current_user_text handles malformed items that raise exceptions."""
+    from unittest.mock import PropertyMock
+
+    def assert_malformed_item_unchanged(item: object) -> None:
+        log = _sync_single_item_chat_log(item)
+        assert log.content == [item]
+
+    def make_corrupted_item(attr: str, role: str | None = None) -> MagicMock:
+        item = MagicMock()
+        if role is not None:
+            item.role = role
+        setattr(type(item), attr, PropertyMock(side_effect=RuntimeError(f"Corrupted item {attr}")))
+        return item
+
+    # 1. Accessing role raises RuntimeError
+    assert_malformed_item_unchanged(make_corrupted_item("role"))
+
+    # 2. Accessing content raises RuntimeError
+    assert_malformed_item_unchanged(make_corrupted_item("content", role="user"))
+
+    # 3. Setting content on mutable non-dataclass raises RuntimeError
+    class _BrokenSetterItem:
+        """Non-dataclass item whose content setter raises RuntimeError."""
+
+        def __init__(self) -> None:
+            """Initialize test item."""
+            self.role = "user"
+            self._content = "orig"
+
+        @property
+        def content(self) -> str:
+            """Return current content."""
+            return self._content
+
+        @content.setter
+        def content(self, value: str) -> None:
+            """Raise exception on mutation."""
+            raise RuntimeError("Corrupted content setter")
+
+    broken_setter_item = _BrokenSetterItem()
+    assert_malformed_item_unchanged(broken_setter_item)
+    assert broken_setter_item.content == "orig"
+
+
+def test_sync_chat_log_tuple_sequence_replaces_collection_on_chat_log() -> None:
+    """Verify sequence replacement when chat_log.content is an immutable tuple."""
+    pytest.importorskip("homeassistant.components.conversation.chat_log")
+    from homeassistant.components.conversation.chat_log import ChatLog, UserContent
+
+    class _TupleBackedChatLog:
+        """Chat log test double with an immutable tuple sequence for content."""
+
+        def __init__(self, content: tuple[UserContent, ...]) -> None:
+            """Initialize the tuple-backed chat log double."""
+            self._content = content
+
+        @property
+        def content(self) -> Sequence[UserContent]:
+            """Return current immutable content tuple."""
+            return self._content
+
+        @content.setter
+        def content(self, value: Sequence[UserContent]) -> None:
+            """Assign replacement sequence as an immutable tuple."""
+            self._content = tuple(value)
+
+    msg = UserContent(content="Jarvis turn on lights")
+    chat_log = _TupleBackedChatLog((msg,))
+
+    AssistCanonicalizerConversationEntity._sync_chat_log_current_user_text(
+        cast(ChatLog, chat_log),
+        "Jarvis turn on lights",
+        "turn on lights",
+    )
+
+    assert len(chat_log.content) == 1
+    assert chat_log.content[0] is not msg
+    assert chat_log.content[0].content == "turn on lights"
+    assert isinstance(chat_log.content, tuple)
+
+
+def test_sync_chat_log_sequence_replacement_failure_logs_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Verify sequence replacement failure is logged as warning when content is read-only."""
+    pytest.importorskip("homeassistant.components.conversation.chat_log")
+    from homeassistant.components.conversation.chat_log import ChatLog, UserContent
+
+    class _ReadOnlyChatLog:
+        """Chat log test double with a read-only property."""
+
+        def __init__(self, content: tuple[UserContent, ...]) -> None:
+            """Initialize the read-only chat log double."""
+            self._content = content
+
+        @property
+        def content(self) -> Sequence[UserContent]:
+            """Return current immutable content tuple without setter."""
+            return self._content
+
+    msg = UserContent(content="Jarvis turn on lights")
+    chat_log = _ReadOnlyChatLog((msg,))
+
+    with caplog.at_level(logging.WARNING):
+        AssistCanonicalizerConversationEntity._sync_chat_log_current_user_text(
+            cast(ChatLog, chat_log),
+            "Jarvis turn on lights",
+            "turn on lights",
+        )
+
+    assert len(chat_log.content) == 1
+    assert chat_log.content[0] is msg
+    assert "Failed to update chat log sequence" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_hotword_only_input_with_active_chat_log() -> None:
+    """Verify hotword-only input retains text and updates active chat log accordingly."""
+    pytest.importorskip("homeassistant.components.conversation.chat_log")
+    from homeassistant.components.conversation.chat_log import UserContent
+
+    entry = MagicMock()
+    entry.entry_id = "test_entry"
+    entry.options = {
+        ConfigKey.ENABLE_HOTWORD: True,
+        ConfigKey.HOTWORD: "Jarvis",
+    }
+    entry.data = {}
+    runtime = CanonicalizerRuntime()
+    entity = AssistCanonicalizerConversationEntity(entry, runtime)
+    entity.hass = MagicMock()
+
+    user_msg = UserContent(content="Jarvis")
+    mock_chat_log = MagicMock()
+    mock_chat_log.content = [user_msg]
+
+    user_input = MockConversationInput("Jarvis", "en")
+
+    with (
+        patch.object(entity, "_get_active_chat_log", return_value=mock_chat_log),
+        patch.object(entity, "_delegate_text", AsyncMock(return_value="delegated")) as delegate,
+    ):
+        res = await entity._async_process_with_runtime(user_input)
+
+    assert res == "delegated"
+    delegate.assert_awaited_once_with("Jarvis", user_input, primary=False)
+    assert mock_chat_log.content[0].content == "Jarvis"

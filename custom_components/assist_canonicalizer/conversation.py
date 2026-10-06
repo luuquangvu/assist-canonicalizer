@@ -10,7 +10,7 @@ import inspect
 import logging
 import time
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
@@ -446,6 +446,12 @@ class AssistCanonicalizerConversationEntity(
             self._runtime.update_diagnostics(
                 last_fallback_reason=FallbackReason.HOTWORD_MATCHED,
                 execution_result="hotword_fallback",
+            )
+            chat_log = self._get_active_chat_log()
+            self._sync_chat_log_current_user_text(
+                chat_log,
+                user_input.text,
+                hotword_stripped_text,
             )
             return await self._delegate_text(hotword_stripped_text, user_input, primary=False)
 
@@ -1310,6 +1316,62 @@ class AssistCanonicalizerConversationEntity(
         """Restore the chat log content to the pre-delegation length."""
         if chat_log is not None and old_len is not None:
             del chat_log.content[old_len:]
+
+    @staticmethod
+    def _sync_chat_log_current_user_text(
+        chat_log: ChatLog | None,
+        original_text: str,
+        stripped_text: str,
+    ) -> None:
+        """Update active chat log's current turn user message to stripped text.
+
+        Only modifies the latest user message in the active chat log if it matches
+        the incoming original text for this turn, ensuring past turns in multi-turn
+        sessions remain completely untouched to preserve LLM prefix and prompt caching.
+        """
+        if chat_log is None or not chat_log.content:
+            return
+
+        try:
+            last_item = chat_log.content[-1]
+            role = getattr(last_item, "role", None)
+            content = getattr(last_item, "content", None)
+        except Exception as err:
+            _LOGGER.warning("Unable to inspect active chat log item: %s", err)
+            return
+
+        if role != "user" or content != original_text:
+            return
+
+        if is_dataclass(last_item):
+            try:
+                updated_item = replace(last_item, content=stripped_text)
+                for field in fields(last_item):
+                    if not field.init and hasattr(last_item, field.name):
+                        with contextlib.suppress(AttributeError, TypeError):
+                            object.__setattr__(
+                                updated_item, field.name, getattr(last_item, field.name)
+                            )
+            except (TypeError, ValueError) as err:
+                _LOGGER.warning("Dataclass replacement failed: %s", err)
+                return
+
+            try:
+                chat_log.content[-1] = updated_item
+            except (TypeError, AttributeError):
+                try:
+                    new_content = list(chat_log.content)
+                    new_content[-1] = updated_item
+                    chat_log.content = new_content
+                except Exception as seq_err:
+                    _LOGGER.warning("Failed to update chat log sequence: %s", seq_err)
+            return
+
+        # For non-dataclass mutable items, update content directly without bypassing invariants
+        try:
+            last_item.content = stripped_text
+        except Exception as err:
+            _LOGGER.warning("Unable to update non-dataclass item content: %s", err)
 
     def _fallback_agent_id(self, default_agent_id: str) -> str:
         """Return a configured fallback agent without allowing self-forwarding."""

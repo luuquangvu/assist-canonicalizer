@@ -4,14 +4,13 @@ version = "1.15.0"
 description = "Enhance Assist intent recognition accuracy by integrating a multi-signal lexical ranking engine into the Home Assistant conversation pipeline."
 readme = "README.md"
 requires-python = ">=3.14.2"
-dependencies = ["rapidfuzz>=3.14.2"]
+dependencies = ["homeassistant", "rapidfuzz>=3.14.2"]
 
 [dependency-groups]
 dev = [
   "gazetteer-matcher",
   "hassil",
   "home-assistant-intents",
-  "homeassistant",
   "interrogate",
   "orjson",
   "packaging",
