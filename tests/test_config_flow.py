@@ -6,9 +6,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from homeassistant.core import HomeAssistant
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 if TYPE_CHECKING:
-    import voluptuous as vol
+    import probatio as vol
 else:
     try:
         import probatio as vol
@@ -256,10 +257,12 @@ async def test_config_flow_steps() -> None:
 @pytest.mark.asyncio
 async def test_options_flow_steps() -> None:
     """Test options step flow options."""
-    entry = MagicMock()
-    entry.data = {}
-    entry.options = {}
-    entry.entry_id = "test_entry_id"
+    entry = MockConfigEntry(
+        domain="assist_canonicalizer",
+        entry_id="test_entry_id",
+        data={},
+        options={},
+    )
 
     flow = AssistCanonicalizerOptionsFlow(entry)
     flow.hass = MagicMock()

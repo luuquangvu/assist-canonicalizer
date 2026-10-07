@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
-from typing import Any, override
+from typing import TYPE_CHECKING, Any, override
 
-from homeassistant.components.humidifier import (
-    HumidifierDeviceClass,
-    HumidifierEntity,
-)
+from homeassistant.components.humidifier import HumidifierEntity
 from homeassistant.components.humidifier.const import HumidifierAction
+
+if TYPE_CHECKING:
+    from homeassistant.components.humidifier.const import HumidifierDeviceClass
+else:
+    try:
+        from homeassistant.components.humidifier.const import HumidifierDeviceClass
+    except ImportError:
+        from homeassistant.components.humidifier import HumidifierDeviceClass
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType

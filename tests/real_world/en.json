@@ -1180,6 +1180,17 @@
       }
     },
     {
+      "query": "set fan mode in livng room to auto",
+      "language": "en",
+      "expected_intent": "HassClimateSetFanMode",
+      "expected_canonical": "set fan mode in living room to auto",
+      "category": "spelling_mistake",
+      "expected_slots": {
+        "area": "living room",
+        "fan_mode": "auto"
+      }
+    },
+    {
       "query": "can u pls turn on the offise light",
       "language": "en",
       "expected_intent": "HassTurnOn",

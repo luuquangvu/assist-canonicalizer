@@ -2,11 +2,13 @@
 
 import asyncio
 from functools import partial
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant.core import HassJob, HassJobType
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 import custom_components.assist_canonicalizer
 from custom_components.assist_canonicalizer import (
@@ -87,10 +89,13 @@ def test_registry_debounce_jobs_are_callback_safe() -> None:
 
 
 @pytest.mark.asyncio
-async def test_async_setup_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_async_setup_entry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """Test setup entry with trigger intents updates callback."""
     hass = MagicMock()
-    hass.config.path = MagicMock(return_value="/config")
+    hass.config.path = lambda *args: str(tmp_path.joinpath(*args))
     hass.data = {}
     hass.add_job = MagicMock()
 
@@ -98,10 +103,12 @@ async def test_async_setup_entry(monkeypatch: pytest.MonkeyPatch) -> None:
     hass.config_entries = MagicMock()
     hass.config_entries.async_forward_entry_setups = AsyncMock()
 
-    entry = MagicMock()
-    entry.entry_id = "test_entry"
-    entry.data = {}
-    entry.options = {}
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        entry_id="test_entry",
+        data={},
+        options={},
+    )
 
     monkeypatch.setattr(
         "custom_components.assist_canonicalizer.registry.async_registry_slot_values",
@@ -138,8 +145,9 @@ async def test_async_setup_entry(monkeypatch: pytest.MonkeyPatch) -> None:
     assert hass.data[DOMAIN][entry.entry_id]["entry"] is entry
     runtime = hass.data[DOMAIN][entry.entry_id][DATA_RUNTIME]
     assert isinstance(runtime, CanonicalizerRuntime)
-    entry.add_update_listener.assert_called_once_with(_async_update_listener)
-    entry.async_on_unload.assert_called_once_with(entry.add_update_listener.return_value)
+    assert _async_update_listener in entry.update_listeners
+    assert entry._on_unload is not None
+    assert len(entry._on_unload) == 1
 
     # Verify triggering the intent update callback schedules index rebuild
     assert subscription_recorder.saved_callback is not None
@@ -153,8 +161,12 @@ async def test_async_unload_entry(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test unloading configuration entry with success, failure, and multiple entries."""
     hass = MagicMock()
 
-    entry = MagicMock()
-    entry.entry_id = "test_entry"
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        entry_id="test_entry",
+        data={},
+        options={},
+    )
 
     runtime = CanonicalizerRuntime()
     hass.data = {
@@ -186,7 +198,12 @@ async def test_async_unload_entry(monkeypatch: pytest.MonkeyPatch) -> None:
     assert DOMAIN not in hass.data
 
     # 3. Unload success path with remaining entries (verify DOMAIN data is not removed entirely)
-    other_entry = MagicMock()
+    other_entry = MockConfigEntry(
+        domain=DOMAIN,
+        entry_id="other_entry",
+        data={},
+        options={},
+    )
     hass.data = {
         DOMAIN: {
             "test_entry": {
@@ -512,19 +529,24 @@ async def test_warmup_pipeline_languages_fallback_failure_silent() -> None:
 
 
 @pytest.mark.asyncio
-async def test_async_setup_entry_triggers_warmup(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_async_setup_entry_triggers_warmup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """async_setup_entry spawns a background warmup task after setup."""
     hass = MagicMock()
-    hass.config.path = MagicMock(return_value="/config")
+    hass.config.path = lambda *args: str(tmp_path.joinpath(*args))
     hass.data = {}
     hass.add_job = MagicMock()
     hass.config_entries = MagicMock()
     hass.config_entries.async_forward_entry_setups = AsyncMock()
 
-    entry = MagicMock()
-    entry.entry_id = "test_entry"
-    entry.data = {}
-    entry.options = {}
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        entry_id="test_entry",
+        data={},
+        options={},
+    )
 
     monkeypatch.setattr(
         "custom_components.assist_canonicalizer.registry.async_registry_slot_values",
@@ -801,8 +823,12 @@ async def test_async_update_listener_clears_ranking_cache_synchronously() -> Non
     """Verify that _async_update_listener synchronously clears the runtime ranking cache."""
     hass = MagicMock()
     runtime = CanonicalizerRuntime()
-    entry = MagicMock()
-    entry.entry_id = "test_entry"
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        entry_id="test_entry",
+        data={},
+        options={},
+    )
     hass.data = {DOMAIN: {"test_entry": {DATA_RUNTIME: runtime}}}
 
     with patch.object(CanonicalizerRuntime, "clear_ranking_cache") as mock_clear:

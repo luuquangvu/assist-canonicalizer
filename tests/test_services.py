@@ -8,10 +8,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
-from pytest_homeassistant_custom_component.common import MockConfigEntry as HassMockConfigEntry
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 if TYPE_CHECKING:
-    from voluptuous import Invalid
+    from probatio import Invalid
 else:
     try:
         from probatio import Invalid
@@ -111,16 +111,6 @@ class MockServiceCall:
         self.data = data
 
 
-class MockConfigEntry:
-    """Mock config entry with dynamic options and data dictionary."""
-
-    def __init__(self, options: dict[str, Any], data: dict[str, Any]) -> None:
-        """Initialize options and data properties."""
-        self.entry_id = "mock_entry_id"
-        self.options = options
-        self.data = data
-
-
 class _ServiceRegistrationRecorder:
     """Record service callbacks registered by async_setup_services."""
 
@@ -161,7 +151,7 @@ async def test_set_fallback_agent_service_reports_config_entry_change(
 ) -> None:
     """Report the real Home Assistant config-entry update result."""
     runtime = CanonicalizerRuntime()
-    entry = HassMockConfigEntry(
+    entry = MockConfigEntry(
         domain=DOMAIN,
         options={ConfigKey.MIN_CONFIDENCE: 0.7},
         data={ConfigKey.FALLBACK_AGENT_ID: "old_agent"},
@@ -218,7 +208,7 @@ async def test_set_fallback_agent_service_rejects_invalid_targets(
 ) -> None:
     """Reject missing agents and both canonicalizer agent identifiers."""
     runtime = CanonicalizerRuntime()
-    entry = MockConfigEntry(options={}, data={})
+    entry = MockConfigEntry(domain=DOMAIN, entry_id="mock_entry_id", options={}, data={})
     hass = MockHass(runtime, entry)
     hass.config_entries = MagicMock()
 
@@ -291,7 +281,10 @@ async def test_handle_test_match_entry_none_and_data_fallback() -> None:
 
     # Case 2: entry is not None, options is empty, fallback to data
     entry_data = MockConfigEntry(
-        options={}, data={ConfigKey.MIN_CONFIDENCE: 0.10, ConfigKey.MIN_MARGIN: 0.01}
+        domain=DOMAIN,
+        entry_id="mock_entry_id",
+        options={},
+        data={ConfigKey.MIN_CONFIDENCE: 0.10, ConfigKey.MIN_MARGIN: 0.01},
     )
     hass_data = MockHass(runtime, entry=entry_data)
     result_data = await _handle_test_match(_as_hass(hass_data), cast(ServiceCall, call))
@@ -824,7 +817,7 @@ async def test_services_exception_wrapping() -> None:
         await _handle_test_match(_as_hass(hass), cast(ServiceCall, call))
 
     # 2. _handle_set_fallback_agent raising error while persisting the option
-    entry = MockConfigEntry(options={}, data={})
+    entry = MockConfigEntry(domain=DOMAIN, entry_id="mock_entry_id", options={}, data={})
     hass.data[DOMAIN]["mock_entry_id"]["entry"] = entry
     hass.config_entries = MagicMock()
     hass.config_entries.async_update_entry.side_effect = RuntimeError("Test update error")

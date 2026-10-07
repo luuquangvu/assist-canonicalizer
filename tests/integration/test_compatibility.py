@@ -10,7 +10,7 @@ from homeassistant import config_entries
 from homeassistant.components import conversation
 from homeassistant.components.conversation.const import HOME_ASSISTANT_AGENT
 from homeassistant.components.homeassistant.exposed_entities import async_expose_entity
-from homeassistant.core import Context, HomeAssistant, callback
+from homeassistant.core import Context, HomeAssistant, SupportsResponse, callback
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import area_registry, entity_registry, floor_registry
 from homeassistant.setup import async_setup_component
@@ -30,6 +30,7 @@ from custom_components.assist_canonicalizer.recognition import (
     RecognitionKind,
     async_observe_delegated_text,
 )
+from custom_components.assist_canonicalizer.runtime import CanonicalizerRuntime
 
 pytestmark = pytest.mark.compatibility
 
@@ -64,6 +65,20 @@ async def test_home_assistant_functional_contract(
     assert hass.services.has_service(DOMAIN, ServiceName.DUMP_CANDIDATES)
     assert hass.services.has_service(DOMAIN, ServiceName.DIAGNOSTICS)
     assert hass.services.has_service(DOMAIN, ServiceName.SET_FALLBACK_AGENT)
+    assert (
+        hass.services.supports_response(DOMAIN, ServiceName.REBUILD_INDEX) is SupportsResponse.ONLY
+    )
+    assert hass.services.supports_response(DOMAIN, ServiceName.TEST_MATCH) is SupportsResponse.ONLY
+    assert hass.services.supports_response(DOMAIN, ServiceName.CLEAR_INDEX) is SupportsResponse.ONLY
+    assert (
+        hass.services.supports_response(DOMAIN, ServiceName.DUMP_CANDIDATES)
+        is SupportsResponse.ONLY
+    )
+    assert hass.services.supports_response(DOMAIN, ServiceName.DIAGNOSTICS) is SupportsResponse.ONLY
+    assert (
+        hass.services.supports_response(DOMAIN, ServiceName.SET_FALLBACK_AGENT)
+        is SupportsResponse.OPTIONAL
+    )
 
     # 1. Rebuild index service
     rebuild_response = await hass.services.async_call(
@@ -105,6 +120,14 @@ async def test_home_assistant_functional_contract(
     assert "candidate_sample" in dump_response
 
     # 4. Set fallback agent service
+    no_response = await hass.services.async_call(
+        DOMAIN,
+        ServiceName.SET_FALLBACK_AGENT,
+        {AttributeName.AGENT_ID: HOME_ASSISTANT_AGENT},
+        blocking=True,
+    )
+    assert no_response is None
+
     fallback_response = await hass.services.async_call(
         DOMAIN,
         ServiceName.SET_FALLBACK_AGENT,
@@ -222,6 +245,21 @@ async def test_compatibility_registry_and_observation(
     async_expose_entity(hass, "conversation", entity.entity_id, True)
     floor = floor_reg.async_create("compatibility_test_floor")
 
+    unexposed_entity = entity_reg.async_get_or_create(
+        "switch", "compatibility_test", "unexposed_switch", suggested_object_id="secret_switch"
+    )
+    entity_reg.async_update_entity(
+        unexposed_entity.entity_id,
+        aliases=["Unexposed Switch Alias"],
+        name="Compatibility Unexposed Switch",
+    )
+    hass.states.async_set(
+        unexposed_entity.entity_id,
+        "on",
+        {"friendly_name": "Compatibility Unexposed Switch"},
+    )
+    async_expose_entity(hass, "conversation", unexposed_entity.entity_id, False)
+
     entry = MockConfigEntry(
         domain=DOMAIN,
         title="Assist Canonicalizer",
@@ -275,6 +313,8 @@ async def test_compatibility_registry_and_observation(
     assert "Compatibility Lamp Alias" in runtime.registry_slot_values["name"]
     assert "compatibility_test_area" in runtime.registry_slot_values["area"]
     assert "compatibility_test_floor" in runtime.registry_slot_values["floor"]
+    assert "Compatibility Unexposed Switch" not in runtime.registry_slot_values.get("name", ())
+    assert "Unexposed Switch Alias" not in runtime.registry_slot_values.get("name", ())
 
     str_entity_event = str(entity_registry.EVENT_ENTITY_REGISTRY_UPDATED)
     str_area_event = str(area_registry.EVENT_AREA_REGISTRY_UPDATED)
@@ -301,6 +341,11 @@ async def test_compatibility_registry_and_observation(
         aliases=["Updated Compatibility Alias"],
         name="Updated Test Light",
     )
+    entity_reg.async_update_entity(
+        unexposed_entity.entity_id,
+        aliases=["Updated Unexposed Alias"],
+        name="Updated Unexposed Switch",
+    )
     area_reg.async_update(area.id, name="Updated Test Area")
     floor_reg.async_update(floor.floor_id, name="Updated Test Floor")
     await hass.async_block_till_done()
@@ -315,6 +360,22 @@ async def test_compatibility_registry_and_observation(
     assert "Updated Compatibility Alias" in runtime.registry_slot_values["name"]
     assert "Updated Test Area" in runtime.registry_slot_values["area"]
     assert "Updated Test Floor" in runtime.registry_slot_values["floor"]
+    assert "Updated Unexposed Switch" not in runtime.registry_slot_values.get("name", ())
+    assert "Updated Unexposed Alias" not in runtime.registry_slot_values.get("name", ())
+
+    async_expose_entity(hass, "conversation", unexposed_entity.entity_id, True)
+    await hass.async_block_till_done()
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=6))
+    await hass.async_block_till_done()
+    assert "Updated Unexposed Switch" in runtime.registry_slot_values["name"]
+    assert "Updated Unexposed Alias" in runtime.registry_slot_values["name"]
+
+    async_expose_entity(hass, "conversation", unexposed_entity.entity_id, False)
+    await hass.async_block_till_done()
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=6))
+    await hass.async_block_till_done()
+    assert "Updated Unexposed Switch" not in runtime.registry_slot_values.get("name", ())
+    assert "Updated Unexposed Alias" not in runtime.registry_slot_values.get("name", ())
 
     assert await hass.config_entries.async_unload(entry.entry_id)
     assert runtime.closed
@@ -355,6 +416,15 @@ async def test_config_and_options_flow_framework_contract(hass: HomeAssistant) -
     assert entry.domain == DOMAIN
     assert entry.data["fallback_agent_id"] == HOME_ASSISTANT_AGENT
 
+    await hass.async_block_till_done()
+    assert entry.state is config_entries.ConfigEntryState.LOADED
+    assert conversation.async_get_agent_info(hass, entry.entry_id) is not None
+    assert DOMAIN in hass.data
+    assert entry.entry_id in hass.data[DOMAIN]
+    runtime = hass.data[DOMAIN][entry.entry_id][DATA_RUNTIME]
+    assert isinstance(runtime, CanonicalizerRuntime)
+    assert not runtime.closed
+
     options_form = await hass.config_entries.options.async_init(entry.entry_id)
     assert options_form.get("type") is FlowResultType.FORM
     assert options_form.get("step_id") == "init"
@@ -368,8 +438,13 @@ async def test_config_and_options_flow_framework_contract(hass: HomeAssistant) -
         },
     )
     assert options_created.get("type") is FlowResultType.CREATE_ENTRY
+    await hass.async_block_till_done()
     assert entry.options[ConfigKey.MIN_CONFIDENCE] == 0.7
     assert entry.options[ConfigKey.MIN_MARGIN] == 0.08
+
+    reloaded_runtime = hass.data[DOMAIN][entry.entry_id][DATA_RUNTIME]
+    assert isinstance(reloaded_runtime, CanonicalizerRuntime)
+    assert not reloaded_runtime.closed
 
     duplicate = await hass.config_entries.flow.async_init(
         DOMAIN,
@@ -377,3 +452,7 @@ async def test_config_and_options_flow_framework_contract(hass: HomeAssistant) -
     )
     assert duplicate.get("type") is FlowResultType.ABORT
     assert duplicate.get("reason") == "single_instance_allowed"
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.state is config_entries.ConfigEntryState.NOT_LOADED

@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
-from typing import override
+from typing import TYPE_CHECKING, override
 
-from homeassistant.components.todo import (
-    TodoItem,
-    TodoListEntity,
-)
 from homeassistant.components.todo.const import TodoItemStatus, TodoListEntityFeature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
+
+if TYPE_CHECKING:
+    from homeassistant.components.todo.entity import TodoItem, TodoListEntity
+else:
+    try:
+        from homeassistant.components.todo.entity import TodoItem, TodoListEntity
+    except ImportError:
+        from homeassistant.components.todo import TodoItem, TodoListEntity
 
 from . import DOMAIN
 
