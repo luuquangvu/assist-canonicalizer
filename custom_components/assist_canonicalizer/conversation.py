@@ -9,7 +9,7 @@ import hashlib
 import inspect
 import logging
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Generator, Mapping, Sequence
 from dataclasses import dataclass, fields, is_dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
@@ -1256,7 +1256,7 @@ class AssistCanonicalizerConversationEntity(
         )
 
     @contextlib.contextmanager
-    def _capture_chat_log_deltas(self, chat_log: object | None) -> Iterator[list[ChatLogDelta]]:
+    def _capture_chat_log_deltas(self, chat_log: object | None) -> Generator[list[ChatLogDelta]]:
         """Temporarily intercept and capture chat log delta listener callbacks."""
         captured_deltas: list[ChatLogDelta] = []
         if not isinstance(chat_log, _ChatLogWithDeltaListener):

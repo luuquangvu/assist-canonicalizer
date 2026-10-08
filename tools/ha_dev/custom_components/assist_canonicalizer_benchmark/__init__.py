@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 import orjson
 
 if TYPE_CHECKING:
-    import voluptuous as vol
+    import probatio as vol
 else:
     try:
         import probatio as vol

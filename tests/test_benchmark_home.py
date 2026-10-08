@@ -9,11 +9,15 @@ from typing import Any
 
 import orjson
 import pytest
+from homeassistant.components.climate.const import ClimateEntityFeature
 
 from tools import benchmark
 from tools.ha_dev.custom_components.assist_canonicalizer_benchmark import (
     _validate_manifest,
     fixture_fingerprint,
+)
+from tools.ha_dev.custom_components.assist_canonicalizer_benchmark.climate import (
+    BenchmarkClimate,
 )
 
 FIXTURE_PATH = Path("tools/ha_dev/custom_components/assist_canonicalizer_benchmark/fixture.json")
@@ -134,6 +138,10 @@ def test_rich_fixture_supports_stateful_live_intent_families() -> None:
         if entity["domain"] == "climate"
     )
     assert any(entity.get("vacuum_area_segment") == "living_room" for entity in entities)
+    climate = BenchmarkClimate("Living Room Thermostat", "climate_2", 22.0)
+    assert ClimateEntityFeature.FAN_MODE in climate.supported_features
+    assert climate.fan_modes is not None
+    assert "auto" in climate.fan_modes
 
 
 def test_live_trace_correlation_uses_the_final_default_agent_attempt() -> None:

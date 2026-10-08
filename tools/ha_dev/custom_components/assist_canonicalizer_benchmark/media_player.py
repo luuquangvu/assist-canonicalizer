@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, override
+from typing import TYPE_CHECKING, Any, override
 
-from homeassistant.components.media_player import (
-    MediaPlayerDeviceClass,
-    MediaPlayerEntity,
-)
+from homeassistant.components.media_player import MediaPlayerEntity
 from homeassistant.components.media_player.browse_media import (
     BrowseMedia,
     SearchMedia,
@@ -19,6 +16,14 @@ from homeassistant.components.media_player.const import (
     MediaPlayerState,
     MediaType,
 )
+
+if TYPE_CHECKING:
+    from homeassistant.components.media_player.const import MediaPlayerDeviceClass
+else:
+    try:
+        from homeassistant.components.media_player.const import MediaPlayerDeviceClass
+    except ImportError:
+        from homeassistant.components.media_player import MediaPlayerDeviceClass
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
