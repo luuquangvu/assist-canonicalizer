@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.metadata
 from collections import Counter
 from copy import deepcopy
 from pathlib import Path
@@ -102,6 +103,21 @@ def test_ha_benchmark_dependencies_are_unpinned_and_match_home_assistant() -> No
     assert set(resolved["packages"]) == {
         requirement.name.lower().replace("_", "-") for requirement in declared
     }
+
+
+def test_verify_benchmark_dependencies_raises_when_package_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing installed package metadata must raise BenchmarkError."""
+
+    def fake_version(package_name: str) -> str:
+        if package_name == "colorlog":
+            raise importlib.metadata.PackageNotFoundError(package_name)
+        return "1.0.0"
+
+    monkeypatch.setattr(importlib.metadata, "version", fake_version)
+    with pytest.raises(benchmark.BenchmarkError, match="Missing ha-benchmark dependency colorlog"):
+        benchmark.verify_benchmark_dependencies()
 
 
 def test_real_world_corpus_is_the_full_managed_live_default() -> None:
