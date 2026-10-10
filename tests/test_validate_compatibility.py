@@ -3,6 +3,7 @@
 import io
 import os
 import subprocess
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,16 @@ ASSIST_RUNTIME_VERSIONS = {
     "mutagen": "1.47.0",
     "pymicro-vad": "1.0.1",
     "pyspeex-noise": "1.0.2",
+}
+COMMON_TEST_DEPS = {
+    "hassil": "3.3.0",
+    "pytest": "8.3.4",
+    "pytest-asyncio": "1.3.0",
+    "pytest-cov": "7.0.0",
+    "pytest-timeout": "2.4.0",
+    "pytest-xdist": "3.8.0",
+    "rapidfuzz": "3.14.3",
+    "tomlkit": "0.15.1",
 }
 
 
@@ -261,14 +272,8 @@ def test_missing_required_deps_request_full_install(
     def fake_versions(_python_bin: Path, _pinned_versions: dict[str, str]) -> dict[str, str]:
         return {
             **ASSIST_RUNTIME_VERSIONS,
-            "hassil": "3.3.0",
+            **COMMON_TEST_DEPS,
             "home-assistant-intents": "2026.6.1",
-            "pytest": "8.3.4",
-            "pytest-asyncio": "1.3.0",
-            "pytest-cov": "7.0.0",
-            "pytest-timeout": "2.4.0",
-            "pytest-xdist": "3.8.0",
-            "rapidfuzz": "3.14.3",
         }
 
     monkeypatch.setattr(
@@ -293,14 +298,8 @@ def test_missing_dep_uses_targeted_refresh(
     def fake_versions(_python_bin: Path, _pinned_versions: dict[str, str]) -> dict[str, str]:
         return {
             **ASSIST_RUNTIME_VERSIONS,
-            "hassil": "3.3.0",
-            "pytest": "8.3.4",
-            "pytest-asyncio": "1.3.0",
-            "pytest-cov": "7.0.0",
+            **COMMON_TEST_DEPS,
             "pytest-homeassistant-custom-component": "0.13.205",
-            "pytest-timeout": "2.4.0",
-            "pytest-xdist": "3.8.0",
-            "rapidfuzz": "3.14.3",
         }
 
     monkeypatch.setattr(
@@ -835,11 +834,14 @@ def test_prepare_venv_and_install_generic_verification_error_does_not_reset_venv
         reset_called = True
         return True
 
+    def fail_verify_compat(_bin: Path, _ha: str) -> None:
+        raise ValueError("PyPI network timeout")
+
     monkeypatch.setattr(validate_compatibility, "_reset_venv", fail_reset)
     monkeypatch.setattr(
         validate_compatibility,
         "_verify_python_version_compatibility",
-        lambda _bin, _ha: (_ for _ in ()).throw(ValueError("PyPI network timeout")),
+        fail_verify_compat,
     )
 
     success = validate_compatibility._prepare_venv_and_install(
@@ -884,42 +886,170 @@ def test_run_tests_reports_latest_lookup_error_as_row_failure(
     assert "VALIDATION_ERROR: PyPI lookup failed" in capsys.readouterr().out
 
 
+def _mock_pypi_responses(
+    monkeypatch: pytest.MonkeyPatch,
+    ha_payload: str | dict[str, object],
+    harness_payload: str | dict[str, object],
+    version_payloads: dict[str, str | dict[str, object]] | None = None,
+) -> None:
+    """Mock PyPI remote fetches for Home Assistant and test harness metadata."""
+    responses: dict[str, str] = {
+        validate_compatibility._PYPI_HA_JSON_URL: (
+            validate_compatibility.orjson.dumps(ha_payload).decode()
+            if isinstance(ha_payload, dict)
+            else ha_payload
+        ),
+        validate_compatibility._PYPI_TEST_HARNESS_JSON_URL: (
+            validate_compatibility.orjson.dumps(harness_payload).decode()
+            if isinstance(harness_payload, dict)
+            else harness_payload
+        ),
+    }
+    if version_payloads:
+        for ver, payload in version_payloads.items():
+            url = validate_compatibility._PYPI_TEST_HARNESS_VERSION_JSON_URL_TEMPLATE.format(
+                version=ver
+            )
+            responses[url] = (
+                validate_compatibility.orjson.dumps(payload).decode()
+                if isinstance(payload, dict)
+                else payload
+            )
+
+    def fake_fetch(url: str) -> str:
+        if url in responses:
+            return responses[url]
+        raise AssertionError(f"Unexpected URL fetched: {url}")
+
+    monkeypatch.setattr(validate_compatibility, "_fetch_remote_text", fake_fetch)
+
+
 def test_latest_matched_pair_includes_ha_beta_and_reports_newer_unmatched_ha(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The moving gate should follow the newest exact pair and retain the HA edge."""
-
-    def fake_fetch(url: str) -> str:
-        if url == validate_compatibility._PYPI_HA_JSON_URL:
-            return (
-                '{"releases": {'
-                '"2026.7.4": [{"filename": "stable.whl"}],'
-                '"2026.8.0b0": [{"filename": "matched-beta.whl"}],'
-                '"2026.8.0b1": [{"filename": "unmatched-beta.whl"}],'
-                '"2026.9.0b0": [],'
-                '"invalid-version!": [{"filename": "invalid.whl"}]'
-                "}}"
-            )
-        assert url == validate_compatibility._PYPI_TEST_HARNESS_JSON_URL
-        return (
-            '{"info": {'
-            '"requires_dist": ['
-            '"homeassistant==2026.8.0b0",'
-            '"pytest>=8.0"'
-            "]"
-            '}, "releases": {'
-            '"0.13.348": [{"filename": "old.whl"}],'
-            '"0.13.349": [{"filename": "latest.whl"}]'
-            "}}"
-        )
-
-    monkeypatch.setattr(validate_compatibility, "_fetch_remote_text", fake_fetch)
+    _mock_pypi_responses(
+        monkeypatch,
+        ha_payload={
+            "releases": {
+                "2026.7.4": [{"filename": "stable.whl"}],
+                "2026.8.0b0": [{"filename": "matched-beta.whl"}],
+                "2026.8.0b1": [{"filename": "unmatched-beta.whl"}],
+                "2026.9.0b0": [],
+                "invalid-version!": [{"filename": "invalid.whl"}],
+            }
+        },
+        harness_payload={
+            "info": {"requires_dist": ["homeassistant==2026.8.0b0", "pytest>=8.0"]},
+            "releases": {
+                "0.13.348": [{"filename": "old.whl"}],
+                "0.13.349": [{"filename": "latest.whl"}],
+            },
+        },
+    )
 
     assert validate_compatibility._get_latest_matched_pair() == {
         "ha_ver": "2026.8.0b0",
         "harness_ver": "0.13.349",
         "absolute_latest_ha_ver": "2026.8.0b1",
     }
+
+
+def test_latest_matched_pair_fetches_version_specific_metadata_when_root_info_lags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Version-specific metadata must be fetched when root PyPI info version lags."""
+    _mock_pypi_responses(
+        monkeypatch,
+        ha_payload={
+            "releases": {
+                "2026.7.4": [{"filename": "stable.whl"}],
+                "2026.8.0": [{"filename": "matched.whl"}],
+            }
+        },
+        harness_payload={
+            "info": {"version": "0.13.348", "requires_dist": ["homeassistant==2026.7.4"]},
+            "releases": {
+                "0.13.348": [{"filename": "old.whl"}],
+                "0.13.349": [{"filename": "latest.whl"}],
+            },
+        },
+        version_payloads={
+            "0.13.349": {
+                "info": {"version": "0.13.349", "requires_dist": ["homeassistant==2026.8.0"]}
+            }
+        },
+    )
+
+    assert validate_compatibility._get_latest_matched_pair() == {
+        "ha_ver": "2026.8.0",
+        "harness_ver": "0.13.349",
+        "absolute_latest_ha_ver": "2026.8.0",
+    }
+
+
+def test_published_versions_descending_sorts_semantically_not_lexicographically() -> None:
+    """Versions must be sorted by PEP 440 semantics, not lexicographical string ordering."""
+    payload = {
+        "releases": {
+            "0.13.9": [{"filename": "f1.whl"}],
+            "0.13.10": [{"filename": "f2.whl"}],
+            "0.13.99": [{"filename": "f3.whl"}],
+            "0.13.100": [{"filename": "f4.whl"}],
+            "0.13.2": [{"filename": "f5.whl"}],
+        }
+    }
+    versions = validate_compatibility._published_versions_descending(
+        payload, "pytest-homeassistant-custom-component"
+    )
+    assert versions == ["0.13.100", "0.13.99", "0.13.10", "0.13.9", "0.13.2"]
+
+
+def test_latest_matched_pair_bounds_per_release_pypi_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bounded recent candidate window fetches the newest candidates in descending order."""
+    fetched_version_urls: list[str] = []
+
+    # 35 releases spanning 0.13.80 through 0.13.114
+    harness_releases = {
+        f"0.13.{80 + i}": [{"filename": f"harness-{80 + i}.whl"}] for i in range(35)
+    }
+
+    def fake_fetch(url: str) -> str:
+        if url == validate_compatibility._PYPI_HA_JSON_URL:
+            return '{"releases": {"2026.7.0": [{"filename": "ha.whl"}]}}'
+        if url == validate_compatibility._PYPI_TEST_HARNESS_JSON_URL:
+            return (
+                '{"info": {"version": "0.13.80", "requires_dist": ["homeassistant==2026.6.0"]}, '
+                f'"releases": {validate_compatibility.orjson.dumps(harness_releases).decode()}}}'
+            )
+        if "/pytest-homeassistant-custom-component/" in url:
+            fetched_version_urls.append(url)
+            return '{"info": {"version": "0.13.999", "requires_dist": ["homeassistant==2026.6.0"]}}'
+        raise AssertionError(f"Unexpected URL fetched: {url}")
+
+    monkeypatch.setattr(validate_compatibility, "_fetch_remote_text", fake_fetch)
+
+    with pytest.raises(
+        ValueError, match=r"No matching test harness found among \d+ checked releases"
+    ):
+        validate_compatibility._get_latest_matched_pair()
+
+    assert len(fetched_version_urls) == validate_compatibility._MAX_HARNESS_CANDIDATES
+    expected_descending_urls = [
+        validate_compatibility._PYPI_TEST_HARNESS_VERSION_JSON_URL_TEMPLATE.format(
+            version=f"0.13.{114 - i}"
+        )
+        for i in range(validate_compatibility._MAX_HARNESS_CANDIDATES)
+    ]
+    assert fetched_version_urls == expected_descending_urls
+    # Ensure older candidates (e.g., 0.13.80 through 0.13.89) were never queried
+    for older_version in range(80, 90):
+        older_url = validate_compatibility._PYPI_TEST_HARNESS_VERSION_JSON_URL_TEMPLATE.format(
+            version=f"0.13.{older_version}"
+        )
+        assert older_url not in fetched_version_urls
 
 
 @pytest.mark.parametrize(
@@ -1063,23 +1193,53 @@ def test_latest_matched_pair_rejects_unpublished_harness_target(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A harness pin cannot make an unpublished Home Assistant target valid."""
-
-    def fake_fetch(url: str) -> str:
-        if url == validate_compatibility._PYPI_HA_JSON_URL:
-            return '{"releases": {"2026.8.0b0": [{"filename": "beta.whl"}]}}'
-        return (
-            '{"info": {"requires_dist": ["homeassistant==2026.8.0b1"]}, '
-            '"releases": {"0.13.349": [{"filename": "harness.whl"}]}}'
-        )
-
-    monkeypatch.setattr(
-        validate_compatibility,
-        "_fetch_remote_text",
-        fake_fetch,
+    _mock_pypi_responses(
+        monkeypatch,
+        ha_payload={"releases": {"2026.8.0b0": [{"filename": "beta.whl"}]}},
+        harness_payload={
+            "info": {"requires_dist": ["homeassistant==2026.8.0b1"]},
+            "releases": {"0.13.349": [{"filename": "harness.whl"}]},
+        },
     )
 
-    with pytest.raises(ValueError, match="targets unpublished Home Assistant"):
+    with pytest.raises(
+        ValueError, match=r"No matching test harness found among \d+ checked releases"
+    ):
         validate_compatibility._get_latest_matched_pair()
+
+
+def test_latest_matched_pair_falls_back_when_newest_harness_targets_unpublished_ha(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The matched pair resolution should skip harnesses targeting unpublished HA releases."""
+    _mock_pypi_responses(
+        monkeypatch,
+        ha_payload={"releases": {"2026.9.0": [{"filename": "ha.whl"}]}},
+        harness_payload={
+            "info": {
+                "version": "0.13.355",
+                "requires_dist": ["homeassistant==2026.9.0"],
+            },
+            "releases": {
+                "0.13.355": [{"filename": "matched.whl"}],
+                "0.13.356": [{"filename": "unmatched.whl"}],
+            },
+        },
+        version_payloads={
+            "0.13.356": {
+                "info": {
+                    "version": "0.13.356",
+                    "requires_dist": ["homeassistant==2026.9.1"],
+                }
+            },
+        },
+    )
+
+    assert validate_compatibility._get_latest_matched_pair() == {
+        "ha_ver": "2026.9.0",
+        "harness_ver": "0.13.355",
+        "absolute_latest_ha_ver": "2026.9.0",
+    }
 
 
 def test_compatibility_pytest_args_skip_current_intents_marker() -> None:
@@ -2084,6 +2244,8 @@ def test_validate_python_bin_rejects_invalid_resolved_target_state(
         "venv",
         "pip",
         "pytest",
+        "pyright",
+        "ty",
     ],
 )
 def test_subprocess_commands_set_uv_managed_python(
@@ -2104,6 +2266,7 @@ def test_subprocess_commands_set_uv_managed_python(
             (venv_path / "bin" / "python").write_text("", encoding="utf-8")
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
+    monkeypatch.setattr(validate_compatibility, "resolve_global_uv_path", lambda: "uv")
     monkeypatch.setattr(validate_compatibility.subprocess, "run", fake_subprocess_run)
     if run_action == "venv":
         assert validate_compatibility._ensure_venv(tmp_path / "test_venv", "3.14")
@@ -2113,8 +2276,14 @@ def test_subprocess_commands_set_uv_managed_python(
             ["homeassistant==2026.6.0"],
             "homeassistant",
         )
-    else:
+    elif run_action == "pytest":
         validate_compatibility._run_pytest(Path("python"), "2026.6.0", ["-k", "test"])
+    elif run_action == "pyright":
+        python_file = _setup_repo_venv_python(tmp_path, monkeypatch)
+        validate_compatibility._run_pyright(python_file, "2026.6.0")
+    else:
+        python_file = _setup_repo_venv_python(tmp_path, monkeypatch)
+        validate_compatibility._run_ty(python_file, "2026.6.0")
 
     assert captured_env.get("UV_MANAGED_PYTHON") == "1"
 
@@ -2134,3 +2303,265 @@ def test_main_sets_uv_managed_python(
     capsys.readouterr()
 
     assert validate_compatibility.os.environ.get("UV_MANAGED_PYTHON") == "1"
+
+
+def test_published_versions_descending_skips_invalid_version_labels() -> None:
+    """Releases rejected by _validate_version_label must be skipped without aborting."""
+    raw_releases = {"2.0.0": [{}], "2.0.0+local": [{}], "1.0.0": [{}]}
+    versions = validate_compatibility._published_versions_descending(
+        {"releases": raw_releases}, "homeassistant"
+    )
+    assert versions == ["2.0.0", "1.0.0"]
+
+
+@pytest.mark.parametrize(
+    ("runner_fn", "expected_tool_cmd", "expected_flag", "log_name"),
+    [
+        (
+            validate_compatibility._run_ty,
+            ["ty", "check"],
+            "--python",
+            "ty check",
+        ),
+        (
+            validate_compatibility._run_pyright,
+            ["pyright"],
+            "--pythonpath",
+            "pyright",
+        ),
+    ],
+)
+def test_run_static_type_checkers_invokes_tools_with_correct_args_and_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    runner_fn: Callable[[Path, str], None],
+    expected_tool_cmd: list[str],
+    expected_flag: str,
+    log_name: str,
+) -> None:
+    """Static type checkers should be invoked with locked dependencies and target python path."""
+    python_file = _setup_repo_venv_python(tmp_path, monkeypatch)
+    recorded_commands: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        recorded_commands.append((cmd, kwargs))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(
+        validate_compatibility,
+        "resolve_global_uv_path",
+        lambda: "/custom/bin/uv",
+    )
+    monkeypatch.setattr(validate_compatibility.subprocess, "run", fake_run)
+    runner_fn(python_file, "2026.10.0b4")
+
+    assert len(recorded_commands) == 1
+    cmd, kwargs = recorded_commands[0]
+    assert cmd == [
+        "/custom/bin/uv",
+        "run",
+        "--locked",
+        "--no-sync",
+        *expected_tool_cmd,
+        expected_flag,
+        str(python_file),
+    ]
+    assert kwargs.get("check") is True
+    assert kwargs.get("cwd") == str(tmp_path)
+    assert kwargs.get("timeout") == validate_compatibility._STATIC_ANALYSIS_TIMEOUT_SECONDS
+    env = kwargs.get("env")
+    assert isinstance(env, dict)
+    assert env.get("UV_MANAGED_PYTHON") == "1"
+
+    out = capsys.readouterr().out
+    assert f"STEP_START: uv run {log_name} (Home Assistant 2026.10.0b4)" in out
+    assert f"STEP_OK: uv run {log_name} (Home Assistant 2026.10.0b4)" in out
+
+
+@pytest.mark.parametrize(
+    "runner_fn",
+    [
+        validate_compatibility._run_ty,
+        validate_compatibility._run_pyright,
+    ],
+)
+def test_static_type_checkers_reject_invalid_python_binary(
+    runner_fn: Callable[[Path, str], None],
+) -> None:
+    """Reject invalid or missing Python binaries before invoking static analysis."""
+    with pytest.raises(ValueError, match="must be a python executable"):
+        runner_fn(Path(".venv/bin/nonexistent"), "2026.10.0b4")
+
+    with pytest.raises(ValueError, match="Python executable not found"):
+        runner_fn(Path("nonexistent/bin/python"), "2026.10.0b4")
+
+
+@pytest.mark.parametrize(
+    (
+        "is_latest",
+        "ha_version",
+        "harness_version",
+        "expect_type_checks",
+        "expected_pytest_args",
+    ),
+    [
+        (
+            True,
+            "2026.10.0b4",
+            "0.13.370",
+            True,
+            validate_compatibility._COMPATIBILITY_PYTEST_ARGS,
+        ),
+        (
+            False,
+            "2024.12.0",
+            "0.13.190",
+            False,
+            validate_compatibility._COMPATIBILITY_PYTEST_ARGS,
+        ),
+    ],
+)
+def test_verify_and_run_tests_type_checking_and_args_by_matrix_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    is_latest: bool,
+    ha_version: str,
+    harness_version: str,
+    expect_type_checks: bool,
+    expected_pytest_args: Sequence[str],
+) -> None:
+    """Validate that static type checks and pytest filters match matrix status."""
+    pytest_bin = tmp_path / "bin" / "pytest"
+    pytest_bin.parent.mkdir(parents=True)
+    pytest_bin.write_text("", encoding="utf-8")
+    python_bin = tmp_path / "bin" / "python"
+    python_bin.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_get_installed_ha_version",
+        lambda _p: ha_version,
+    )
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_verify_harness_pair",
+        lambda *_args: True,
+    )
+
+    ty_calls: list[tuple[Path, str]] = []
+    pyright_calls: list[tuple[Path, str]] = []
+    pytest_calls: list[tuple[Path, str, Sequence[str]]] = []
+
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_run_ty",
+        lambda p, ha: ty_calls.append((p, ha)),
+    )
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_run_pyright",
+        lambda p, ha: pyright_calls.append((p, ha)),
+    )
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_run_pytest",
+        lambda p, ha, args: pytest_calls.append((p, ha, args)),
+    )
+
+    success, ha_ver = validate_compatibility._verify_and_run_tests(
+        python_bin=python_bin,
+        pytest_bin=pytest_bin,
+        ha_ver_to_install=ha_version,
+        harness_ver_to_install=harness_version,
+        is_latest=is_latest,
+    )
+
+    assert success
+    assert ha_ver == ha_version
+    if expect_type_checks:
+        assert ty_calls == [(python_bin, ha_version)]
+        assert pyright_calls == [(python_bin, ha_version)]
+    else:
+        assert not ty_calls
+        assert not pyright_calls
+    assert pytest_calls == [(python_bin, ha_version, expected_pytest_args)]
+
+
+def _setup_verify_pair_cli(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    extra_flags: Sequence[str] = ("--check-types",),
+) -> Path:
+    """Set up mocked environment and sys.argv for --verify-pair-python execution."""
+    python_file = _setup_repo_venv_python(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        validate_compatibility,
+        "resolve_global_uv_path",
+        lambda: "/mock/bin/uv",
+    )
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_verify_harness_pair",
+        lambda *_args: True,
+    )
+    monkeypatch.setattr(
+        validate_compatibility.sys,
+        "argv",
+        [
+            "validate_compatibility.py",
+            "--verify-pair-python",
+            str(python_file),
+            "--expected-ha",
+            "2026.10.0b4",
+            "--expected-harness",
+            "0.13.370",
+            *extra_flags,
+        ],
+    )
+    return python_file
+
+
+def test_main_verify_pair_python_with_check_types_runs_pyright(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify pair python with --check-types invokes ty and pyright."""
+    python_file = _setup_verify_pair_cli(tmp_path, monkeypatch)
+    ty_calls: list[tuple[Path, str]] = []
+    pyright_calls: list[tuple[Path, str]] = []
+
+    def record_ty(path: Path, ha: str) -> None:
+        ty_calls.append((path, ha))
+
+    def record_pyright(path: Path, ha: str) -> None:
+        pyright_calls.append((path, ha))
+
+    monkeypatch.setattr(validate_compatibility, "_run_ty", record_ty)
+    monkeypatch.setattr(validate_compatibility, "_run_pyright", record_pyright)
+
+    validate_compatibility.main()
+    assert ty_calls == [(python_file, "2026.10.0b4")]
+    assert pyright_calls == [(python_file, "2026.10.0b4")]
+
+
+def test_main_verify_pair_python_with_check_types_failure_exits_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Exit code 1 is reported when static type check fails under --check-types."""
+    _setup_verify_pair_cli(tmp_path, monkeypatch)
+
+    def fail_pyright(_p: Path, _ha: str) -> None:
+        raise subprocess.CalledProcessError(1, ["pyright"])
+
+    monkeypatch.setattr(validate_compatibility, "_run_ty", lambda _p, _ha: None)
+    monkeypatch.setattr(validate_compatibility, "_run_pyright", fail_pyright)
+
+    with pytest.raises(SystemExit) as raised:
+        validate_compatibility.main()
+
+    assert raised.value.code == 1
+    assert "VALIDATION_ERROR: static type check failed:" in capsys.readouterr().out
