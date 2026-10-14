@@ -99,6 +99,11 @@ Trong thực tế, cùng một yêu cầu có thể được diễn đạt theo 
 >
 > Hãy bắt đầu với các ngưỡng mặc định và điều chỉnh dựa trên kết quả thực tế. Nếu bộ chuẩn hóa chuyển tiếp dự phòng quá thường xuyên, hãy thử hạ `min_confidence`. Nếu chọn sai ý định, hãy tăng `min_confidence` và `min_margin`.
 
+<!-- -->
+
+> [!TIP]
+> Assist Canonicalizer duy trì các chỉ mục và dữ liệu xếp hạng trong bộ nhớ đệm (RAM) để đảm bảo tốc độ phản hồi gần như tức thì. Do mỗi ngôn ngữ sử dụng một bộ nhớ đệm độc lập, mức chiếm dụng RAM sẽ tăng theo số lượng ngôn ngữ được cấu hình trong các pipeline Assist. Để tối ưu tài nguyên hệ thống, bạn chỉ nên thiết lập những ngôn ngữ thực sự có nhu cầu sử dụng.
+
 ---
 
 ## Cách hoạt động
@@ -372,6 +377,9 @@ Nếu bạn vẫn thấy độ trễ ở câu lệnh đầu tiên:
 2. **Ngôn ngữ chưa được cấu hình**: Các ngôn ngữ nằm ngoài danh sách pipeline đã cấu hình sẽ chỉ được khởi tạo và lưu vào bộ nhớ đệm theo yêu cầu (lazy build) ở lần gọi đầu tiên.
 
 Trong điều kiện bình thường, các truy vấn tiếp theo sẽ sử dụng bộ nhớ đệm trong RAM và phản hồi với độ trễ tối thiểu.
+
+> [!TIP]
+> Cơ chế lưu bộ nhớ đệm trong RAM giúp giảm thiểu độ trễ xử lý, nhưng mỗi chỉ mục ngôn ngữ sẽ tiêu tốn thêm dung lượng bộ nhớ. Nếu thấy mức chiếm dụng RAM cao hơn mong muốn, bạn có thể kiểm tra lại các pipeline Assist và bỏ bớt những ngôn ngữ không cần thiết để giải phóng bộ nhớ đệm.
 
 **Tôi mới cập nhật thực thể/khu vực/tầng nhưng bộ chuẩn hóa chưa nhận diện.**
 
