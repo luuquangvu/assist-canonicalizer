@@ -379,7 +379,7 @@ Nếu bạn vẫn thấy độ trễ ở câu lệnh đầu tiên:
 Trong điều kiện bình thường, các truy vấn tiếp theo sẽ sử dụng bộ nhớ đệm trong RAM và phản hồi với độ trễ tối thiểu.
 
 > [!TIP]
-> Cơ chế lưu bộ nhớ đệm trong RAM giúp giảm thiểu độ trễ xử lý, nhưng mỗi chỉ mục ngôn ngữ sẽ tiêu tốn thêm dung lượng bộ nhớ. Nếu thấy mức chiếm dụng RAM cao hơn mong muốn, bạn có thể kiểm tra lại các pipeline Assist và bỏ bớt những ngôn ngữ không cần thiết để giải phóng bộ nhớ đệm.
+> Cơ chế lưu bộ nhớ đệm trong RAM giúp giảm thiểu độ trễ xử lý, nhưng mỗi chỉ mục ngôn ngữ sẽ tiêu tốn thêm dung lượng bộ nhớ. Nếu thấy mức chiếm dụng RAM cao hơn mong muốn, bạn có thể kiểm tra lại các pipeline Assist, bỏ bớt những ngôn ngữ không cần thiết và chạy **Clear Index** cho từng ngôn ngữ đã bỏ để giải phóng bộ nhớ đệm của ngôn ngữ đó.
 
 **Tôi mới cập nhật thực thể/khu vực/tầng nhưng bộ chuẩn hóa chưa nhận diện.**
 

@@ -379,7 +379,7 @@ If a delay is still observed on the very first query:
 Under normal conditions, subsequent queries hit the cached in-memory structures and run with minimal latency.
 
 > [!TIP]
-> While proactive in-memory caching helps minimize query latency, each active language index consumes additional RAM. If you observe higher memory usage than desired, review your Assist pipelines and remove unused languages to release their cached structures.
+> While proactive in-memory caching helps minimize query latency, each active language index consumes additional RAM. If you observe higher memory usage than desired, review your Assist pipelines, remove unused languages, and run **Clear Index** for each removed language to release its cached structures.
 
 **I changed my entities/areas/floors but the canonicalizer doesn't reflect them.**
 
