@@ -99,6 +99,11 @@ People do not always phrase the same request in the same way. Word order, filler
 >
 > Start with the default threshold values and adjust based on your experience. If the canonicalizer falls back too often, try lowering `min_confidence`. If it produces mismatched intents, raise `min_confidence` and `min_margin`.
 
+<!-- -->
+
+> [!TIP]
+> Assist Canonicalizer caches candidate indexes and ranking data in memory to deliver near-instant intent matching. Because each language maintains an independent in-memory cache, RAM consumption scales with the number of languages configured across your Assist pipelines. To keep memory overhead low, configure only the languages you actively use.
+
 ---
 
 ## How It Works
@@ -372,6 +377,9 @@ If a delay is still observed on the very first query:
 2. **Unconfigured language**: Queries in languages outside your configured Assist pipelines are compiled and cached lazily on first use.
 
 Under normal conditions, subsequent queries hit the cached in-memory structures and run with minimal latency.
+
+> [!TIP]
+> While proactive in-memory caching helps minimize query latency, each active language index consumes additional RAM. If you observe higher memory usage than desired, review your Assist pipelines, remove unused languages, and run **Clear Index** for each removed language to release its cached structures.
 
 **I changed my entities/areas/floors but the canonicalizer doesn't reflect them.**
 
