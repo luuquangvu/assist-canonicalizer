@@ -188,7 +188,9 @@ Benchmark `managed_live` chạy mỗi truy vấn hai lần trên cùng một mô
 
 <!-- BENCHMARK_OVERALL_END -->
 
-> `Độ chính xác`, `Nhận diện sai` và `Dự phòng` là ba kết quả loại trừ lẫn nhau của luồng ưu tiên HassIL; tổng các tỷ lệ đạt 100% trước khi làm tròn. `Ngăn hồi quy` đếm số lượng truy vấn được HassIL xử lý chính xác dù đường dẫn Assist Canonicalizer không đạt tiêu chí thành công. Độ trễ phản ánh các lượt benchmark trực tiếp qua Assist Canonicalizer mà không sử dụng kỹ thuật nạp trước bộ nhớ đệm.
+> `Độ chính xác`, `Nhận diện sai` và `Dự phòng` là ba kết quả loại trừ lẫn nhau của luồng ưu tiên HassIL; tổng các tỷ lệ đạt 100% trước khi làm tròn. `Ngăn hồi quy` đếm số lượng truy vấn được HassIL xử lý chính xác dù đường dẫn Assist Canonicalizer không đạt tiêu chí thành công.
+>
+> Độ trễ trong bảng đo kiểm phản ánh lượt chạy riêng lẻ của từng câu lệnh khi chưa kích hoạt bộ nhớ đệm động. Khi sử dụng thực tế với các khẩu lệnh quen thuộc, bộ nhớ đệm giúp tốc độ phản hồi nhanh tương đương HassIL. Bạn có thể kiểm chứng độ trễ khi có bộ nhớ đệm cho các câu lệnh được nhận diện thành công bằng tùy chọn `--warmup 1` (các câu lệnh không nhận diện được hoặc chuyển sang dự phòng sẽ không lưu đệm và vẫn chạy độc lập).
 
 ### Chi tiết theo từng ngôn ngữ
 
@@ -207,7 +209,7 @@ Benchmark `managed_live` chạy mỗi truy vấn hai lần trên cùng một mô
 > [!NOTE]
 > Bộ dữ liệu được chủ ý xây dựng với tỷ lệ gần cân bằng giữa các trường hợp phù hợp với HassIL trực tiếp (khớp chính xác, ý định tích hợp sẵn và từ đệm được hỗ trợ) và các trường hợp thử thách mà HassIL trực tiếp được kỳ vọng không nhận diện (câu bị biến đổi, thiếu hoặc thừa từ, lỗi chính tả, thử thách ngữ nghĩa và cách diễn đạt tương đương). Thành phần này là lý do kết quả HassIL trực tiếp ở mức khoảng 50% trong bài đo kiểm được theo dõi. Đây là đặc điểm thiết kế của bộ dữ liệu, không phải tỷ lệ thành công dự kiến cho mọi hệ thống Home Assistant.
 >
-> Kết quả độ chính xác có thể tái tạo với môi trường kiểm thử cố định (fixture) gồm 3 tầng, 12 khu vực và 60 thực thể được cung cấp cho Assist. Độ trễ phụ thuộc vào phần cứng; nên so sánh báo cáo `managed_live` trước và sau thay đổi trên cùng một máy.
+> Kết quả độ chính xác có thể tái tạo với môi trường kiểm thử cố định (fixture) gồm 3 tầng, 12 khu vực và 60 thực thể được cung cấp cho Assist. Độ trễ phụ thuộc vào phần cứng; nên so sánh báo cáo `managed_live` trước và sau thay đổi trên cùng một máy. Mặc định bài kiểm thử đo các lượt gọi riêng lẻ; bạn có thể thêm `--warmup 1` để đo tốc độ khi trúng bộ nhớ đệm cho các câu lệnh được nhận diện thành công.
 >
 > Báo cáo chi tiết và dữ liệu JSON thô được tạo trong `scratch/` và không được đưa vào kho mã nguồn. Việc tách dữ liệu sinh tự động giúp pull request gọn và dễ xem xét hơn.
 
