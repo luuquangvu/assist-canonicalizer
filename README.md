@@ -188,7 +188,9 @@ The managed-live benchmark runs every query twice against the same Home Assistan
 
 <!-- BENCHMARK_OVERALL_END -->
 
-> `Accuracy`, `Mismatch`, and `Fallback` are mutually exclusive HassIL-first outcomes and total 100% before rounding. `Regressions prevented` counts queries that HassIL handles correctly even though the direct canonicalizer path does not meet its success criteria. Latency describes the direct canonicalizer benchmark requests without caching warmup technique.
+> `Accuracy`, `Mismatch`, and `Fallback` are mutually exclusive HassIL-first outcomes and total 100% before rounding. `Regressions prevented` counts queries that HassIL handles correctly even though the direct canonicalizer path does not meet its success criteria.
+>
+> Reported latency reflects cold execution without dynamic caching because each command in the corpus runs in isolation. In daily use, repeated commands hit the cache, bringing practical response times on par with HassIL. To observe cached performance for successfully recognized commands, run the benchmark with `--warmup 1` (unrecognized or fallback queries are not cached and still run cold).
 
 ### Per-Language Breakdown
 
@@ -207,7 +209,7 @@ The managed-live benchmark runs every query twice against the same Home Assistan
 > [!NOTE]
 > The corpus deliberately uses a roughly even mix of cases aligned with direct HassIL (exact matches, built-in intent coverage, and supported fillers) and challenge cases that direct HassIL is expected not to recognize (distortions, missing or extra words, spelling mistakes, semantic challenges, and paraphrases). This composition is why the direct HassIL result is around 50% in the tracked benchmark. It is a property of the benchmark design, not the expected success rate for every Home Assistant installation.
 >
-> Accuracy results are deterministic for the tracked 3-floor, 12-area, 60-exposed-entity fixture. Latency is hardware-sensitive, so performance changes should be verified with before/after managed-live reports on the same host.
+> Accuracy results are deterministic for the tracked 3-floor, 12-area, 60-exposed-entity fixture. Latency is hardware-sensitive, so performance changes should be verified with before/after managed-live reports on the same host. By default, the suite benchmarks isolated requests; pass `--warmup 1` to measure cache-hit performance for successfully recognized commands.
 >
 > Detailed reports and raw JSON data are generated under `scratch/` and are not committed. Keeping generated artifacts out of the repository makes pull requests smaller and easier to review.
 
