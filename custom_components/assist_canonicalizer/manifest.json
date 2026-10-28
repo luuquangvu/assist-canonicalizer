@@ -2,6 +2,7 @@
   "domain": "assist_canonicalizer",
   "name": "Assist Canonicalizer",
   "after_dependencies": ["assist_pipeline"],
+  "categories": ["ai_voice.voice_assistants"],
   "codeowners": ["@luuquangvu"],
   "config_flow": true,
   "dependencies": ["conversation"],

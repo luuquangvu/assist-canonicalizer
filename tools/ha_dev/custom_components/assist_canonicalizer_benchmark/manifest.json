@@ -1,6 +1,7 @@
 {
   "domain": "assist_canonicalizer_benchmark",
   "name": "Assist Canonicalizer Benchmark Fixture",
+  "categories": ["ai_voice.voice_assistants"],
   "codeowners": ["@luuquangvu"],
   "dependencies": [
     "climate",
