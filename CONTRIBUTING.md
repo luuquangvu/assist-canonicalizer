@@ -4,7 +4,7 @@ Thanks for contributing to Assist Canonicalizer, a Home Assistant custom integra
 
 ## Development setup
 
-Use a POSIX environment; Linux, or WSL are recommended. The project requires Python 3.14.2 or newer, [uv](https://docs.astral.sh/uv/), and Node.js 24 LTS.
+Use a POSIX environment; Linux, or WSL are recommended. The project requires Python 3.14.2 or newer, [uv](https://docs.astral.sh/uv/), and Node.js 26 LTS.
 
 ```bash
 git clone https://github.com/luuquangvu/assist-canonicalizer.git
