@@ -67,19 +67,19 @@ Trong thực tế, cùng một yêu cầu có thể được diễn đạt theo 
 
 ### Cách 1: Sử dụng HACS (Khuyến nghị)
 
+> [!IMPORTANT]
+> Từ phiên bản Home Assistant 2026.11.0 trở đi, HACS đã được đổi tên thành Marketplace. Bạn có thể truy cập Marketplace trong **Cài đặt** > **Marketplace**.
+
 [![Add Assist Canonicalizer to HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=luuquangvu&repository=assist-canonicalizer&category=integration)
 
-1. Mở **HACS** trong Home Assistant.
-2. Tìm kiếm **Assist Canonicalizer**.
-3. Nếu không tìm thấy, nhấp vào biểu tượng ba chấm ở góc trên cùng bên phải và chọn **Kho lưu trữ tùy chỉnh (Custom repositories)**.
-4. Thêm `https://github.com/luuquangvu/assist-canonicalizer` với danh mục **Bộ tích hợp (Integration)**.
-5. Tìm kiếm **Assist Canonicalizer** và nhấp vào **Tải xuống (Download)**.
-6. Khởi động lại Home Assistant.
+1. Mở **HACS** trong Home Assistant (hoặc **Marketplace** đối với Home Assistant phiên bản 2026.11.0 trở lên).
+2. Tìm kiếm **Assist Canonicalizer** và nhấp vào **Tải xuống (Download)**.
+3. Khởi động lại Home Assistant (không cần thiết đối với phiên bản 2026.11.0 trở lên).
 
 ### Cách 2: Cài đặt thủ công
 
-1. Tải bản phát hành mới nhất và giải nén các tệp.
-2. Sao chép thư mục `custom_components/assist_canonicalizer` vào thư mục `config/custom_components/` của Home Assistant.
+1. Tải bản phát hành mới nhất từ mục [Releases](https://github.com/luuquangvu/assist-canonicalizer/releases).
+2. Giải nén tệp tin và sao chép thư mục `custom_components/assist_canonicalizer` vào thư mục `<config_dir>/custom_components/` của Home Assistant.
 3. Khởi động lại Home Assistant.
 
 ---

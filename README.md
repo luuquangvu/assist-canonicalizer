@@ -67,19 +67,19 @@ People do not always phrase the same request in the same way. Word order, filler
 
 ### Option 1: Using HACS (Recommended)
 
+> [!IMPORTANT]
+> Since the Home Assistant 2026.11.0 release, HACS has been renamed Marketplace. You can access it under **Settings** > **Marketplace**.
+
 [![Add Assist Canonicalizer to HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=luuquangvu&repository=assist-canonicalizer&category=integration)
 
-1. Open **HACS** in Home Assistant.
-2. Search for **Assist Canonicalizer**.
-3. If not found, click the three dots in the top right corner and select **Custom repositories**.
-4. Add `https://github.com/luuquangvu/assist-canonicalizer` with category **Integration**.
-5. Search for **Assist Canonicalizer** and click **Download**.
-6. Restart Home Assistant.
+1. Open **HACS** in Home Assistant (or **Marketplace** for Home Assistant version 2026.11.0 and later).
+2. Search for **Assist Canonicalizer** and click **Download**.
+3. Restart Home Assistant (not required for version 2026.11.0 or later).
 
 ### Option 2: Manual Installation
 
-1. Download the latest release and extract the files.
-2. Copy the `custom_components/assist_canonicalizer` folder into your Home Assistant `config/custom_components/` directory.
+1. Download the latest release from the [Releases page](https://github.com/luuquangvu/assist-canonicalizer/releases).
+2. Extract the archive and copy the `custom_components/assist_canonicalizer` directory into your Home Assistant `<config_dir>/custom_components/` folder.
 3. Restart Home Assistant.
 
 ---
