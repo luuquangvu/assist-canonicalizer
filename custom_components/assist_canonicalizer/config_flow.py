@@ -3,15 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    import probatio as vol
-else:
-    try:
-        import probatio as vol
-    except ImportError:
-        import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.components.conversation.agent_manager import get_agent_manager
@@ -41,6 +32,7 @@ from .const import (
     NAME,
     ConfigKey,
 )
+from .ha_compat import vol
 from .utils import normalize_hotword_list
 
 

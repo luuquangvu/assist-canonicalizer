@@ -15,7 +15,6 @@ from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import area_registry, entity_registry, floor_registry
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
-from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
 
 from custom_components.assist_canonicalizer.const import (
     DATA_RUNTIME,
@@ -31,6 +30,7 @@ from custom_components.assist_canonicalizer.recognition import (
     async_observe_delegated_text,
 )
 from custom_components.assist_canonicalizer.runtime import CanonicalizerRuntime
+from tests.ha_test_harness import MockConfigEntry, async_fire_time_changed
 
 pytestmark = pytest.mark.compatibility
 

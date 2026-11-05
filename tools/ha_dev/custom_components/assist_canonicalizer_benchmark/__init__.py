@@ -9,18 +9,8 @@ import time
 from collections import Counter
 from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import orjson
-
-if TYPE_CHECKING:
-    import probatio as vol
-else:
-    try:
-        import probatio as vol
-    except ImportError:
-        import voluptuous as vol
-
 from homeassistant.components.conversation.agent_manager import async_get_agent
 from homeassistant.components.conversation.const import HOME_ASSISTANT_AGENT
 from homeassistant.components.conversation.models import ConversationInput
@@ -43,6 +33,8 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.discovery import async_load_platform
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.util.json import JsonObjectType, JsonValueType
+
+from custom_components.assist_canonicalizer.ha_compat import vol
 
 DOMAIN = "assist_canonicalizer_benchmark"
 SERVICE_REAPPLY = "reapply"
