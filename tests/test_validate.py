@@ -103,16 +103,33 @@ dependency-groups = "invalid"
     assert packages == set()
 
 
+def _mock_installed_harness_versions(
+    monkeypatch: pytest.MonkeyPatch,
+    versions: dict[str, str],
+) -> None:
+    """Mock importlib metadata for a specific set of installed packages."""
+
+    def fake_version(package: str) -> str:
+        try:
+            return versions[package]
+        except KeyError:
+            raise md.PackageNotFoundError(package) from None
+
+    monkeypatch.setattr(validate.md, "version", fake_version)
+
+
 def test_check_local_ha_harness_alignment_accepts_exact_pair(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Accept a local harness whose exact requirement matches installed HA."""
-    versions = {
-        "homeassistant": "2026.7.4",
-        "pytest-homeassistant-custom-component": "0.13.348",
-    }
-    monkeypatch.setattr(validate.md, "version", lambda package: versions[package])
+    _mock_installed_harness_versions(
+        monkeypatch,
+        {
+            "homeassistant": "2026.7.4",
+            "pytest-homeassistant-custom-component": "0.13.348",
+        },
+    )
     monkeypatch.setattr(
         validate.md,
         "requires",
@@ -123,8 +140,65 @@ def test_check_local_ha_harness_alignment_accepts_exact_pair(
 
     output = capsys.readouterr().out
     assert "STEP_INFO: local Home Assistant 2026.7.4 matches" in output
+    assert "pytest-homeassistant-custom-component 0.13.348" in output
     assert "STEP_OK: check local homeassistant/test harness alignment" in output
     assert "HARNESS_MISMATCH" not in output
+
+
+def test_check_local_ha_harness_alignment_accepts_new_harness(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Accept the replacement pytest-homeassistant package."""
+    _mock_installed_harness_versions(
+        monkeypatch,
+        {
+            "homeassistant": "2026.11.0b6",
+            "pytest-homeassistant": "2026.11.0b6",
+        },
+    )
+    requested_packages: list[str] = []
+
+    def fake_requires(package: str) -> list[str]:
+        requested_packages.append(package)
+        if package != "pytest-homeassistant":
+            raise md.PackageNotFoundError(package)
+        return ["homeassistant==2026.11.0b6", "pytest>=8.0"]
+
+    monkeypatch.setattr(
+        validate.md,
+        "requires",
+        fake_requires,
+    )
+
+    validate._check_local_ha_harness_alignment()
+
+    assert requested_packages == ["pytest-homeassistant"]
+    output = capsys.readouterr().out
+    assert "STEP_INFO: local Home Assistant 2026.11.0b6 matches" in output
+    assert "pytest-homeassistant 2026.11.0b6" in output
+    assert "HARNESS_MISMATCH" not in output
+
+
+def test_check_local_ha_harness_alignment_rejects_multiple_harnesses(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Reject environments where both harness distributions are installed."""
+    _mock_installed_harness_versions(
+        monkeypatch,
+        {
+            "homeassistant": "2026.11.0b6",
+            "pytest-homeassistant": "2026.11.0b6",
+            "pytest-homeassistant-custom-component": "0.13.375",
+        },
+    )
+
+    with pytest.raises(subprocess.CalledProcessError):
+        validate._check_local_ha_harness_alignment()
+
+    output = capsys.readouterr().out
+    assert "multiple Home Assistant test harness packages are installed" in output
 
 
 def test_check_local_ha_harness_alignment_rejects_mismatch(
@@ -132,11 +206,13 @@ def test_check_local_ha_harness_alignment_rejects_mismatch(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Reject a local harness that targets a different Home Assistant release."""
-    versions = {
-        "homeassistant": "2026.8.0b0",
-        "pytest-homeassistant-custom-component": "0.13.348",
-    }
-    monkeypatch.setattr(validate.md, "version", lambda package: versions[package])
+    _mock_installed_harness_versions(
+        monkeypatch,
+        {
+            "homeassistant": "2026.8.0b0",
+            "pytest-homeassistant-custom-component": "0.13.348",
+        },
+    )
     monkeypatch.setattr(
         validate.md,
         "requires",
@@ -168,11 +244,13 @@ def test_check_local_ha_harness_alignment_rejects_invalid_metadata(
     requirements: list[str] | None,
 ) -> None:
     """Reject missing or non-exact Home Assistant requirements from the harness."""
-    versions = {
-        "homeassistant": "2026.7.4",
-        "pytest-homeassistant-custom-component": "0.13.348",
-    }
-    monkeypatch.setattr(validate.md, "version", lambda package: versions[package])
+    _mock_installed_harness_versions(
+        monkeypatch,
+        {
+            "homeassistant": "2026.7.4",
+            "pytest-homeassistant-custom-component": "0.13.348",
+        },
+    )
     monkeypatch.setattr(validate.md, "requires", lambda _package: requirements)
 
     with pytest.raises(subprocess.CalledProcessError):

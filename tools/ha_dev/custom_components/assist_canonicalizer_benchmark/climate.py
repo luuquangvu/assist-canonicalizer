@@ -47,7 +47,7 @@ class BenchmarkClimate(ClimateEntity):
         | ClimateEntityFeature.TURN_ON
         | ClimateEntityFeature.TURN_OFF
     )
-    _attr_temperature_unit = UnitOfTemperature.CELSIUS
+    _attr_native_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_min_temp = 0.0
     _attr_max_temp = 35.0
     _attr_target_temperature_step = 0.5
@@ -56,8 +56,8 @@ class BenchmarkClimate(ClimateEntity):
         """Initialize one thermostat."""
         self._attr_name = name
         self._attr_unique_id = unique_id
-        self._attr_current_temperature = temperature
-        self._attr_target_temperature = temperature
+        self._attr_native_current_temperature = temperature
+        self._attr_native_target_temperature = temperature
         self._attr_hvac_mode = HVACMode.HEAT
         self._attr_hvac_modes = [HVACMode.HEAT, HVACMode.OFF]
         self._attr_fan_mode = FAN_AUTO
@@ -74,7 +74,7 @@ class BenchmarkClimate(ClimateEntity):
     async def async_set_temperature(self, **kwargs: Any) -> None:
         """Set the target temperature."""
         if (temperature := kwargs.get(ATTR_TEMPERATURE)) is not None:
-            self._attr_target_temperature = float(temperature)
+            self._attr_native_target_temperature = float(temperature)
         self.async_write_ha_state()
 
     @override

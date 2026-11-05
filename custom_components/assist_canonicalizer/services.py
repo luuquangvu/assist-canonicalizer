@@ -8,15 +8,7 @@ import logging
 import time
 from collections.abc import Callable, Coroutine, Iterable, Mapping, Sequence
 from functools import partial
-from typing import TYPE_CHECKING, TypedDict
-
-if TYPE_CHECKING:
-    import probatio as vol
-else:
-    try:
-        import probatio as vol
-    except ImportError:
-        import voluptuous as vol
+from typing import TypedDict
 
 from homeassistant.components.conversation.agent_manager import async_get_agent
 from homeassistant.components.conversation.const import HOME_ASSISTANT_AGENT
@@ -39,6 +31,7 @@ from .const import (
     ConfigKey,
     ServiceName,
 )
+from .ha_compat import vol
 from .indexer import CanonicalIndex
 from .normalization import normalize_text
 from .preparation import async_prepare_language_caches

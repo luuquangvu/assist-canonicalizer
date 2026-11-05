@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant.core import HassJob, HassJobType
-from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 import custom_components.assist_canonicalizer
 from custom_components.assist_canonicalizer import (
@@ -24,6 +23,7 @@ from custom_components.assist_canonicalizer import (
 )
 from custom_components.assist_canonicalizer.const import DATA_RUNTIME, DOMAIN
 from custom_components.assist_canonicalizer.runtime import CanonicalizerRuntime
+from tests.ha_test_harness import MockConfigEntry
 
 
 class _IntentSubscriptionRecorder:

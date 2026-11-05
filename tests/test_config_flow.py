@@ -1,20 +1,11 @@
 """Tests for Assist Canonicalizer config flow helpers."""
 
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
 from homeassistant.core import HomeAssistant
-from pytest_homeassistant_custom_component.common import MockConfigEntry
-
-if TYPE_CHECKING:
-    import probatio as vol
-else:
-    try:
-        import probatio as vol
-    except ImportError:
-        import voluptuous as vol
 
 import custom_components.assist_canonicalizer.config_flow as config_flow
 from custom_components.assist_canonicalizer.config_flow import (
@@ -23,6 +14,8 @@ from custom_components.assist_canonicalizer.config_flow import (
     _available_fallback_agents,
     _config_schema,
 )
+from custom_components.assist_canonicalizer.ha_compat import vol
+from tests.ha_test_harness import MockConfigEntry
 
 
 def test_available_fallback_agents_includes_conversation_entities(

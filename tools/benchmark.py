@@ -32,6 +32,10 @@ import orjson
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 try:
     from .benchmark_language_smoke import (
         ACCURACY_GATED_LANGUAGES,
@@ -51,7 +55,6 @@ except ImportError:
         fixture_fingerprint,
     )
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
 HA_DEV_DIR = REPO_ROOT / "tools" / "ha_dev"
 CONFIGURATION_PATH = HA_DEV_DIR / "configuration.yaml"
 FIXTURE_PATH = HA_DEV_DIR / "custom_components" / "assist_canonicalizer_benchmark" / "fixture.json"
@@ -78,6 +81,10 @@ BENCHMARK_DEVICE_ID = "assist-canonicalizer-benchmark-device"
 HTTP_TIMEOUT_SECONDS = 30.0
 PROCESS_TIMEOUT_SECONDS = 180.0
 RESTART_TIMEOUT_SECONDS = 30.0
+# Index rebuilds expand the full grammar and persist one cache per installed
+# language, so they routinely outlast ordinary request timeouts on large or
+# cold-cache installations.
+INDEX_REBUILD_TIMEOUT_SECONDS = 300.0
 DEPENDENCIES_WITHOUT_HA_MANIFEST_REQUIREMENTS = frozenset({"colorlog"})
 SECRET_PATTERNS = (
     (
@@ -1011,14 +1018,18 @@ async def _call_service(
     data: Mapping[str, Any] | None = None,
     *,
     return_response: bool = False,
+    timeout: aiohttp.ClientTimeout | None = None,
 ) -> Any:
     """Call one Home Assistant service through its production REST API."""
     suffix = "?return_response" if return_response else ""
+    request_kwargs: dict[str, Any] = {"json": dict(data or {})}
+    if timeout is not None:
+        request_kwargs["timeout"] = timeout
     return await _request_json(
         session,
         "POST",
         f"/api/services/{domain}/{service}{suffix}",
-        json=dict(data or {}),
+        **request_kwargs,
     )
 
 
@@ -1122,6 +1133,7 @@ async def _prepare_languages(
 ) -> dict[str, Any]:
     """Build each case language index before warmup and measurement."""
     prepared: dict[str, Any] = {}
+    rebuild_timeout = aiohttp.ClientTimeout(total=INDEX_REBUILD_TIMEOUT_SECONDS)
     for language in sorted(set(languages)):
         response = await _call_service(
             session,
@@ -1129,6 +1141,7 @@ async def _prepare_languages(
             "rebuild_index",
             {"language": language},
             return_response=True,
+            timeout=rebuild_timeout,
         )
         if not isinstance(response, dict):
             raise BenchmarkError(f"Index rebuild for {language} returned no response")

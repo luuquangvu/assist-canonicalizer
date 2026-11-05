@@ -264,10 +264,10 @@ def test_stale_deps_ignore_unpinned_harness_versions(
     assert "pytest 8.3.4" not in output
 
 
-def test_missing_required_deps_request_full_install(
+def test_missing_harness_is_tracked_by_pinned_dependencies(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Missing harness packages should still make the compatibility venv incomplete."""
+    """A missing harness is detected through its pinned dependency version."""
 
     def fake_versions(_python_bin: Path, _pinned_versions: dict[str, str]) -> dict[str, str]:
         return {
@@ -282,12 +282,20 @@ def test_missing_required_deps_request_full_install(
         fake_versions,
     )
 
-    missing_deps = validate_compatibility._missing_required_test_deps(
-        Path("python"),
-        TEST_DEP_VERSIONS,
+    assert (
+        validate_compatibility._missing_required_test_deps(
+            Path("python"),
+            TEST_DEP_VERSIONS,
+        )
+        == ()
     )
-
-    assert missing_deps == ("pytest-homeassistant-custom-component",)
+    assert validate_compatibility._stale_test_deps(
+        Path("python"),
+        {
+            **TEST_DEP_VERSIONS,
+            "pytest-homeassistant-custom-component": "0.13.190",
+        },
+    ) == ("pytest-homeassistant-custom-component==0.13.190",)
 
 
 def test_missing_dep_uses_targeted_refresh(
@@ -329,14 +337,27 @@ def test_required_deps_use_exact_intents_version() -> None:
     assert "home-assistant-intents" not in deps
 
 
-def test_required_deps_use_exact_harness_version() -> None:
+@pytest.mark.parametrize(
+    ("harness_package", "harness_version"),
+    [
+        ("pytest-homeassistant-custom-component", "0.13.190"),
+        ("pytest-homeassistant", "2026.11.0"),
+    ],
+)
+def test_required_deps_use_exact_harness_version(
+    harness_package: str,
+    harness_version: str,
+) -> None:
     """The Home Assistant test harness should use the matrix's exact version."""
-    deps = validate_compatibility._required_test_deps(
-        {"pytest-homeassistant-custom-component": "0.13.190"}
-    )
+    deps = validate_compatibility._required_test_deps({harness_package: harness_version})
 
-    assert "pytest-homeassistant-custom-component==0.13.190" in deps
-    assert "pytest-homeassistant-custom-component" not in deps
+    harness_deps = [
+        dep
+        for dep in deps
+        if validate_compatibility.normalize_package_name(dep.split("==")[0])
+        in validate_compatibility._TEST_HARNESS_PACKAGES
+    ]
+    assert harness_deps == [f"{harness_package}=={harness_version}"]
 
 
 def test_required_deps_pin_assist_runtime_packages() -> None:
@@ -891,7 +912,9 @@ def _mock_pypi_responses(
     ha_payload: str | dict[str, object],
     harness_payload: str | dict[str, object],
     version_payloads: dict[str, str | dict[str, object]] | None = None,
-) -> None:
+    new_harness_payload: str | dict[str, object] | None = None,
+    new_harness_version_payloads: dict[str, str | dict[str, object]] | None = None,
+) -> list[str]:
     """Mock PyPI remote fetches for Home Assistant and test harness metadata."""
     responses: dict[str, str] = {
         validate_compatibility._PYPI_HA_JSON_URL: (
@@ -904,6 +927,13 @@ def _mock_pypi_responses(
             if isinstance(harness_payload, dict)
             else harness_payload
         ),
+        validate_compatibility._PYPI_NEW_TEST_HARNESS_JSON_URL: (
+            validate_compatibility.orjson.dumps(
+                new_harness_payload if new_harness_payload is not None else {"releases": {}}
+            ).decode()
+            if isinstance(new_harness_payload, (dict, type(None)))
+            else new_harness_payload
+        ),
     }
     if version_payloads:
         for ver, payload in version_payloads.items():
@@ -915,13 +945,27 @@ def _mock_pypi_responses(
                 if isinstance(payload, dict)
                 else payload
             )
+    if new_harness_version_payloads:
+        for ver, payload in new_harness_version_payloads.items():
+            url = validate_compatibility._PYPI_NEW_TEST_HARNESS_VERSION_JSON_URL_TEMPLATE.format(
+                version=ver
+            )
+            responses[url] = (
+                validate_compatibility.orjson.dumps(payload).decode()
+                if isinstance(payload, dict)
+                else payload
+            )
+
+    fetched_urls: list[str] = []
 
     def fake_fetch(url: str) -> str:
+        fetched_urls.append(url)
         if url in responses:
             return responses[url]
         raise AssertionError(f"Unexpected URL fetched: {url}")
 
     monkeypatch.setattr(validate_compatibility, "_fetch_remote_text", fake_fetch)
+    return fetched_urls
 
 
 def test_latest_matched_pair_includes_ha_beta_and_reports_newer_unmatched_ha(
@@ -950,6 +994,7 @@ def test_latest_matched_pair_includes_ha_beta_and_reports_newer_unmatched_ha(
 
     assert validate_compatibility._get_latest_matched_pair() == {
         "ha_ver": "2026.8.0b0",
+        "harness_package": "pytest-homeassistant-custom-component",
         "harness_ver": "0.13.349",
         "absolute_latest_ha_ver": "2026.8.0b1",
     }
@@ -983,6 +1028,7 @@ def test_latest_matched_pair_fetches_version_specific_metadata_when_root_info_la
 
     assert validate_compatibility._get_latest_matched_pair() == {
         "ha_ver": "2026.8.0",
+        "harness_package": "pytest-homeassistant-custom-component",
         "harness_ver": "0.13.349",
         "absolute_latest_ha_ver": "2026.8.0",
     }
@@ -1003,6 +1049,211 @@ def test_published_versions_descending_sorts_semantically_not_lexicographically(
         payload, "pytest-homeassistant-custom-component"
     )
     assert versions == ["0.13.100", "0.13.99", "0.13.10", "0.13.9", "0.13.2"]
+
+
+def _harness_payload_with_lagging_root(
+    root_ha_version: str,
+    root_version: str = "0.13.376",
+) -> dict[str, object]:
+    """Return harness metadata whose root info lags behind its newest release."""
+    return {
+        "info": {
+            "version": root_version,
+            "requires_dist": [f"homeassistant=={root_ha_version}"],
+        },
+        "releases": {
+            "0.13.375": [{"filename": "older-harness.whl"}],
+            "0.13.376": [{"filename": "newer-harness.whl"}],
+        },
+    }
+
+
+def _mock_harness_version_lookup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    harness_payload: dict[str, object],
+    failed_version: str,
+) -> None:
+    """Mock a harness index whose version-specific metadata lookup fails."""
+    failed_version_url = validate_compatibility._PYPI_TEST_HARNESS_VERSION_JSON_URL_TEMPLATE.format(
+        version=failed_version
+    )
+
+    def fake_fetch(url: str) -> str:
+        if url == validate_compatibility._PYPI_TEST_HARNESS_JSON_URL:
+            return validate_compatibility.orjson.dumps(harness_payload).decode()
+        if url == failed_version_url:
+            raise OSError("transient PyPI failure")
+        raise AssertionError(f"Unexpected URL fetched: {url}")
+
+    monkeypatch.setattr(validate_compatibility, "_fetch_remote_text", fake_fetch)
+
+
+def _assert_matched_pair_lookup_fails(ha_releases: dict[str, object]) -> None:
+    """Assert candidate metadata lookup failures surface through the resolver."""
+    with pytest.raises(ValueError, match="transient PyPI failure"):
+        validate_compatibility._matched_pair_for_package(
+            validate_compatibility._LEGACY_TEST_HARNESS_PACKAGE,
+            ha_releases,
+        )
+
+
+def test_matched_pair_treats_missing_harness_releases_as_no_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Treat a harness package with no published releases as an ordinary no-match."""
+    _mock_pypi_responses(
+        monkeypatch,
+        ha_payload={"releases": {"2026.10.4": [{"filename": "ha.whl"}]}},
+        harness_payload={"info": {"version": "0.13.375"}, "releases": {}},
+    )
+
+    assert (
+        validate_compatibility._matched_pair_for_package(
+            validate_compatibility._LEGACY_TEST_HARNESS_PACKAGE,
+            {"2026.10.4": [{"filename": "ha.whl"}]},
+        )
+        is None
+    )
+
+
+def test_matched_pair_propagates_malformed_harness_releases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Propagate malformed harness release metadata instead of treating it as no match."""
+    _mock_pypi_responses(
+        monkeypatch,
+        ha_payload={"releases": {"2026.10.4": [{"filename": "ha.whl"}]}},
+        harness_payload='{"info": {"version": "0.13.375"}, "releases": []}',
+    )
+
+    with pytest.raises(ValueError, match="has no releases object"):
+        validate_compatibility._matched_pair_for_package(
+            validate_compatibility._LEGACY_TEST_HARNESS_PACKAGE,
+            {"2026.10.4": [{"filename": "ha.whl"}]},
+        )
+
+
+def test_matched_pair_prefers_newest_matching_ha_over_newest_harness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prefer the greatest matching Home Assistant version within the candidate window."""
+    ha_releases: dict[str, object] = {
+        "2026.9.0": [{"filename": "old-ha.whl"}],
+        "2026.10.0": [{"filename": "new-ha.whl"}],
+    }
+    _mock_pypi_responses(
+        monkeypatch,
+        ha_payload={"releases": ha_releases},
+        harness_payload=_harness_payload_with_lagging_root("2026.9.0"),
+        version_payloads={
+            "0.13.375": {
+                "info": {
+                    "version": "0.13.375",
+                    "requires_dist": ["homeassistant==2026.10.0"],
+                }
+            }
+        },
+    )
+
+    assert validate_compatibility._matched_pair_for_package(
+        validate_compatibility._LEGACY_TEST_HARNESS_PACKAGE,
+        ha_releases,
+    ) == ("2026.10.0", "0.13.375")
+
+
+def test_matched_pair_stops_after_newest_ha_for_package(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stop scanning once the newest Home Assistant release for the package is matched."""
+    ha_releases: dict[str, object] = {"2026.10.4": [{"filename": "ha.whl"}]}
+    fetched_urls = _mock_pypi_responses(
+        monkeypatch,
+        ha_payload={"releases": ha_releases},
+        harness_payload=_harness_payload_with_lagging_root("2026.10.4"),
+    )
+
+    assert validate_compatibility._matched_pair_for_package(
+        validate_compatibility._LEGACY_TEST_HARNESS_PACKAGE,
+        ha_releases,
+    ) == ("2026.10.4", "0.13.376")
+    older_version_url = validate_compatibility._PYPI_TEST_HARNESS_VERSION_JSON_URL_TEMPLATE.format(
+        version="0.13.375"
+    )
+    assert older_version_url not in fetched_urls
+
+
+def test_matched_pair_ignores_failed_lookup_for_later_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unavailable older candidate must not invalidate an already matched pair."""
+    ha_releases: dict[str, object] = {
+        "2026.9.0": [{"filename": "old-ha.whl"}],
+        "2026.10.0": [{"filename": "new-ha.whl"}],
+    }
+    _mock_harness_version_lookup_failure(
+        monkeypatch,
+        _harness_payload_with_lagging_root("2026.9.0"),
+        "0.13.375",
+    )
+
+    assert validate_compatibility._matched_pair_for_package(
+        validate_compatibility._LEGACY_TEST_HARNESS_PACKAGE,
+        ha_releases,
+    ) == ("2026.9.0", "0.13.376")
+
+
+def test_matched_pair_surfaces_candidate_lookup_failure_without_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Surface candidate lookup failures when no valid pair was found."""
+    ha_releases: dict[str, object] = {"2026.8.0": [{"filename": "ha.whl"}]}
+    _mock_harness_version_lookup_failure(
+        monkeypatch,
+        _harness_payload_with_lagging_root("2026.9.0"),
+        "0.13.375",
+    )
+
+    _assert_matched_pair_lookup_fails(ha_releases)
+
+
+def test_matched_pair_propagates_candidate_error_before_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not fall back when the newest candidate metadata cannot be fetched."""
+    ha_releases: dict[str, object] = {"2026.9.0": [{"filename": "ha.whl"}]}
+    _mock_harness_version_lookup_failure(
+        monkeypatch,
+        _harness_payload_with_lagging_root("2026.9.0", root_version="0.13.375"),
+        "0.13.376",
+    )
+
+    _assert_matched_pair_lookup_fails(ha_releases)
+
+
+def test_latest_matched_pair_surfaces_unusable_harness_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Surface harness metadata errors instead of reporting publication lag."""
+    _mock_pypi_responses(
+        monkeypatch,
+        ha_payload={"releases": {"2026.10.4": [{"filename": "ha.whl"}]}},
+        harness_payload={
+            "info": {
+                "version": "0.13.375",
+                "requires_dist": ["homeassistant>=2026.10.4"],
+            },
+            "releases": {"0.13.375": [{"filename": "harness.whl"}]},
+        },
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"Failed to resolve latest matched harness-backed Home Assistant pair: "
+            r".*must pin Home Assistant with one exact version"
+        ),
+    ):
+        validate_compatibility._get_latest_matched_pair()
 
 
 def test_latest_matched_pair_bounds_per_release_pypi_requests(
@@ -1027,12 +1278,14 @@ def test_latest_matched_pair_bounds_per_release_pypi_requests(
         if "/pytest-homeassistant-custom-component/" in url:
             fetched_version_urls.append(url)
             return '{"info": {"version": "0.13.999", "requires_dist": ["homeassistant==2026.6.0"]}}'
+        if url == validate_compatibility._PYPI_NEW_TEST_HARNESS_JSON_URL:
+            return '{"releases": {}}'
         raise AssertionError(f"Unexpected URL fetched: {url}")
 
     monkeypatch.setattr(validate_compatibility, "_fetch_remote_text", fake_fetch)
 
     with pytest.raises(
-        ValueError, match=r"No matching test harness found among \d+ checked releases"
+        ValueError, match="Failed to resolve latest matched harness-backed Home Assistant pair"
     ):
         validate_compatibility._get_latest_matched_pair()
 
@@ -1082,6 +1335,7 @@ def test_prepare_latest_pair_reports_harness_lag(
         "_get_latest_matched_pair",
         lambda: validate_compatibility.LatestMatchedPair(
             ha_ver="2026.8.0b0",
+            harness_package="pytest-homeassistant-custom-component",
             harness_ver="0.13.349",
             absolute_latest_ha_ver="2026.8.0b1",
         ),
@@ -1107,7 +1361,7 @@ def test_verify_harness_pair_rejects_wrong_target(
     monkeypatch.setattr(
         validate_compatibility,
         "_get_installed_harness_pair",
-        lambda _python: ("0.13.349", "2026.8.0b0"),
+        lambda _python: ("pytest-homeassistant-custom-component", "0.13.349", "2026.8.0b0"),
     )
 
     assert not validate_compatibility._verify_harness_pair(
@@ -1128,7 +1382,7 @@ def test_verify_harness_pair_accepts_exact_target(
     monkeypatch.setattr(
         validate_compatibility,
         "_get_installed_harness_pair",
-        lambda _python: ("0.13.349", "2026.8.0b0"),
+        lambda _python: ("pytest-homeassistant-custom-component", "0.13.349", "2026.8.0b0"),
     )
 
     assert validate_compatibility._verify_harness_pair(
@@ -1136,7 +1390,54 @@ def test_verify_harness_pair_accepts_exact_target(
         "2026.8.0b0",
         "0.13.349",
     )
-    assert "STEP_OK: harness 0.13.349 matches Home Assistant 2026.8.0b0" in capsys.readouterr().out
+    assert (
+        "STEP_OK: pytest-homeassistant-custom-component 0.13.349 matches Home Assistant 2026.8.0b0"
+    ) in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("installed_package", "expected_success", "expected_fragments"),
+    [
+        (
+            "pytest-homeassistant",
+            True,
+            ("STEP_OK: pytest-homeassistant 2026.11.0b6 matches Home Assistant 2026.11.0b6",),
+        ),
+        (
+            "pytest-homeassistant-custom-component",
+            False,
+            (
+                "expected harness package pytest-homeassistant",
+                "found pytest-homeassistant-custom-component",
+            ),
+        ),
+    ],
+)
+def test_verify_harness_pair_requires_new_harness_for_new_home_assistant(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    installed_package: str,
+    expected_success: bool,
+    expected_fragments: tuple[str, ...],
+) -> None:
+    """The replacement harness is required for Home Assistant 2026.11 and newer."""
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_get_installed_harness_pair",
+        lambda _python: (installed_package, "2026.11.0b6", "2026.11.0b6"),
+    )
+
+    assert (
+        validate_compatibility._verify_harness_pair(
+            Path("python"),
+            "2026.11.0b6",
+            "2026.11.0b6",
+        )
+        is expected_success
+    )
+    output = capsys.readouterr().out
+    for fragment in expected_fragments:
+        assert fragment in output
 
 
 def test_verify_harness_pair_accepts_pep440_equivalent_versions(
@@ -1146,7 +1447,11 @@ def test_verify_harness_pair_accepts_pep440_equivalent_versions(
     monkeypatch.setattr(
         validate_compatibility,
         "_get_installed_harness_pair",
-        lambda _python: ("0.13.349.0", "2026.08.0b0"),
+        lambda _python: (
+            "pytest-homeassistant-custom-component",
+            "0.13.349.0",
+            "2026.08.0b0",
+        ),
     )
 
     assert validate_compatibility._verify_harness_pair(
@@ -1203,7 +1508,7 @@ def test_latest_matched_pair_rejects_unpublished_harness_target(
     )
 
     with pytest.raises(
-        ValueError, match=r"No matching test harness found among \d+ checked releases"
+        ValueError, match="Failed to resolve latest matched harness-backed Home Assistant pair"
     ):
         validate_compatibility._get_latest_matched_pair()
 
@@ -1237,9 +1542,150 @@ def test_latest_matched_pair_falls_back_when_newest_harness_targets_unpublished_
 
     assert validate_compatibility._get_latest_matched_pair() == {
         "ha_ver": "2026.9.0",
+        "harness_package": "pytest-homeassistant-custom-component",
         "harness_ver": "0.13.355",
         "absolute_latest_ha_ver": "2026.9.0",
     }
+
+
+def test_latest_matched_pair_fails_when_expected_harness_lookup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail instead of downgrading when the newest HA harness lookup fails."""
+
+    def fake_fetch(url: str) -> str:
+        if url == validate_compatibility._PYPI_HA_JSON_URL:
+            return (
+                '{"releases": {'
+                '"2026.10.4": [{"filename": "stable.whl"}],'
+                '"2026.11.0b6": [{"filename": "beta.whl"}]'
+                "}}"
+            )
+        if url == validate_compatibility._PYPI_TEST_HARNESS_JSON_URL:
+            return (
+                '{"info": {"version": "0.13.375", '
+                '"requires_dist": ["homeassistant==2026.10.4"]}, '
+                '"releases": {"0.13.375": [{"filename": "legacy.whl"}]}}'
+            )
+        if url == validate_compatibility._PYPI_NEW_TEST_HARNESS_JSON_URL:
+            raise OSError("new harness index unavailable")
+        raise AssertionError(f"Unexpected URL fetched: {url}")
+
+    monkeypatch.setattr(validate_compatibility, "_fetch_remote_text", fake_fetch)
+
+    with pytest.raises(
+        ValueError,
+        match=r"Failed to resolve latest matched.*without downgrading 2026\.11\.0b6",
+    ):
+        validate_compatibility._get_latest_matched_pair()
+
+
+def test_latest_matched_pair_treats_missing_new_harness_releases_as_lag(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Fall back for publication lag, but not for a failed newest-harness lookup."""
+    _mock_pypi_responses(
+        monkeypatch,
+        ha_payload={
+            "releases": {
+                "2026.10.4": [{"filename": "stable.whl"}],
+                "2026.11.0b6": [{"filename": "beta.whl"}],
+            }
+        },
+        harness_payload={
+            "info": {
+                "version": "0.13.375",
+                "requires_dist": ["homeassistant==2026.10.4"],
+            },
+            "releases": {"0.13.375": [{"filename": "legacy.whl"}]},
+        },
+        new_harness_payload={"releases": {}},
+    )
+
+    assert validate_compatibility._get_latest_matched_pair() == {
+        "ha_ver": "2026.10.4",
+        "harness_package": "pytest-homeassistant-custom-component",
+        "harness_ver": "0.13.375",
+        "absolute_latest_ha_ver": "2026.11.0b6",
+    }
+    assert "STEP_WARNING" not in capsys.readouterr().err
+
+
+def test_latest_matched_pair_selects_new_harness_for_new_ha(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The moving gate should prefer the newer Home Assistant/new harness pair."""
+    fetched_urls = _mock_pypi_responses(
+        monkeypatch,
+        ha_payload={
+            "releases": {
+                "2026.10.4": [{"filename": "legacy.whl"}],
+                "2026.11.0b6": [{"filename": "new.whl"}],
+                "2026.11.0": [{"filename": "unmatched.whl"}],
+            }
+        },
+        harness_payload={
+            "info": {
+                "version": "0.13.375",
+                "requires_dist": ["homeassistant==2026.10.4"],
+            },
+            "releases": {"0.13.375": [{"filename": "legacy-harness.whl"}]},
+        },
+        new_harness_payload={
+            "info": {
+                "version": "2026.11.0b5",
+                "requires_dist": ["homeassistant==2026.11.0b5"],
+            },
+            "releases": {"2026.11.0b6": [{"filename": "new-harness.whl"}]},
+        },
+        new_harness_version_payloads={
+            "2026.11.0b6": {
+                "info": {
+                    "version": "2026.11.0b6",
+                    "requires_dist": ["homeassistant==2026.11.0b6"],
+                }
+            }
+        },
+    )
+
+    assert validate_compatibility._get_latest_matched_pair() == {
+        "ha_ver": "2026.11.0b6",
+        "harness_package": "pytest-homeassistant",
+        "harness_ver": "2026.11.0b6",
+        "absolute_latest_ha_ver": "2026.11.0",
+    }
+    assert (
+        validate_compatibility._PYPI_NEW_TEST_HARNESS_VERSION_JSON_URL_TEMPLATE.format(
+            version="2026.11.0b6"
+        )
+        in fetched_urls
+    )
+
+
+@pytest.mark.parametrize(
+    "resolution_flag",
+    ["--resolve-harness-package", "--resolve-harness-dependency"],
+)
+def test_main_resolves_harness_for_ha(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    resolution_flag: str,
+) -> None:
+    """The CLI should expose harness resolution for CI matrix rows."""
+    monkeypatch.setattr(
+        validate_compatibility.sys,
+        "argv",
+        [
+            "validate_compatibility.py",
+            resolution_flag,
+            "2026.11.0",
+        ],
+    )
+
+    validate_compatibility.main()
+
+    assert capsys.readouterr().out == "pytest-homeassistant\n"
 
 
 def test_compatibility_pytest_args_skip_current_intents_marker() -> None:
@@ -1320,6 +1766,8 @@ def test_repository_matrix_tracks_home_assistant_api_transitions() -> None:
         "2025.10.4",  # Satellite-aware ConversationInput.
         "2026.3.4",  # Dynamic intent subscriptions and Python 3.14.
         "2026.4.4",  # Entity-registry alias helper.
+        "2026.10.4",  # Last legacy pytest-homeassistant-custom-component release.
+        "2026.11.0",  # First pytest-homeassistant release.
         "latest",
     ]
 
@@ -1487,7 +1935,7 @@ def test_main_outputs_required_test_dependency_metadata(
         "optional_homeassistant_constraint_packages": list(
             validate_compatibility._OPTIONAL_HA_CONSTRAINED_TEST_DEPS
         ),
-        "test_harness_package": validate_compatibility._TEST_HARNESS_PACKAGE,
+        "test_harness_packages": list(validate_compatibility._TEST_HARNESS_PACKAGES),
     }
 
 
@@ -1872,6 +2320,59 @@ def test_resolve_test_dependency_versions_includes_gazetteer_when_present(
         **ASSIST_RUNTIME_VERSIONS,
         "gazetteer-matcher": "1.0.0",
     }
+
+
+def test_resolve_test_dependency_versions_uses_new_harness_for_new_ha(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Home Assistant 2026.11 and newer should use pytest-homeassistant."""
+
+    def fake_required_version(_ha_ver: str, package: str) -> str:
+        if package in ASSIST_RUNTIME_VERSIONS:
+            return ASSIST_RUNTIME_VERSIONS[package]
+        raise validate_compatibility.PackageConstraintNotFoundError(package)
+
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_get_required_package_version",
+        fake_required_version,
+    )
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_get_home_assistant_intents_version",
+        lambda _ha_ver: "2026.11.0",
+    )
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_get_hassil_version",
+        lambda _ha_ver: "3.14.0",
+    )
+
+    assert validate_compatibility._resolve_test_dependency_versions(
+        "2026.11.0",
+        "2026.11.0",
+    ) == {
+        "home-assistant-intents": "2026.11.0",
+        "hassil": "3.14.0",
+        "pytest-homeassistant": "2026.11.0",
+        **ASSIST_RUNTIME_VERSIONS,
+    }
+
+
+@pytest.mark.parametrize(
+    ("ha_version", "expected_package"),
+    [
+        ("2024.12.0", "pytest-homeassistant-custom-component"),
+        ("2026.10.4", "pytest-homeassistant-custom-component"),
+        ("2026.11.0", "pytest-homeassistant"),
+    ],
+)
+def test_test_harness_package_for_ha(
+    ha_version: str,
+    expected_package: str,
+) -> None:
+    """The harness package should follow the Home Assistant release transition."""
+    assert validate_compatibility._test_harness_package_for_ha(ha_version) == expected_package
 
 
 def test_get_optional_package_version_handles_missing_package(

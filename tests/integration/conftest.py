@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.ha_test_harness import HARNESS_MODULE
+
 
 @pytest.fixture(autouse=True)
 def isolate_test_config_dir(
@@ -15,10 +17,7 @@ def isolate_test_config_dir(
     def _get_test_config_dir(*parts: str) -> str:
         return str(tmp_path.joinpath(*parts))
 
-    monkeypatch.setattr(
-        "pytest_homeassistant_custom_component.common.get_test_config_dir",
-        _get_test_config_dir,
-    )
+    monkeypatch.setattr(HARNESS_MODULE, "get_test_config_dir", _get_test_config_dir)
 
 
 @pytest.fixture
