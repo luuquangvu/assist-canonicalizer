@@ -23,8 +23,9 @@ Trong thực tế, cùng một yêu cầu có thể được diễn đạt theo 
   - [Mục lục](#mục-lục)
   - [Tính năng nổi bật](#tính-năng-nổi-bật)
   - [Cài đặt](#cài-đặt)
-    - [Cách 1: Sử dụng HACS (Khuyến nghị)](#cách-1-sử-dụng-hacs-khuyến-nghị)
-    - [Cách 2: Cài đặt thủ công](#cách-2-cài-đặt-thủ-công)
+    - [Cách 1: Sử dụng Marketplace (Khuyến nghị)](#cách-1-sử-dụng-marketplace-khuyến-nghị)
+    - [Cách 2: Sử dụng HACS (Phiên bản cũ)](#cách-2-sử-dụng-hacs-phiên-bản-cũ)
+    - [Cách 3: Cài đặt thủ công](#cách-3-cài-đặt-thủ-công)
   - [Thiết lập và cấu hình](#thiết-lập-và-cấu-hình)
   - [Cách hoạt động](#cách-hoạt-động)
   - [Kết quả đo kiểm](#kết-quả-đo-kiểm)
@@ -65,18 +66,31 @@ Trong thực tế, cùng một yêu cầu có thể được diễn đạt theo 
 
 ## Cài đặt
 
-### Cách 1: Sử dụng HACS (Khuyến nghị)
+### Cách 1: Sử dụng Marketplace (Khuyến nghị)
 
-> [!IMPORTANT]
-> Từ phiên bản Home Assistant 2026.11.0 trở đi, HACS đã được đổi tên thành Marketplace. Bạn có thể truy cập Marketplace trong **Cài đặt** > **Marketplace**.
+> [!NOTE]
+> Marketplace được tích hợp sẵn trong Home Assistant 2026.11.0 trở lên. Không cần cài đặt HACS riêng.
 
-[![Add Assist Canonicalizer to HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=luuquangvu&repository=assist-canonicalizer&category=integration)
+[![Mở Assist Canonicalizer trong Marketplace](https://my.home-assistant.io/badges/marketplace_repository.svg)](https://my.home-assistant.io/redirect/marketplace_repository/?owner=luuquangvu&repository=assist-canonicalizer&category=integration)
 
-1. Mở **HACS** trong Home Assistant (hoặc **Marketplace** đối với Home Assistant phiên bản 2026.11.0 trở lên).
-2. Tìm kiếm **Assist Canonicalizer** và nhấp vào **Tải xuống (Download)**.
-3. Khởi động lại Home Assistant (không cần thiết đối với phiên bản 2026.11.0 trở lên).
+1. Trong Home Assistant, vào **Cài đặt** > **Marketplace**.
+2. Tìm kiếm **Assist Canonicalizer** và chọn tiện ích.
+3. Nhấp **Cài đặt (Install)** và xác nhận cài đặt.
+4. Tiện ích được kích hoạt ngay; không cần khởi động lại Home Assistant trên phiên bản 2026.11.0 trở lên.
 
-### Cách 2: Cài đặt thủ công
+### Cách 2: Sử dụng HACS (Phiên bản cũ)
+
+> [!NOTE]
+> Chỉ sử dụng cách này nếu bạn vẫn đang dùng Home Assistant 2026.10.x trở về trước. Từ phiên bản 2026.11.0, HACS đã được thay thế bằng Marketplace tích hợp sẵn; trên các phiên bản này, liên kết bên dưới sẽ mở Marketplace.
+
+[![Thêm Assist Canonicalizer vào HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=luuquangvu&repository=assist-canonicalizer&category=integration)
+
+1. Đảm bảo [HACS](https://hacs.xyz/) đã được cài đặt.
+2. Mở **HACS** trong Home Assistant.
+3. Tìm kiếm **Assist Canonicalizer** và nhấp **Tải xuống (Download)**.
+4. Khởi động lại Home Assistant.
+
+### Cách 3: Cài đặt thủ công
 
 1. Tải bản phát hành mới nhất từ mục [Releases](https://github.com/luuquangvu/assist-canonicalizer/releases).
 2. Giải nén tệp tin và sao chép thư mục `custom_components/assist_canonicalizer` vào thư mục `<config_dir>/custom_components/` của Home Assistant.

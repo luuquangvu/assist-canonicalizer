@@ -292,8 +292,13 @@ async def test_compatibility_registry_and_observation(
     default_agent = conversation.agent_manager.async_get_agent(hass, HOME_ASSISTANT_AGENT)
     assert default_agent is not None
 
-    spy_recognize_intent = AsyncMock(wraps=cast(Any, default_agent).async_recognize_intent)
-    with patch.object(default_agent, "async_recognize_intent", spy_recognize_intent):
+    intent_recognizer_name = (
+        "async_recognize_intents"
+        if hasattr(default_agent, "async_recognize_intents")
+        else "async_recognize_intent"
+    )
+    spy_recognize_intent = AsyncMock(wraps=getattr(default_agent, intent_recognizer_name))
+    with patch.object(default_agent, intent_recognizer_name, spy_recognize_intent):
         observation = await async_observe_delegated_text(hass, conv_input, delegated_text)
 
     assert spy_recognize_intent.called

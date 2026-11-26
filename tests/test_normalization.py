@@ -5,6 +5,7 @@ import pytest
 from custom_components.assist_canonicalizer.normalization import (
     char_ngrams_normalized,
     clear_normalization_caches,
+    fold_case,
     normalize_text,
     normalize_text_no_diacritics,
     tokenize_normalized,
@@ -51,6 +52,31 @@ def test_normalize_text_no_diacritics() -> None:
 def test_normalize_text_applies_nfkc_casefold_punctuation_and_spaces() -> None:
     """Normalize text without language-specific rewriting."""
     assert normalize_text("  Bật, ĐÈN!!  Phòng   Khách  ") == "bật đèn phòng khách"
+
+
+def test_normalize_text_folds_turkish_i_like_hassil() -> None:
+    """Fold Turkish dotted and dotless I before casefold, matching HassIL."""
+    assert normalize_text("I\u015f\u0131k") == normalize_text("\u0131\u015f\u0131k") == "i\u015fik"
+    assert normalize_text("\u0130ki") == normalize_text("iki") == "iki"
+    assert normalize_text("ALTI") == normalize_text("alt\u0131") == "alti"
+    assert normalize_text("\u0131") == normalize_text("\u0130") == "i"
+
+
+def test_fold_case_matches_installed_hassil() -> None:
+    """Fail when HassIL changes fold_case without the local rule being updated."""
+    hassil_util = pytest.importorskip("hassil.util")
+    hassil_fold_case = getattr(hassil_util, "fold_case", None)
+    if hassil_fold_case is None:
+        pytest.skip("installed HassIL does not expose fold_case")
+    samples = (
+        "I\u015f\u0131k \u0131\u015f\u0131k \u0130ki iki ALTI alt\u0131",
+        "Straße STRASSE dreißig dreissig",
+        "Bật ĐÈN Phòng Khách",
+        "ABC abc",
+        "\u0130stanbul I\u011eDIR \u0131\u011fd\u0131r",
+    )
+    for text in samples:
+        assert fold_case(text) == hassil_fold_case(text)
 
 
 @pytest.mark.parametrize(

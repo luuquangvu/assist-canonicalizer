@@ -8,6 +8,7 @@ dependencies = ["homeassistant>=2026.11.0", "rapidfuzz>=3.14.2"]
 
 [dependency-groups]
 dev = [
+  "aiohasupervisor",
   "gazetteer-matcher",
   "hassil",
   "home-assistant-intents",

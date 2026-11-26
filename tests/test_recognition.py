@@ -108,6 +108,68 @@ async def test_recognition_forwards_context_and_observes_intent_without_executio
 
 
 @pytest.mark.asyncio
+async def test_recognition_supports_plural_intent_api() -> None:
+    """Use the newest recognizer API and observe the best ordered result."""
+    user_input = _conversation_input()
+    recognize_intents = AsyncMock(
+        return_value=[
+            SimpleNamespace(
+                intent=SimpleNamespace(name="HassTurnOn"),
+                entities_list=(SimpleNamespace(name="name", value="Living Room Lamp"),),
+                unmatched_entities_list=(),
+                intent_data=SimpleNamespace(requires_context=None, excludes_context=None),
+            ),
+            SimpleNamespace(
+                intent=SimpleNamespace(name="HassTurnOff"),
+                entities_list=(),
+                unmatched_entities_list=(),
+                intent_data=SimpleNamespace(requires_context=None, excludes_context=None),
+            ),
+        ]
+    )
+    default_agent = SimpleNamespace(
+        async_recognize_sentence_trigger=AsyncMock(return_value=None),
+        async_recognize_intents=recognize_intents,
+    )
+
+    with patch(
+        "custom_components.assist_canonicalizer.recognition.async_get_agent",
+        return_value=default_agent,
+    ):
+        observation = await async_observe_delegated_text(
+            cast(HomeAssistant, object()), user_input, "turn on Living Room Lamp"
+        )
+
+    assert observation.kind is RecognitionKind.INTENT
+    assert observation.intent_name == "HassTurnOn"
+    assert dict(observation.slots) == {"name": "Living Room Lamp"}
+    recognize_intents.assert_awaited_once()
+    await_args = recognize_intents.await_args
+    assert await_args is not None
+    assert await_args.args[0].text == "turn on Living Room Lamp"
+
+
+@pytest.mark.asyncio
+async def test_recognition_plural_intent_api_empty_result_is_no_match() -> None:
+    """Treat an empty ordered result list from the newest API as no match."""
+    default_agent = SimpleNamespace(
+        async_recognize_sentence_trigger=AsyncMock(return_value=None),
+        async_recognize_intents=AsyncMock(return_value=[]),
+    )
+
+    with patch(
+        "custom_components.assist_canonicalizer.recognition.async_get_agent",
+        return_value=default_agent,
+    ):
+        observation = await async_observe_delegated_text(
+            cast(HomeAssistant, object()), _conversation_input(), "turn on lamp"
+        )
+
+    assert observation.kind is RecognitionKind.NO_MATCH
+    assert not observation.executable
+
+
+@pytest.mark.asyncio
 async def test_recognition_sorts_duplicate_slots_without_comparing_values() -> None:
     """Keep duplicate slot names with heterogeneous values in stable name order."""
     default_agent = SimpleNamespace(

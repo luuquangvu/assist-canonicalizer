@@ -2234,6 +2234,23 @@ def _record_measured_case_run(
         execution.failures.extend(f"measure[{phase_index}]: {failure}" for failure in run.failures)
 
 
+def _case_request_id(
+    label: str,
+    case: BenchmarkCase,
+    phase: str,
+    phase_index: int,
+) -> str:
+    """Return a request ID that Home Assistant will not rewrite as an old ULID.
+
+    Home Assistant's chat session helper replaces a valid ULID conversation ID
+    with a fresh ULID to start a new conversation. A 26-character ID such as
+    ``benchmark-de-001-measure-0`` parses as a ULID, which would break the
+    benchmark's trace and diagnostics correlation, so keep request IDs longer
+    than ULIDs.
+    """
+    return f"benchmark-{label}-{case.case_id}-{phase}-{phase_index}"
+
+
 async def _execute_case_iterations(
     session: aiohttp.ClientSession,
     case: BenchmarkCase,
@@ -2253,8 +2270,8 @@ async def _execute_case_iterations(
             case,
             canonical_control,
             agent_id,
-            f"benchmark-{case.case_id}-{phase}-{phase_index}",
-            f"benchmark-hassil-{case.case_id}-{phase}-{phase_index}",
+            _case_request_id("canonical", case, phase, phase_index),
+            _case_request_id("hassil", case, phase, phase_index),
         )
         execution.last_observation = run.observation
         execution.last_diagnostics = run.diagnostics

@@ -133,7 +133,13 @@ def _recognition_calls_or_error(
         return "agent_unavailable"
 
     recognize_trigger = getattr(default_agent, "async_recognize_sentence_trigger", None)
-    recognize_intent = getattr(default_agent, "async_recognize_intent", None)
+    recognize_intent = getattr(default_agent, "async_recognize_intents", None)
+    intent_recognizer_name = "async_recognize_intents"
+    intent_recognizer_returns_list = True
+    if not callable(recognize_intent):
+        recognize_intent = getattr(default_agent, "async_recognize_intent", None)
+        intent_recognizer_name = "async_recognize_intent"
+        intent_recognizer_returns_list = False
     if not callable(recognize_trigger) or not callable(recognize_intent):
         return "recognition_api_unavailable"
 
@@ -148,8 +154,13 @@ def _recognition_calls_or_error(
         """Call the dynamically discovered intent recognizer."""
         result = recognize_intent(user_input)
         if not inspect.isawaitable(result):
-            raise TypeError("async_recognize_intent returned a non-awaitable result")
-        return await result
+            raise TypeError(f"{intent_recognizer_name} returned a non-awaitable result")
+        recognized = await result
+        if not intent_recognizer_returns_list:
+            return recognized
+        if not isinstance(recognized, list):
+            raise TypeError(f"{intent_recognizer_name} returned a non-list result")
+        return recognized[0] if recognized else None
 
     return call_recognize_trigger, call_recognize_intent
 
