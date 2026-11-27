@@ -19,10 +19,13 @@ from .const import (
     WILDCARD_LITERAL_COVERAGE_THRESHOLD,
     WILDCARD_STEM_ALIGNMENT_THRESHOLD,
 )
-from .normalization import normalize_text
+from .normalization import fold_case, normalize_text
 from .utils import wildcard_slot_names
 
 _TRAILING_DIGIT_RE = re.compile(r"\d\Z")
+# NFKC composes these half-width kana sound marks into the preceding kana
+# base even though Unicode classifies them as modifier letters, not marks.
+_HALFWIDTH_KANA_MARKS = frozenset(("\uff9e", "\uff9f"))
 
 
 class WildcardVariantAnalysis(NamedTuple):
@@ -67,7 +70,7 @@ def _contextual_norm_token_lists(
     lists: list[tuple[str, ...]] = []
     previous_ends_with_digit = False
     for original_token in original_tokens:
-        folded = unicodedata.normalize("NFKC", original_token).casefold()
+        folded = fold_case(unicodedata.normalize("NFKC", original_token))
         if previous_ends_with_digit:
             with_context = normalize_text(f"0 {original_token}")
             context_tokens = tuple(with_context.split())
@@ -141,34 +144,41 @@ def _extract_wc_value(
 
 
 def _surface_prefix_length(value: str, folded_prefix: str) -> int:
-    """Return the surface char count whose casefold equals folded_prefix, or -1.
+    """Return the surface char count whose folded form equals folded_prefix, or -1.
 
-    Casefolding can change string length ("ß" folds to "ss"), so the
-    surface slice boundary must be found by accumulating per-character
-    fold lengths instead of reusing ``len(folded_prefix)``.
+    Folding can change string length ("ß" folds to "ss") and normalization
+    composes a base with its trailing marks ("I" + U+0307 folds like "İ"), so
+    the boundary must fall on a complete base-plus-mark group. Reusing
+    ``len(folded_prefix)`` or accumulating per-character folds can split a
+    group and leave stray marks in the wildcard value.
     """
-    target = len(folded_prefix)
-    total = 0
-    for index in range(len(value)):
-        total += len(value[index].casefold())
-        if total >= target:
-            if total == target and value[: index + 1].casefold() == folded_prefix:
-                return index + 1
-            return -1
-    return -1
+    if not folded_prefix:
+        return 0
+    folded, offsets = _folded_with_offsets(value)
+    if not folded.startswith(folded_prefix):
+        return -1
+    end = len(folded_prefix)
+    if end < len(folded) and offsets[end] == offsets[end - 1]:
+        return -1
+    return offsets[end]
 
 
 def _surface_suffix_length(value: str, folded_suffix: str) -> int:
-    """Return the surface char count whose casefold equals folded_suffix, or -1."""
-    target = len(folded_suffix)
-    total = 0
-    for count, index in enumerate(range(len(value) - 1, -1, -1), start=1):
-        total += len(value[index].casefold())
-        if total >= target:
-            if total == target and value[index:].casefold() == folded_suffix:
-                return count
-            return -1
-    return -1
+    """Return the surface char count whose folded form equals folded_suffix, or -1.
+
+    Like the prefix boundary, the suffix start must fall on a complete
+    base-plus-mark group. A folded suffix that starts inside a group (for
+    example, one "s" of a ``ß`` expansion) is unresolvable.
+    """
+    if not folded_suffix:
+        return 0
+    folded, offsets = _folded_with_offsets(value)
+    if not folded.endswith(folded_suffix):
+        return -1
+    start = len(folded) - len(folded_suffix)
+    if start and offsets[start] == offsets[start - 1]:
+        return -1
+    return len(value) - offsets[start]
 
 
 def _trim_wildcard_overlaps(wc_value: str, c_tok: str, matched_wc: str) -> str:
@@ -177,11 +187,11 @@ def _trim_wildcard_overlaps(wc_value: str, c_tok: str, matched_wc: str) -> str:
     if wc_pos != -1:
         c_suffix_part = c_tok[wc_pos + len(matched_wc) :]
         if c_prefix_part := c_tok[:wc_pos]:
-            prefix_length = _surface_prefix_length(wc_value, c_prefix_part.casefold())
+            prefix_length = _surface_prefix_length(wc_value, fold_case(c_prefix_part))
             if prefix_length != -1:
                 wc_value = wc_value[prefix_length:]
         if c_suffix_part:
-            suffix_length = _surface_suffix_length(wc_value, c_suffix_part.casefold())
+            suffix_length = _surface_suffix_length(wc_value, fold_case(c_suffix_part))
             if suffix_length != -1:
                 wc_value = wc_value[:-suffix_length]
     return wc_value
@@ -361,12 +371,13 @@ def rehydrate_wildcard_slots(
 
 @lru_cache(maxsize=4096)
 def _folded_with_offsets(o_tok: str) -> tuple[str, tuple[int, ...]]:
-    """Return NFKC-casefolded text with original-index offsets per folded char.
+    """Return NFKC-folded text with original-index offsets per folded char.
 
-    Normalized tokens come from ``normalize_text`` (NFKC + casefold), so
-    matching against ``str.lower()`` breaks for casefold-divergent characters
-    (``ß`` → ``ss``, ligatures, full-width forms). Folding per character keeps
-    an index map back into the original string for slicing.
+    Normalized tokens come from ``normalize_text`` (NFKC + fold), so
+    matching against ``str.lower()`` breaks for fold-divergent characters
+    (``ß`` → ``ss``, ligatures, full-width forms, Turkish U+0130/U+0131).
+    Folding per character keeps an index map back into the original string
+    for slicing.
     """
     if o_tok.isascii():
         return o_tok.lower(), tuple(range(len(o_tok) + 1))
@@ -379,10 +390,15 @@ def _folded_with_offsets(o_tok: str) -> tuple[str, tuple[int, ...]]:
         # marks so decomposed (NFD) input composes to the NFC forms that
         # whole-string normalization produces; folding characters one at a
         # time would leave "e" + U+0301 decomposed and break `find`.
+        # Half-width kana sound marks are modifier letters rather than marks,
+        # but NFKC still composes them with the preceding base, so group them
+        # too or the folded form stays decomposed and offsets split the pair.
         end = index + 1
-        while end < length and unicodedata.category(o_tok[end]).startswith("M"):
+        while end < length and (
+            unicodedata.category(o_tok[end]).startswith("M") or o_tok[end] in _HALFWIDTH_KANA_MARKS
+        ):
             end += 1
-        folded = unicodedata.normalize("NFKC", o_tok[index:end]).casefold()
+        folded = fold_case(unicodedata.normalize("NFKC", o_tok[index:end]))
         parts.append(folded)
         offsets.extend([index] * len(folded))
         index = end

@@ -67,10 +67,14 @@ from custom_components.assist_canonicalizer.ranking import (
 )
 from custom_components.assist_canonicalizer.rehydration import (
     WildcardVariantAnalysis,
+    _contextual_norm_token_lists,
     _extract_original_span,
     _extract_wc_value,
     _find_rehydration_boundaries,
+    _get_token_slice,
     _is_wildcard_literal_token,
+    _surface_prefix_length,
+    _surface_suffix_length,
     _trim_wildcard_overlaps,
     get_wildcard_rehydration,
     rehydrate_wildcard_slots,
@@ -4779,6 +4783,57 @@ def test_extract_original_span_composes_nfd_input() -> None:
 def test_trim_wildcard_overlaps_handles_casefold_expansion() -> None:
     """Trim glued literal prefixes whose casefold changes length ("ß" → "ss")."""
     assert _trim_wildcard_overlaps("Straßenlampe eins", "strassenitem", "item") == "lampe eins"
+
+
+def test_surface_prefix_length_keeps_decomposed_base_mark_group() -> None:
+    """Do not split a decomposed I plus dot when trimming a wildcard prefix."""
+    decomposed_i = "I\u0307"
+    assert _surface_prefix_length(f"{decomposed_i}rest", "i") == 2
+    assert _trim_wildcard_overlaps(f"{decomposed_i}rest", "iitem", "item") == "rest"
+
+
+def test_surface_suffix_length_keeps_decomposed_base_mark_group() -> None:
+    """Do not split a decomposed I plus dot when trimming a wildcard suffix."""
+    decomposed_i = "I\u0307"
+    assert _surface_suffix_length(f"rest{decomposed_i}", "i") == 2
+    assert _trim_wildcard_overlaps(f"rest{decomposed_i}", "itemi", "item") == "rest"
+
+
+def test_surface_lengths_preserve_casefold_expansion_boundaries() -> None:
+    """Refuse prefix and suffix boundaries that split a multi-character fold."""
+    assert _surface_prefix_length("Stra\u00dfenlampe", "strassen") == 7
+    assert _surface_prefix_length("Stra\u00dfenlampe", "strass") == 5
+    assert _surface_prefix_length("Stra\u00dfenlampe", "stras") == -1
+    assert _surface_suffix_length("Stra\u00df", "ss") == 1
+    assert _surface_suffix_length("Stra\u00df", "s") == -1
+
+
+def test_surface_prefix_length_keeps_halfwidth_kana_sound_mark_group() -> None:
+    """Compose half-width kana sound marks with their base before slicing."""
+    for halfwidth, composed, base in (
+        ("\uff76\uff9e", "\u30ac", "\u30ab"),
+        ("\uff8a\uff9f", "\u30d1", "\u30cf"),
+    ):
+        assert _surface_prefix_length(f"{halfwidth}rest", composed) == 2
+        assert _surface_prefix_length(f"{halfwidth}rest", base) == -1
+    assert _trim_wildcard_overlaps("\uff76\uff9erest", "\u30acitem", "item") == "rest"
+
+
+def test_get_token_slice_keeps_halfwidth_kana_sound_mark_group() -> None:
+    """Map composed normalized tokens back onto paired half-width kana."""
+    original = "\uff76\uff9e\uff72,salon"
+    norm_tokens = _contextual_norm_token_lists((original,))[0]
+    assert norm_tokens == ("\u30ac\u30a4", "salon")
+    assert _get_token_slice(original, norm_tokens, 0, 1) == "\uff76\uff9e\uff72"
+
+
+def test_rehydration_uses_turkish_i_fold_alignment() -> None:
+    """Slice and trim using the same fold as normalize_text for Turkish I."""
+    original = "I\u015f\u0131k,salon"
+    norm_tokens = _contextual_norm_token_lists((original,))[0]
+    assert norm_tokens == ("i\u015fik", "salon")
+    assert _get_token_slice(original, norm_tokens, 0, 1) == "I\u015f\u0131k"
+    assert _trim_wildcard_overlaps(original, "i\u015fikitem", "item") == ",salon"
 
 
 def test_ranking_internal_helpers() -> None:

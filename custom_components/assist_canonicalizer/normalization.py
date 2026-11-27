@@ -20,9 +20,20 @@ _NUMERIC_UNICODE_MINUS_RE = re.compile(
 )
 _WORD_JOIN_CONTROLS = frozenset(("\u200c", "\u200d"))
 
+# Match HassIL's fold_case() before Python casefold. ASCII "I"/"i" and the
+# Turkish dotless U+0131 / dotted U+0130 are equivalent under re.IGNORECASE,
+# but str.casefold() leaves U+0131 unchanged and expands U+0130 to "i" plus a
+# combining dot.
+_FOLD_CASE_TABLE = str.maketrans({"\u0130": "i", "\u0131": "i"})
+
 # Frozenset of source characters in GENERIC_LATIN_REPLACEMENTS for fast
 # membership testing via frozenset.isdisjoint (C-level, single-pass).
 _GENERIC_LATIN_CHARS: frozenset[str] = frozenset(GENERIC_LATIN_REPLACEMENTS)
+
+
+def fold_case(text: str) -> str:
+    """Fold case for matching, mirroring HassIL's re.IGNORECASE handling."""
+    return text.translate(_FOLD_CASE_TABLE).casefold()
 
 
 def _is_variation_selector(char: str) -> bool:
@@ -188,7 +199,7 @@ def normalize_text(text: str) -> str:
     placeholders before stripping normal punctuation. This ensures numeric values
     in canonicalized templates correctly match numeric values in input queries.
     """
-    normalized = unicodedata.normalize("NFKC", text).casefold()
+    normalized = fold_case(unicodedata.normalize("NFKC", text))
     if _HAS_DIGIT_RE.search(normalized) is not None:
         normalized = _NUMERIC_UNICODE_MINUS_RE.sub("-", normalized)
         with_placeholders = _PLACEHOLDER_MANAGER.apply(normalized)

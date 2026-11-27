@@ -70,6 +70,7 @@ _VENVS_ROOT = os.path.join(_REPO_ROOT, ".venvs")
 _VENV_DEPENDENCY_MARKER = ".assist_canonicalizer_test_dependencies.json"
 
 _AIODNS_PACKAGE = "aiodns"
+_AIOHASUPERVISOR_PACKAGE = "aiohasupervisor"
 _GAZETTEER_PACKAGE = "gazetteer-matcher"
 _HASSIL_PACKAGE = "hassil"
 _INTENTS_PACKAGE = "home-assistant-intents"
@@ -85,7 +86,7 @@ _HA_CONSTRAINED_TEST_DEPS = (
     _INTENTS_PACKAGE,
     *_ASSIST_RUNTIME_PACKAGES,
 )
-_OPTIONAL_HA_CONSTRAINED_TEST_DEPS = (_GAZETTEER_PACKAGE,)
+_OPTIONAL_HA_CONSTRAINED_TEST_DEPS = (_AIOHASUPERVISOR_PACKAGE, _GAZETTEER_PACKAGE)
 _REQUIRED_TEST_DEPS = (
     *_HA_CONSTRAINED_TEST_DEPS,
     "pytest",
@@ -425,8 +426,9 @@ def _resolve_test_dependency_versions(
             for package in _ASSIST_RUNTIME_PACKAGES
         },
     }
-    if gazetteer_version := _get_optional_package_version(ha_ver, _GAZETTEER_PACKAGE):
-        versions[_GAZETTEER_PACKAGE] = gazetteer_version
+    for package in _OPTIONAL_HA_CONSTRAINED_TEST_DEPS:
+        if package_version := _get_optional_package_version(ha_ver, package):
+            versions[package] = package_version
     return versions
 
 

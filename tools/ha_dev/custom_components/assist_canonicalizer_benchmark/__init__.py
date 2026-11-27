@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import logging
 import time
 from collections import Counter
@@ -156,20 +157,30 @@ async def _recognize_canonical(
 ) -> JsonObjectType:
     """Recognize a canonical control without handling it."""
     default_agent = async_get_agent(hass, HOME_ASSISTANT_AGENT)
-    recognize = getattr(default_agent, "async_recognize_intent", None)
-    if recognize is None:
-        raise RuntimeError("Home Assistant Default Agent recognition is unavailable")
-    result = await recognize(
-        ConversationInput(
-            text=call.data["text"],
-            context=call.context,
-            conversation_id=None,
-            device_id=call.data.get("device_id"),
-            satellite_id=call.data.get("satellite_id"),
-            language=call.data["language"],
-            agent_id=HOME_ASSISTANT_AGENT,
-        )
+    conversation_input = ConversationInput(
+        text=call.data["text"],
+        context=call.context,
+        conversation_id=None,
+        device_id=call.data.get("device_id"),
+        satellite_id=call.data.get("satellite_id"),
+        language=call.data["language"],
+        agent_id=HOME_ASSISTANT_AGENT,
     )
+    recognize_intents = getattr(default_agent, "async_recognize_intents", None)
+    if callable(recognize_intents):
+        pending_results = recognize_intents(conversation_input)
+        if not inspect.isawaitable(pending_results):
+            raise RuntimeError("async_recognize_intents returned a non-awaitable result")
+        results = await pending_results
+        result = results[0] if results else None
+    else:
+        recognize_intent = getattr(default_agent, "async_recognize_intent", None)
+        if not callable(recognize_intent):
+            raise RuntimeError("Home Assistant Default Agent recognition is unavailable")
+        pending_result = recognize_intent(conversation_input)
+        if not inspect.isawaitable(pending_result):
+            raise RuntimeError("async_recognize_intent returned a non-awaitable result")
+        result = await pending_result
     if result is None:
         return {"intent": None, "slots": {}, "unmatched_count": 0}
     return {
@@ -199,7 +210,7 @@ async def _prepare_media_case(
         )
 
 
-def _prepare_timer_case(
+async def _prepare_timer_case(
     hass: HomeAssistant,
     domain_data: Mapping[str, object],
     intent_name: str,
@@ -210,8 +221,12 @@ def _prepare_timer_case(
     if intent_name not in _TIMER_INTENTS:
         return
     timer_manager = hass.data[TIMER_DATA]
+    cancel_timer = getattr(timer_manager, "async_cancel_timer", None)
     for timer_id in tuple(timer_manager.timers):
-        timer_manager.cancel_timer(timer_id)
+        if cancel_timer is not None:
+            await cancel_timer(timer_id)
+        else:
+            timer_manager.cancel_timer(timer_id)
     if intent_name not in _TIMER_INTENTS_WITH_EXISTING_TIMER:
         return
     start_hours = _optional_int_slot(slots, "start_hours")
@@ -228,7 +243,11 @@ def _prepare_timer_case(
         name=_optional_string_slot(slots, "name"),
     )
     if intent_name == "HassUnpauseTimer":
-        timer_manager.pause_timer(timer_id)
+        pause_timer = getattr(timer_manager, "async_pause_timer", None)
+        if pause_timer is not None:
+            await pause_timer(timer_id)
+        else:
+            timer_manager.pause_timer(timer_id)
 
 
 def _prepare_list_case(
@@ -288,7 +307,7 @@ async def _prepare_case(
     if not isinstance(slots, dict):
         raise ValueError("Benchmark slots must be an object")
     await _prepare_media_case(hass, intent_name)
-    _prepare_timer_case(hass, domain_data, intent_name, language, slots)
+    await _prepare_timer_case(hass, domain_data, intent_name, language, slots)
     _prepare_list_case(domain_data, intent_name, slots)
     await _prepare_shopping_list_case(hass, intent_name, slots)
 

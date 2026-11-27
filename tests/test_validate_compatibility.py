@@ -2322,6 +2322,48 @@ def test_resolve_test_dependency_versions_includes_gazetteer_when_present(
     }
 
 
+def test_resolve_test_dependency_versions_includes_aiohasupervisor_when_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Install the Supervisor client when a Home Assistant release constrains it."""
+    versions_with_supervisor = {
+        **ASSIST_RUNTIME_VERSIONS,
+        "aiohasupervisor": "0.11.0",
+    }
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_get_home_assistant_intents_version",
+        lambda _ha_ver: "2026.12.0",
+    )
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_get_hassil_version",
+        lambda _ha_ver: "3.15.0",
+    )
+
+    def fake_required_version(_ha_ver: str, package: str) -> str:
+        if package in versions_with_supervisor:
+            return versions_with_supervisor[package]
+        raise validate_compatibility.PackageConstraintNotFoundError(package)
+
+    monkeypatch.setattr(
+        validate_compatibility,
+        "_get_required_package_version",
+        fake_required_version,
+    )
+
+    assert validate_compatibility._resolve_test_dependency_versions(
+        "2026.12.0b1",
+        "2026.12.0",
+    ) == {
+        "home-assistant-intents": "2026.12.0",
+        "hassil": "3.15.0",
+        "pytest-homeassistant": "2026.12.0",
+        **ASSIST_RUNTIME_VERSIONS,
+        "aiohasupervisor": "0.11.0",
+    }
+
+
 def test_resolve_test_dependency_versions_uses_new_harness_for_new_ha(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

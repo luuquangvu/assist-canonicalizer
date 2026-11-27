@@ -6,14 +6,18 @@ import importlib.metadata
 from collections import Counter
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import orjson
 import pytest
 from homeassistant.components.climate.const import ClimateEntityFeature
+from homeassistant.components.intent.const import TIMER_DATA
 
 from tools import benchmark
 from tools.ha_dev.custom_components.assist_canonicalizer_benchmark import (
+    BENCHMARK_DEVICE_ID,
+    _prepare_timer_case,
     _validate_manifest,
     fixture_fingerprint,
 )
@@ -78,6 +82,53 @@ def test_benchmark_fixture_contract_is_exact() -> None:
 def test_benchmark_fixture_fingerprint_is_reviewed() -> None:
     """Require intentional baseline review for any user-visible model change."""
     assert fixture_fingerprint(_manifest()) == EXPECTED_FINGERPRINT
+
+
+class _AsyncTimerManager:
+    """Minimal TimerManager using the Home Assistant 2026.12 async API."""
+
+    def __init__(self) -> None:
+        """Initialize an existing timer and call recorders."""
+        self.timers: dict[str, object] = {"existing": object()}
+        self.cancelled: list[str] = []
+        self.paused: list[str] = []
+        self.started: tuple[object, ...] | None = None
+
+    async def async_cancel_timer(self, timer_id: str) -> None:
+        """Record a cancelled timer."""
+        self.cancelled.append(timer_id)
+        self.timers.pop(timer_id, None)
+
+    def start_timer(
+        self,
+        device_id: object,
+        *,
+        hours: int | None,
+        minutes: int | None,
+        seconds: int | None,
+        language: str,
+        name: str | None,
+    ) -> str:
+        """Record timer start arguments and return a timer id."""
+        self.started = (device_id, hours, minutes, seconds, language, name)
+        return "new-timer"
+
+    async def async_pause_timer(self, timer_id: str) -> None:
+        """Record a paused timer."""
+        self.paused.append(timer_id)
+
+
+@pytest.mark.asyncio
+async def test_prepare_timer_case_uses_async_timer_manager_api() -> None:
+    """Prepare timers through the async TimerManager API used by HA 2026.12."""
+    manager = _AsyncTimerManager()
+    hass: Any = SimpleNamespace(data={TIMER_DATA: manager})
+
+    await _prepare_timer_case(hass, {}, "HassUnpauseTimer", "en", {})
+
+    assert manager.cancelled == ["existing"]
+    assert manager.started == (BENCHMARK_DEVICE_ID, None, 10, None, "en", None)
+    assert manager.paused == ["new-timer"]
 
 
 def test_benchmark_configuration_is_deterministic_and_loopback_only() -> None:

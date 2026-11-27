@@ -9,6 +9,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from ulid_transform import ulid_to_bytes
 
 from tools import benchmark
 
@@ -36,6 +37,35 @@ def test_live_benchmark_has_no_production_reimplementation_imports() -> None:
         for imported in imported_modules
         if any(imported.endswith(suffix) for suffix in forbidden_suffixes)
     }
+
+
+def test_case_request_ids_are_not_valid_ulids() -> None:
+    """Keep request correlation when Home Assistant starts a new chat session."""
+    case = benchmark.BenchmarkCase(
+        case_id="de-001",
+        language="de",
+        query="schalte das wohnzimmerlicht ein",
+        oracle="intent_slot",
+        category="turn_on",
+        expected_intent="HassTurnOn",
+        expected_canonical="schalte das Wohnzimmerlicht ein",
+        expected_slots={},
+        expected_fallback=False,
+        satellite_id=None,
+        expected_response_type=None,
+        expected_target_id=None,
+        expected_state=None,
+        setup=None,
+    )
+
+    conversation_id = benchmark._case_request_id("canonical", case, "measure", 0)
+    baseline_conversation_id = benchmark._case_request_id("hassil", case, "measure", 0)
+
+    assert conversation_id == "benchmark-canonical-de-001-measure-0"
+    assert baseline_conversation_id == "benchmark-hassil-de-001-measure-0"
+    for request_id in (conversation_id, baseline_conversation_id):
+        with pytest.raises(ValueError, match="26 character"):
+            ulid_to_bytes(request_id)
 
 
 def test_live_benchmark_cli_exposes_only_managed_execution() -> None:
